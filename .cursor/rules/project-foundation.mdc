@@ -1,0 +1,22 @@
+---
+description: SharedFate project foundation and coding intent
+alwaysApply: true
+---
+# SharedFate Project Foundation
+## What this project is
+- Shared Fate is an Isometric CRPG. The game is made of 2d sprites, and a simple old style CRPG look. The player is controlling a character who has 3 persons trapped in one: the warrior, the rogue and the wizard. The player moves around the map using the mouse, and when a combat happens we will switch to turn based grid mode to do the fights. The player can switch between these three characters during combat and perform actions. We will make our own fighting rules.
+- Primary users: [who]
+- Core workflows: Older audience who loves the classic CRPG, and want a simple story. The game should be story rich filled with mysteries.
+- Non-goals: Create advanced graphics or system for persons who loves intricate building.
+- Use these domain terms consistently: TBA
+- Avoid ambiguous synonyms: TBA
+## Coding intent
+- Prefer readable, incremental changes over large rewrites.
+- Preserve existing architecture boundaries unless explicitly asked.
+- Minimize dependencies and keep implementation simple.
+- Use Godot 4.6
+## Definition of done
+- Code is understandable and consistent with existing patterns.
+- Edge cases and errors are handled intentionally.
+- Changes include or update tests where relevant.
+- Briefly explain tradeoffs when making non-obvious decisions.

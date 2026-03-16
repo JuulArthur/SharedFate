@@ -1,0 +1,16 @@
+# Godot project files to keep out of version control
+.import/
+.godot/
+
+# Export presets often contain local machine paths
+export.cfg
+export_presets.cfg
+
+# Godot Mono/C# build artifacts
+.mono/
+data_*/
+mono_crash.*.json
+
+# OS/editor noise
+.DS_Store
+*.swp
