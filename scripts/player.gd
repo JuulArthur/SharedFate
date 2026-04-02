@@ -3,7 +3,8 @@ extends CharacterBody2D
 @export var move_speed := 220.0
 @export var max_health := 100
 @export var attack_damage := 20
-@export var attack_range := 28.0
+@export var attack_range := 40.0
+@export var attack_approach_buffer := 6.0
 @export var attack_cooldown := 0.35
 @export var attack_animation_speed_scale := 1.6
 @export var target_refresh_interval := 0.2
@@ -26,12 +27,15 @@ var turn_attack_available := false
 var facing_direction := Vector2.RIGHT
 var attack_slash: Sprite2D
 var sprite_idle_position := Vector2.ZERO
+var manual_path_points: Array[Vector2] = []
+var manual_path_index := 0
 
 
 func _ready() -> void:
 	_ensure_collision_shape()
 	collision_layer = 2
-	collision_mask = 1
+	# Collide with world (1) and enemies (4).
+	collision_mask = 1 | 4
 
 	navigation_agent.navigation_layers = 1
 	navigation_agent.path_desired_distance = 4.0
@@ -56,6 +60,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if _process_manual_path_movement():
+		return
+
 	if in_turn_based_combat:
 		if navigation_agent.is_navigation_finished():
 			velocity = Vector2.ZERO
@@ -111,9 +118,17 @@ func snap_to(world_position: Vector2) -> void:
 
 func set_navigation_target(world_position: Vector2) -> void:
 	clear_attack_target()
+	manual_path_points.clear()
+	manual_path_index = 0
 	var nav_map_rid := navigation_agent.get_navigation_map()
 	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, world_position)
 	navigation_agent.target_position = closest_nav_point
+
+
+func set_navigation_path(points: Array[Vector2]) -> void:
+	manual_path_points = points.duplicate()
+	manual_path_index = 0
+	navigation_agent.target_position = global_position
 
 
 func set_attack_target(target: Node2D) -> void:
@@ -193,8 +208,23 @@ func _refresh_attack_target_position() -> void:
 		return
 
 	var nav_map_rid := navigation_agent.get_navigation_map()
-	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, attack_target.global_position)
+	var approach_point := _compute_approach_point(attack_target.global_position, get_preferred_attack_approach_distance())
+	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, approach_point)
 	navigation_agent.target_position = closest_nav_point
+
+
+func _compute_approach_point(target_world_position: Vector2, stop_distance: float) -> Vector2:
+	var to_mover := global_position - target_world_position
+	var distance := to_mover.length()
+	if distance <= stop_distance:
+		return global_position
+	if distance <= 0.001:
+		return target_world_position
+	return target_world_position + (to_mover / distance) * stop_distance
+
+
+func get_preferred_attack_approach_distance() -> float:
+	return maxf(4.0, attack_range - attack_approach_buffer)
 
 
 func _apply_attack_damage() -> void:
@@ -353,7 +383,7 @@ func _ensure_collision_shape() -> void:
 	if circle == null:
 		circle = CircleShape2D.new()
 		collision_shape.shape = circle
-	circle.radius = 10.0
+	circle.radius = 14.0
 	collision_shape.position = Vector2(0, -2)
 
 
@@ -409,6 +439,8 @@ func _on_navigation_agent_2d_velocity_computed(safe_velocity: Vector2) -> void:
 func stop_movement_immediately() -> void:
 	velocity = Vector2.ZERO
 	navigation_agent.target_position = global_position
+	manual_path_points.clear()
+	manual_path_index = 0
 	clear_attack_target()
 	move_and_slide()
 
@@ -465,8 +497,29 @@ func get_turn_remaining_move_cells() -> int:
 
 
 func is_moving() -> bool:
-	return not navigation_agent.is_navigation_finished()
+	return manual_path_index < manual_path_points.size() or not navigation_agent.is_navigation_finished()
 
 
 func is_alive() -> bool:
 	return current_health > 0
+
+
+func _process_manual_path_movement() -> bool:
+	if manual_path_index >= manual_path_points.size():
+		return false
+
+	var next_point := manual_path_points[manual_path_index]
+	var to_next := next_point - global_position
+	if to_next.length() <= 4.0:
+		manual_path_index += 1
+		if manual_path_index >= manual_path_points.size():
+			velocity = Vector2.ZERO
+			move_and_slide()
+			return true
+		next_point = manual_path_points[manual_path_index]
+		to_next = next_point - global_position
+
+	velocity = to_next.normalized() * move_speed
+	_update_facing_from_velocity(velocity)
+	move_and_slide()
+	return true

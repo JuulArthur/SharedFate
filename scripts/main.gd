@@ -14,6 +14,7 @@ const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
 const ENEMY_SPAWN_OFFSET := Vector2i(6, -6)
 const ENEMY_SPAWN_SEARCH_RADIUS := 14
 const ENEMY_TURN_DELAY_SECONDS := 1.0
+const TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS := 20.0
 
 enum CombatState {
 	EXPLORATION,
@@ -38,11 +39,15 @@ var border_source_id: int = -1
 var obstacle_a_source_id: int = -1
 var obstacle_b_source_id: int = -1
 var blocked_cells: Dictionary = {}
+var enemy_blocked_cells: Dictionary = {}
 var astar_grid: AStarGrid2D = AStarGrid2D.new()
 var active_nav_layer: TileMapLayer
 var enemy: CharacterBody2D
+var extra_enemies: Array[CharacterBody2D] = []
 var combat_state: CombatState = CombatState.EXPLORATION
 var enemy_turn_running := false
+var active_enemy_turn_actor: CharacterBody2D
+var hovered_enemy: CharacterBody2D
 var player_turn_action_running := false
 var turn_ui_layer: CanvasLayer
 var turn_ui_panel: PanelContainer
@@ -52,9 +57,9 @@ var turn_ui_move_label: Label
 var turn_ui_attack_label: Label
 var turn_ui_order_panel: PanelContainer
 var turn_ui_player_icon: TextureRect
-var turn_ui_enemy_icon: TextureRect
 var turn_ui_player_label: Label
-var turn_ui_enemy_label: Label
+var turn_ui_enemy_icons_container: HBoxContainer
+var turn_ui_enemy_icon_entries: Array[Dictionary] = []
 
 
 func _ready() -> void:
@@ -66,6 +71,9 @@ func _ready() -> void:
 	_rebuild_navigation_for_layer(active_nav_layer)
 	_place_player()
 	_spawn_enemy()
+	var second_enemy := _spawn_additional_enemy(Vector2i(-ENEMY_SPAWN_OFFSET.x, ENEMY_SPAWN_OFFSET.y), "Enemy2")
+	if second_enemy != null:
+		extra_enemies.append(second_enemy)
 	_center_camera()
 
 
@@ -73,6 +81,7 @@ func _process(delta: float) -> void:
 	var weight := clampf(delta * CAMERA_FOLLOW_SPEED, 0.0, 1.0)
 	camera_2d.global_position = camera_2d.global_position.lerp(player.global_position, weight)
 	_update_combat_state()
+	_update_enemy_hover_state()
 	_update_turn_ui()
 
 
@@ -86,41 +95,49 @@ func _unhandled_input(event: InputEvent) -> void:
 		var clicked_enemy := _get_enemy_at_position(click_position)
 		if clicked_enemy != null and player.has_method("set_attack_target"):
 			player.call("set_attack_target", clicked_enemy)
+			# Also route through closest-reachable movement, so enemy clicks behave
+			# like obstacle clicks when the exact point is invalid/too tight.
+			_request_player_move(clicked_enemy.global_position, -1, true)
 		elif player.has_method("clear_attack_target"):
 			player.call("clear_attack_target")
-			_request_player_move(click_position)
+			_request_player_move(click_position, -1, true)
 		else:
-			_request_player_move(click_position)
+			_request_player_move(click_position, -1, true)
 	elif event.is_action_pressed("ui_accept"):
 		_request_player_attack()
 		get_viewport().set_input_as_handled()
 
 
 func _spawn_enemy() -> void:
-	enemy = CharacterBody2D.new()
-	enemy.name = "Enemy"
-	enemy.z_index = 4
-	enemy.script = load("res://scripts/enemy.gd")
+	enemy = _spawn_additional_enemy(ENEMY_SPAWN_OFFSET, "Enemy")
+
+
+func _spawn_additional_enemy(offset_from_player: Vector2i, enemy_name: String) -> CharacterBody2D:
+	var enemy_actor := CharacterBody2D.new()
+	enemy_actor.name = enemy_name
+	enemy_actor.z_index = 4
+	enemy_actor.script = load("res://scripts/enemy.gd")
 
 	var collision_shape := CollisionShape2D.new()
 	collision_shape.name = "CollisionShape2D"
-	enemy.add_child(collision_shape)
+	enemy_actor.add_child(collision_shape)
 
 	var navigation_agent := NavigationAgent2D.new()
 	navigation_agent.name = "NavigationAgent2D"
 	navigation_agent.path_desired_distance = 4.0
 	navigation_agent.target_desired_distance = 8.0
-	enemy.add_child(navigation_agent)
+	enemy_actor.add_child(navigation_agent)
 
 	var sprite := Sprite2D.new()
 	sprite.name = "Sprite2D"
 	sprite.position = Vector2(0, -16)
-	enemy.add_child(sprite)
+	enemy_actor.add_child(sprite)
 
-	add_child(enemy)
-	_place_enemy_on_layer(custom_background)
-	if enemy.has_method("set_target"):
-		enemy.call("set_target", player)
+	add_child(enemy_actor)
+	_place_enemy_on_layer(enemy_actor, custom_background, offset_from_player)
+	if enemy_actor.has_method("set_target"):
+		enemy_actor.call("set_target", player)
+	return enemy_actor
 
 
 func _load_custom_layout_mode() -> void:
@@ -190,8 +207,8 @@ func _place_player_on_layer(layer: TileMapLayer) -> void:
 		player.global_position = spawn_position
 
 
-func _place_enemy_on_layer(layer: TileMapLayer) -> void:
-	if enemy == null or not is_instance_valid(enemy):
+func _place_enemy_on_layer(enemy_actor: CharacterBody2D, layer: TileMapLayer, offset_from_player: Vector2i) -> void:
+	if enemy_actor == null or not is_instance_valid(enemy_actor):
 		return
 	if layer == null:
 		return
@@ -201,14 +218,14 @@ func _place_enemy_on_layer(layer: TileMapLayer) -> void:
 		return
 
 	var player_cell := layer.local_to_map(layer.to_local(player.global_position))
-	var preferred_cell := player_cell + ENEMY_SPAWN_OFFSET
+	var preferred_cell := player_cell + offset_from_player
 	var spawn_cell := _find_nearest_walkable_spawn_cell(layer, preferred_cell, ENEMY_SPAWN_SEARCH_RADIUS)
 	var spawn_position := layer.map_to_local(spawn_cell)
 
-	if enemy.has_method("snap_to"):
-		enemy.call("snap_to", spawn_position)
+	if enemy_actor.has_method("snap_to"):
+		enemy_actor.call("snap_to", spawn_position)
 	else:
-		enemy.global_position = spawn_position
+		enemy_actor.global_position = spawn_position
 
 
 func _find_nearest_walkable_spawn_cell(layer: TileMapLayer, origin: Vector2i, max_radius: int) -> Vector2i:
@@ -236,11 +253,12 @@ func _find_nearest_walkable_spawn_cell(layer: TileMapLayer, origin: Vector2i, ma
 
 
 func _request_player_attack() -> void:
-	if enemy == null or not is_instance_valid(enemy):
-		return
 	if not player.has_method("try_attack"):
 		return
-	player.call("try_attack", enemy)
+	var target_enemy := _get_closest_enemy_to_player()
+	if target_enemy == null:
+		return
+	player.call("try_attack", target_enemy)
 
 
 func _handle_turn_input(event: InputEvent) -> void:
@@ -254,8 +272,8 @@ func _handle_turn_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		var click_position := get_global_mouse_position()
 		var clicked_enemy := _get_enemy_at_position(click_position)
-		if clicked_enemy == enemy:
-			_request_player_turn_engage_enemy()
+		if clicked_enemy != null:
+			_request_player_turn_engage_enemy(clicked_enemy as CharacterBody2D)
 		else:
 			_request_player_turn_move(click_position)
 		get_viewport().set_input_as_handled()
@@ -265,7 +283,7 @@ func _handle_turn_input(event: InputEvent) -> void:
 
 
 func _update_combat_state() -> void:
-	var enemy_alive := enemy != null and is_instance_valid(enemy)
+	var enemy_alive := not _get_all_alive_enemies().is_empty()
 	var player_alive: bool = true
 	if player.has_method("is_alive"):
 		player_alive = bool(player.call("is_alive"))
@@ -286,29 +304,33 @@ func _update_combat_state() -> void:
 func _is_close_enough_for_combat_start() -> bool:
 	if active_nav_layer == null:
 		return false
-	if enemy == null or not is_instance_valid(enemy):
-		return false
 
 	var player_cell: Vector2i = _world_to_cell(active_nav_layer, player.global_position)
-	var enemy_cell: Vector2i = _world_to_cell(active_nav_layer, enemy.global_position)
-	var manhattan_distance: int = abs(player_cell.x - enemy_cell.x) + abs(player_cell.y - enemy_cell.y)
-	return manhattan_distance <= COMBAT_TRIGGER_DISTANCE_CELLS
+	for enemy_actor in _get_all_alive_enemies():
+		var enemy_cell: Vector2i = _world_to_cell(active_nav_layer, enemy_actor.global_position)
+		var manhattan_distance: int = abs(player_cell.x - enemy_cell.x) + abs(player_cell.y - enemy_cell.y)
+		if manhattan_distance <= COMBAT_TRIGGER_DISTANCE_CELLS:
+			return true
+	return false
 
 
 func _start_turn_based_combat() -> void:
 	_stop_all_combatants_immediately()
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
+	active_enemy_turn_actor = null
 
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", true)
-	if enemy != null and enemy.has_method("set_turn_based_combat"):
-		enemy.call("set_turn_based_combat", true)
+	for enemy_actor in _get_all_alive_enemies():
+		if enemy_actor.has_method("set_turn_based_combat"):
+			enemy_actor.call("set_turn_based_combat", true)
 
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
-	if enemy != null and enemy.has_method("end_turn"):
-		enemy.call("end_turn")
+	for enemy_actor in _get_all_alive_enemies():
+		if enemy_actor.has_method("end_turn"):
+			enemy_actor.call("end_turn")
 
 	print("Turn-based combat started")
 	_update_turn_ui()
@@ -320,21 +342,25 @@ func _stop_all_combatants_immediately() -> void:
 	elif player != null and player.has_method("set_navigation_target"):
 		player.call("set_navigation_target", player.global_position)
 
-	if enemy != null and is_instance_valid(enemy):
-		if enemy.has_method("stop_movement_immediately"):
-			enemy.call("stop_movement_immediately")
-		elif enemy.has_method("set_navigation_target"):
-			enemy.call("set_navigation_target", enemy.global_position)
+	for enemy_actor in _get_all_alive_enemies():
+		if enemy_actor.has_method("stop_movement_immediately"):
+			enemy_actor.call("stop_movement_immediately")
+		elif enemy_actor.has_method("set_navigation_target"):
+			enemy_actor.call("set_navigation_target", enemy_actor.global_position)
 
 
 func _end_turn_based_combat() -> void:
 	combat_state = CombatState.EXPLORATION
 	enemy_turn_running = false
+	active_enemy_turn_actor = null
+	_set_hovered_enemy(null)
+	active_enemy_turn_actor = null
 
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", false)
-	if enemy != null and is_instance_valid(enemy) and enemy.has_method("set_turn_based_combat"):
-		enemy.call("set_turn_based_combat", false)
+	for enemy_actor in _get_all_alive_enemies():
+		if enemy_actor.has_method("set_turn_based_combat"):
+			enemy_actor.call("set_turn_based_combat", false)
 
 	print("Turn-based combat ended")
 	_update_turn_ui()
@@ -363,35 +389,39 @@ func _request_player_turn_move(target_world_position: Vector2) -> void:
 		_begin_enemy_turn()
 
 
-func _request_player_turn_attack() -> void:
+func _request_player_turn_attack(target_enemy: CharacterBody2D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
-		return
-	if enemy == null or not is_instance_valid(enemy):
 		return
 	if not player.has_method("can_turn_attack"):
 		return
 	if not player.call("can_turn_attack"):
 		return
-	if player.global_position.distance_to(enemy.global_position) > float(player.get("attack_range")):
+	if target_enemy == null:
+		target_enemy = _get_closest_enemy_to_player()
+	if target_enemy == null:
+		return
+	if player.global_position.distance_to(target_enemy.global_position) > float(player.get("attack_range")):
 		return
 
-	player.call("try_attack", enemy)
+	player.call("try_attack", target_enemy)
 	_begin_enemy_turn()
 
 
-func _request_player_turn_engage_enemy() -> void:
+func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
-	if enemy == null or not is_instance_valid(enemy):
-		return
 	if player_turn_action_running:
+		return
+	if target_enemy == null:
+		target_enemy = _get_closest_enemy_to_player()
+	if target_enemy == null:
 		return
 
 	player_turn_action_running = true
 
 	# If already in range, attack immediately.
 	if _player_can_attack_enemy_now():
-		_request_player_turn_attack()
+		_request_player_turn_attack(target_enemy)
 		player_turn_action_running = false
 		return
 
@@ -401,7 +431,11 @@ func _request_player_turn_engage_enemy() -> void:
 
 	var remaining_meters := float(player.call("get_turn_remaining_move_meters"))
 	if remaining_meters > 0.0:
-		var used_meters := _request_player_turn_move_by_distance(enemy.global_position, remaining_meters)
+		var player_approach_distance := float(player.get("attack_range"))
+		if player.has_method("get_preferred_attack_approach_distance"):
+			player_approach_distance = float(player.call("get_preferred_attack_approach_distance"))
+		var approach_point := _compute_approach_world_point(player.global_position, target_enemy.global_position, player_approach_distance)
+		var used_meters := _request_player_turn_move_by_distance(approach_point, remaining_meters)
 		if used_meters > 0.0:
 			if player.has_method("consume_turn_movement_meters"):
 				player.call("consume_turn_movement_meters", used_meters)
@@ -417,7 +451,7 @@ func _request_player_turn_engage_enemy() -> void:
 					return
 
 	if _player_can_attack_enemy_now():
-		_request_player_turn_attack()
+		_request_player_turn_attack(target_enemy)
 	else:
 		var move_left := 0.0
 		if player.has_method("get_turn_remaining_move_meters"):
@@ -443,52 +477,57 @@ func _run_enemy_turn() -> void:
 		return
 	if enemy_turn_running:
 		return
-	if enemy == null or not is_instance_valid(enemy):
+	var alive_enemies := _get_all_alive_enemies()
+	if alive_enemies.is_empty():
 		_end_turn_based_combat()
 		return
 
 	enemy_turn_running = true
 	await get_tree().create_timer(ENEMY_TURN_DELAY_SECONDS).timeout
-	if combat_state != CombatState.ENEMY_TURN or enemy == null or not is_instance_valid(enemy):
+	if combat_state != CombatState.ENEMY_TURN:
 		enemy_turn_running = false
 		return
 
-	if enemy.has_method("start_turn"):
-		enemy.call("start_turn", ENEMY_TURN_MOVE_CELLS)
+	for enemy_actor in _get_all_alive_enemies():
+		active_enemy_turn_actor = enemy_actor
+		if enemy_actor.has_method("start_turn"):
+			enemy_actor.call("start_turn", ENEMY_TURN_MOVE_CELLS)
 
-	var used_cells := _request_enemy_move_towards_player(ENEMY_TURN_MOVE_CELLS)
-	if used_cells > 0 and enemy.has_method("consume_turn_movement"):
-		enemy.call("consume_turn_movement", used_cells)
+		var used_cells := _request_enemy_move_towards_player(enemy_actor, ENEMY_TURN_MOVE_CELLS)
+		if used_cells > 0 and enemy_actor.has_method("consume_turn_movement"):
+			enemy_actor.call("consume_turn_movement", used_cells)
 
-	if enemy.has_method("is_moving"):
-		while enemy.call("is_moving"):
-			await get_tree().physics_frame
-			if combat_state != CombatState.ENEMY_TURN or enemy == null or not is_instance_valid(enemy):
-				enemy_turn_running = false
-				return
+		if enemy_actor.has_method("is_moving"):
+			while enemy_actor.call("is_moving"):
+				await get_tree().physics_frame
+				if combat_state != CombatState.ENEMY_TURN:
+					enemy_turn_running = false
+					return
+				if not is_instance_valid(enemy_actor):
+					break
 
-	if enemy != null and is_instance_valid(enemy):
-		if enemy.has_method("try_attack"):
-			enemy.call("try_attack", player)
-
-	if enemy != null and is_instance_valid(enemy) and enemy.has_method("end_turn"):
-		enemy.call("end_turn")
+		if is_instance_valid(enemy_actor) and enemy_actor.has_method("try_attack"):
+			enemy_actor.call("try_attack", player)
+		if is_instance_valid(enemy_actor) and enemy_actor.has_method("end_turn"):
+			enemy_actor.call("end_turn")
 
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
+	active_enemy_turn_actor = null
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
 	_update_turn_ui()
 
 
 func _player_can_attack_enemy_now() -> bool:
-	if enemy == null or not is_instance_valid(enemy):
-		return false
 	if not player.has_method("can_turn_attack"):
 		return false
 	if not player.call("can_turn_attack"):
 		return false
-	return player.global_position.distance_to(enemy.global_position) <= float(player.get("attack_range"))
+	var target_enemy := _get_closest_enemy_to_player()
+	if target_enemy == null:
+		return false
+	return player.global_position.distance_to(target_enemy.global_position) <= float(player.get("attack_range"))
 
 
 func _get_enemy_at_position(world_position: Vector2) -> Node2D:
@@ -503,10 +542,12 @@ func _get_enemy_at_position(world_position: Vector2) -> Node2D:
 		var collider := hit.get("collider") as Object
 		if collider == null:
 			continue
-		if collider == enemy:
-			return enemy
-		if collider.has_method("receive_damage") and collider is Node2D:
-			return collider as Node2D
+		if not (collider is Node2D):
+			continue
+		var candidate := collider as Node2D
+		for enemy_actor in _get_all_alive_enemies():
+			if candidate == enemy_actor:
+				return enemy_actor
 
 	return null
 
@@ -612,42 +653,190 @@ func _rebuild_navigation_for_layer(layer: TileMapLayer) -> void:
 	for x in range(used_rect.position.x, used_rect.position.x + used_rect.size.x):
 		for y in range(used_rect.position.y, used_rect.position.y + used_rect.size.y):
 			var cell := Vector2i(x, y)
-			astar_grid.set_point_solid(cell, blocked_cells.has(cell))
+			astar_grid.set_point_solid(cell, blocked_cells.has(cell) or enemy_blocked_cells.has(cell))
 
 
 func _request_player_move(target_world_position: Vector2, max_cells: int = -1, avoid_enemy_cell: bool = false) -> int:
 	if active_nav_layer == null:
 		return 0
-	var cell_path := _build_cell_path_from_navigation(player.global_position, target_world_position)
-	if cell_path.size() <= 1:
+	if avoid_enemy_cell:
+		_refresh_enemy_blocked_cells()
+	else:
+		enemy_blocked_cells.clear()
+	_rebuild_navigation_for_layer(active_nav_layer)
+	if astar_grid.region.size == Vector2i.ZERO:
 		return 0
 
-	if avoid_enemy_cell and enemy != null and is_instance_valid(enemy):
-		var enemy_cell := _world_to_cell(active_nav_layer, enemy.global_position)
-		while cell_path.size() > 1 and cell_path[cell_path.size() - 1] == enemy_cell:
-			cell_path.remove_at(cell_path.size() - 1)
-		if cell_path.size() <= 1:
-			return 0
+	var from_cell := _world_to_cell(active_nav_layer, player.global_position)
+	if not astar_grid.is_in_boundsv(from_cell):
+		return 0
 
-	var total_steps := cell_path.size() - 1
+	var to_cell := _world_to_cell(active_nav_layer, target_world_position)
+	to_cell = _clamp_cell_to_region(to_cell, astar_grid.region)
+
+	var id_path := _build_astar_id_path(from_cell, to_cell, [])
+	if id_path.size() <= 1:
+		return 0
+
+	var total_steps := id_path.size() - 1
 	var used_steps := total_steps
 	if max_cells >= 0:
 		used_steps = mini(total_steps, max_cells)
 
-	var destination_cell := cell_path[used_steps]
-	var destination_world := active_nav_layer.map_to_local(destination_cell)
-	if player.has_method("set_navigation_target"):
+	var truncated_path: Array[Vector2i] = id_path.slice(0, used_steps + 1)
+	var valid_index := _find_farthest_valid_player_path_index(truncated_path)
+	if valid_index <= 0:
+		return 0
+
+	used_steps = valid_index
+	var world_path: Array[Vector2] = []
+	for i in range(1, valid_index + 1):
+		world_path.append(active_nav_layer.map_to_local(truncated_path[i]))
+
+	if player.has_method("set_navigation_path"):
+		player.call("set_navigation_path", world_path)
+	elif player.has_method("set_navigation_target"):
+		var destination_cell := truncated_path[valid_index]
+		var destination_world := active_nav_layer.map_to_local(destination_cell)
 		player.call("set_navigation_target", destination_world)
 	return used_steps
 
 
-func _request_enemy_move_towards_player(max_cells: int) -> int:
+func _collect_enemy_personal_space_cells() -> Array[Vector2i]:
+	var blocked: Array[Vector2i] = []
+	if active_nav_layer == null:
+		return blocked
+
+	var used_rect := astar_grid.region
+	if used_rect.size == Vector2i.ZERO:
+		return blocked
+
+	var player_radius := _get_character_collision_radius(player)
+	for enemy_actor in _get_all_alive_enemies():
+		var enemy_cell := _world_to_cell(active_nav_layer, enemy_actor.global_position)
+		var enemy_radius := _get_character_collision_radius(enemy_actor)
+		var clearance_world := player_radius + enemy_radius + 6.0
+		if combat_state != CombatState.EXPLORATION:
+			clearance_world += TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS
+
+		var sample_cell_radius := int(ceili(clearance_world / maxf(1.0, float(TILE_SIZE.y)))) + 2
+		for dx in range(-sample_cell_radius, sample_cell_radius + 1):
+			for dy in range(-sample_cell_radius, sample_cell_radius + 1):
+				var cell := enemy_cell + Vector2i(dx, dy)
+				if not used_rect.has_point(cell):
+					continue
+
+				var cell_world := active_nav_layer.map_to_local(cell)
+				if cell_world.distance_to(enemy_actor.global_position) <= clearance_world and blocked.find(cell) == -1:
+					blocked.append(cell)
+
+		# Ensure the enemy's own cell is always blocked.
+		if blocked.find(enemy_cell) == -1:
+			blocked.append(enemy_cell)
+
+	return blocked
+
+
+func _refresh_enemy_blocked_cells(excluded_enemy: CharacterBody2D = null) -> void:
+	enemy_blocked_cells.clear()
+	if active_nav_layer == null:
+		return
+	if astar_grid.region.size == Vector2i.ZERO:
+		return
+
+	var used_rect := astar_grid.region
+	var player_radius := _get_character_collision_radius(player)
+
+	for enemy_actor in _get_all_alive_enemies():
+		if excluded_enemy != null and enemy_actor == excluded_enemy:
+			continue
+
+		var enemy_cell := _world_to_cell(active_nav_layer, enemy_actor.global_position)
+		var enemy_radius := _get_character_collision_radius(enemy_actor)
+		var clearance_world := player_radius + enemy_radius + 6.0
+		if combat_state != CombatState.EXPLORATION:
+			clearance_world += TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS
+
+		var sample_cell_radius := int(ceili(clearance_world / maxf(1.0, float(TILE_SIZE.y)))) + 2
+		for dx in range(-sample_cell_radius, sample_cell_radius + 1):
+			for dy in range(-sample_cell_radius, sample_cell_radius + 1):
+				var cell := enemy_cell + Vector2i(dx, dy)
+				if not used_rect.has_point(cell):
+					continue
+				var cell_world := active_nav_layer.map_to_local(cell)
+				if cell_world.distance_to(enemy_actor.global_position) <= clearance_world:
+					enemy_blocked_cells[cell] = true
+
+		enemy_blocked_cells[enemy_cell] = true
+
+
+func _get_character_collision_radius(character: Node) -> float:
+	if character == null:
+		return 10.0
+	var shape_node := character.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if shape_node == null:
+		return 10.0
+	var circle := shape_node.shape as CircleShape2D
+	if circle == null:
+		return 10.0
+	return circle.radius
+
+
+func _find_farthest_valid_player_path_index(cell_path: Array[Vector2i]) -> int:
+	if cell_path.size() <= 1:
+		return 0
+	for i in range(cell_path.size() - 1, 0, -1):
+		var world_pos := active_nav_layer.map_to_local(cell_path[i])
+		if not _is_player_position_blocked(world_pos):
+			return i
+	return 0
+
+
+func _is_player_position_blocked(world_position: Vector2) -> bool:
+	if player == null or not is_instance_valid(player):
+		return true
+
+	var shape_node := player.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if shape_node == null or shape_node.shape == null:
+		return false
+
+	var params := PhysicsShapeQueryParameters2D.new()
+	params.shape = shape_node.shape
+	params.transform = Transform2D(0.0, world_position + shape_node.position)
+	params.collide_with_areas = false
+	params.collide_with_bodies = true
+	params.exclude = [player]
+	params.collision_mask = 1 | 4
+
+	var hits := get_world_2d().direct_space_state.intersect_shape(params, 1)
+	if not hits.is_empty():
+		return true
+
+	# In turn mode, treat enemy personal space as hard collision too.
+	if combat_state != CombatState.EXPLORATION:
+		var player_radius := _get_character_collision_radius(player)
+		for enemy_actor in _get_all_alive_enemies():
+			var enemy_radius := _get_character_collision_radius(enemy_actor)
+			var min_distance := player_radius + enemy_radius + TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS
+			if world_position.distance_to(enemy_actor.global_position) < min_distance:
+				return true
+
+	return false
+
+
+func _request_enemy_move_towards_player(enemy_actor: CharacterBody2D, max_cells: int) -> int:
 	if active_nav_layer == null:
 		return 0
-	if enemy == null or not is_instance_valid(enemy):
+	if enemy_actor == null or not is_instance_valid(enemy_actor):
 		return 0
 
-	var cell_path := _build_cell_path_from_navigation(enemy.global_position, player.global_position)
+	# Rebuild grid while excluding this mover from dynamic enemy blockers.
+	_refresh_enemy_blocked_cells(enemy_actor)
+	_rebuild_navigation_for_layer(active_nav_layer)
+
+	var enemy_attack_range := float(enemy_actor.get("attack_range"))
+	var approach_point := _compute_approach_world_point(enemy_actor.global_position, player.global_position, enemy_attack_range)
+	var cell_path := _build_cell_path_from_navigation(enemy_actor.global_position, approach_point)
 	if cell_path.size() <= 1:
 		return 0
 
@@ -664,9 +853,47 @@ func _request_enemy_move_towards_player(max_cells: int) -> int:
 
 	var destination_cell := cell_path[used_steps]
 	var destination_world := active_nav_layer.map_to_local(destination_cell)
-	if enemy.has_method("set_navigation_target"):
-		enemy.call("set_navigation_target", destination_world)
+	if enemy_actor.has_method("set_navigation_target"):
+		enemy_actor.call("set_navigation_target", destination_world)
 	return used_steps
+
+
+func _get_all_alive_enemies() -> Array[CharacterBody2D]:
+	var result: Array[CharacterBody2D] = []
+	if enemy != null and is_instance_valid(enemy):
+		if not enemy.has_method("is_alive") or bool(enemy.call("is_alive")):
+			result.append(enemy)
+	for enemy_actor in extra_enemies:
+		if enemy_actor != null and is_instance_valid(enemy_actor):
+			if not enemy_actor.has_method("is_alive") or bool(enemy_actor.call("is_alive")):
+				result.append(enemy_actor)
+	return result
+
+
+func _get_closest_enemy_to_player() -> CharacterBody2D:
+	var alive_enemies := _get_all_alive_enemies()
+	if alive_enemies.is_empty():
+		return null
+
+	var closest := alive_enemies[0]
+	var closest_dist := player.global_position.distance_to(closest.global_position)
+	for i in range(1, alive_enemies.size()):
+		var candidate := alive_enemies[i]
+		var d := player.global_position.distance_to(candidate.global_position)
+		if d < closest_dist:
+			closest_dist = d
+			closest = candidate
+	return closest
+
+
+func _compute_approach_world_point(mover_world: Vector2, target_world: Vector2, stop_distance: float) -> Vector2:
+	var to_mover := mover_world - target_world
+	var distance := to_mover.length()
+	if distance <= stop_distance:
+		return mover_world
+	if distance <= 0.001:
+		return target_world
+	return target_world + (to_mover / distance) * stop_distance
 
 
 func _request_player_turn_move_by_distance(target_world_position: Vector2, max_meters: float) -> float:
@@ -718,6 +945,32 @@ func _build_cell_path_from_navigation(from_world: Vector2, to_world: Vector2) ->
 			cell_path.append(path_cell)
 
 	return cell_path
+
+
+func _build_astar_id_path(from_cell: Vector2i, to_cell: Vector2i, dynamic_blocked_cells: Array[Vector2i]) -> Array[Vector2i]:
+	var modified_cells: Array[Vector2i] = []
+	for blocked_cell in dynamic_blocked_cells:
+		if blocked_cell == from_cell:
+			continue
+		if not astar_grid.is_in_boundsv(blocked_cell):
+			continue
+		if astar_grid.is_point_solid(blocked_cell):
+			continue
+		astar_grid.set_point_solid(blocked_cell, true)
+		modified_cells.append(blocked_cell)
+
+	var resolved_to_cell := to_cell
+	if astar_grid.is_point_solid(resolved_to_cell):
+		resolved_to_cell = _find_nearest_walkable_cell(resolved_to_cell, 12)
+
+	var path: Array[Vector2i] = []
+	if resolved_to_cell != Vector2i(-1, -1):
+		path = astar_grid.get_id_path(from_cell, resolved_to_cell)
+
+	for modified_cell in modified_cells:
+		astar_grid.set_point_solid(modified_cell, false)
+
+	return path
 
 
 func _build_world_path_from_navigation(from_world: Vector2, to_world: Vector2) -> Array[Vector2]:
@@ -864,20 +1117,9 @@ func _setup_turn_ui() -> void:
 	turn_ui_player_label.text = "Player"
 	player_box.add_child(turn_ui_player_label)
 
-	var enemy_box := VBoxContainer.new()
-	enemy_box.add_theme_constant_override("separation", 4)
-	order_hbox.add_child(enemy_box)
-
-	turn_ui_enemy_icon = TextureRect.new()
-	turn_ui_enemy_icon.custom_minimum_size = Vector2(48, 48)
-	turn_ui_enemy_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	turn_ui_enemy_icon.texture = _create_placeholder_icon(Color(0.82, 0.26, 0.26, 1.0))
-	enemy_box.add_child(turn_ui_enemy_icon)
-
-	turn_ui_enemy_label = Label.new()
-	turn_ui_enemy_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	turn_ui_enemy_label.text = "Enemy"
-	enemy_box.add_child(turn_ui_enemy_label)
+	turn_ui_enemy_icons_container = HBoxContainer.new()
+	turn_ui_enemy_icons_container.add_theme_constant_override("separation", 12)
+	order_hbox.add_child(turn_ui_enemy_icons_container)
 
 	turn_ui_panel = PanelContainer.new()
 	turn_ui_panel.name = "TurnUI"
@@ -941,6 +1183,8 @@ func _setup_turn_ui() -> void:
 	turn_ui_attack_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
 	vbox.add_child(turn_ui_attack_label)
 
+	_rebuild_turn_enemy_icons()
+
 
 func _update_turn_ui() -> void:
 	if turn_ui_panel == null:
@@ -953,21 +1197,48 @@ func _update_turn_ui() -> void:
 	if not in_turn_mode:
 		return
 
+	var alive_enemies := _get_all_alive_enemies()
+	if turn_ui_enemy_icon_entries.size() != alive_enemies.size():
+		_rebuild_turn_enemy_icons()
+
 	var player_turn_active := combat_state == CombatState.PLAYER_TURN
-	var player_icon_dim := Color(0.45, 0.45, 0.45, 0.95)
-	var enemy_icon_dim := Color(0.45, 0.45, 0.45, 0.95)
-	if player_turn_active:
-		player_icon_dim = Color(1.0, 1.0, 1.0, 1.0)
-	else:
-		enemy_icon_dim = Color(1.0, 1.0, 1.0, 1.0)
+	var player_icon_dim := Color(1.0, 1.0, 1.0, 1.0) if player_turn_active else Color(0.45, 0.45, 0.45, 0.95)
 	if turn_ui_player_icon != null:
 		turn_ui_player_icon.modulate = player_icon_dim
-	if turn_ui_enemy_icon != null:
-		turn_ui_enemy_icon.modulate = enemy_icon_dim
 	if turn_ui_player_label != null:
 		turn_ui_player_label.add_theme_color_override("font_color", Color(0.72, 0.90, 1.0, 1.0) if player_turn_active else Color(0.68, 0.68, 0.68, 1.0))
-	if turn_ui_enemy_label != null:
-		turn_ui_enemy_label.add_theme_color_override("font_color", Color(1.0, 0.73, 0.73, 1.0) if not player_turn_active else Color(0.68, 0.68, 0.68, 1.0))
+
+	for i in range(turn_ui_enemy_icon_entries.size()):
+		var entry := turn_ui_enemy_icon_entries[i]
+		var enemy_actor := entry.get("enemy") as CharacterBody2D
+		var panel := entry.get("panel") as PanelContainer
+		var icon := entry.get("icon") as TextureRect
+		var label := entry.get("label") as Label
+
+		var is_enemy_active := false
+		if combat_state == CombatState.ENEMY_TURN:
+			if active_enemy_turn_actor != null and is_instance_valid(active_enemy_turn_actor):
+				is_enemy_active = enemy_actor == active_enemy_turn_actor
+			elif i == 0:
+				is_enemy_active = true
+		var is_enemy_hovered := hovered_enemy != null and is_instance_valid(hovered_enemy) and enemy_actor == hovered_enemy
+
+		if icon != null:
+			if is_enemy_hovered:
+				icon.modulate = Color(1.0, 0.86, 0.86, 1.0)
+			elif is_enemy_active:
+				icon.modulate = Color(1.0, 1.0, 1.0, 1.0)
+			else:
+				icon.modulate = Color(0.45, 0.45, 0.45, 0.95)
+		if label != null:
+			if is_enemy_hovered:
+				label.add_theme_color_override("font_color", Color(1.0, 0.35, 0.35, 1.0))
+			elif is_enemy_active:
+				label.add_theme_color_override("font_color", Color(1.0, 0.73, 0.73, 1.0))
+			else:
+				label.add_theme_color_override("font_color", Color(0.68, 0.68, 0.68, 1.0))
+		if panel != null:
+			panel.add_theme_stylebox_override("panel", _create_turn_enemy_icon_panel_style(is_enemy_active, is_enemy_hovered))
 
 	var phase_text := "Phase: -"
 	var move_text := "Move: -"
@@ -1015,3 +1286,101 @@ func _create_placeholder_icon(base_color: Color) -> Texture2D:
 		image.set_pixel(size - 1, y, border_color)
 
 	return ImageTexture.create_from_image(image)
+
+
+func _rebuild_turn_enemy_icons() -> void:
+	if turn_ui_enemy_icons_container == null:
+		return
+
+	for child in turn_ui_enemy_icons_container.get_children():
+		child.queue_free()
+	turn_ui_enemy_icon_entries.clear()
+
+	var alive_enemies := _get_all_alive_enemies()
+	for i in range(alive_enemies.size()):
+		var enemy_actor := alive_enemies[i]
+		var enemy_panel := PanelContainer.new()
+		enemy_panel.add_theme_stylebox_override("panel", _create_turn_enemy_icon_panel_style(false, false))
+		turn_ui_enemy_icons_container.add_child(enemy_panel)
+
+		var enemy_box := VBoxContainer.new()
+		enemy_box.add_theme_constant_override("separation", 4)
+		enemy_panel.add_child(enemy_box)
+
+		var enemy_icon := TextureRect.new()
+		enemy_icon.custom_minimum_size = Vector2(48, 48)
+		enemy_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		enemy_icon.texture = _create_placeholder_icon(Color(0.82, 0.26, 0.26, 1.0))
+		enemy_box.add_child(enemy_icon)
+
+		var enemy_label := Label.new()
+		enemy_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		enemy_label.text = "Enemy %d" % (i + 1)
+		enemy_box.add_child(enemy_label)
+
+		turn_ui_enemy_icon_entries.append({
+			"enemy": enemy_actor,
+			"panel": enemy_panel,
+			"icon": enemy_icon,
+			"label": enemy_label
+		})
+
+
+func _update_enemy_hover_state() -> void:
+	if combat_state == CombatState.EXPLORATION:
+		_set_hovered_enemy(null)
+		return
+
+	var hovered := _get_enemy_at_position(get_global_mouse_position()) as CharacterBody2D
+	_set_hovered_enemy(hovered)
+
+
+func _set_hovered_enemy(new_enemy: CharacterBody2D) -> void:
+	if hovered_enemy != null and not is_instance_valid(hovered_enemy):
+		hovered_enemy = null
+	if new_enemy != null and not is_instance_valid(new_enemy):
+		new_enemy = null
+	if hovered_enemy == new_enemy:
+		return
+
+	if hovered_enemy != null and hovered_enemy.has_method("set_hover_highlighted"):
+		hovered_enemy.call("set_hover_highlighted", false)
+
+	hovered_enemy = new_enemy
+
+	if hovered_enemy != null and hovered_enemy.has_method("set_hover_highlighted"):
+		hovered_enemy.call("set_hover_highlighted", true)
+
+
+func _create_turn_enemy_icon_panel_style(is_active: bool, is_hovered: bool) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.14, 0.12, 0.09, 0.85)
+	style.corner_radius_top_left = 4
+	style.corner_radius_top_right = 4
+	style.corner_radius_bottom_left = 4
+	style.corner_radius_bottom_right = 4
+	style.content_margin_left = 6
+	style.content_margin_top = 4
+	style.content_margin_right = 6
+	style.content_margin_bottom = 4
+
+	if is_hovered:
+		style.border_color = Color(0.92, 0.18, 0.18, 1.0)
+		style.border_width_left = 2
+		style.border_width_top = 2
+		style.border_width_right = 2
+		style.border_width_bottom = 2
+	elif is_active:
+		style.border_color = Color(0.82, 0.52, 0.52, 1.0)
+		style.border_width_left = 2
+		style.border_width_top = 2
+		style.border_width_right = 2
+		style.border_width_bottom = 2
+	else:
+		style.border_color = Color(0.35, 0.30, 0.24, 0.9)
+		style.border_width_left = 1
+		style.border_width_top = 1
+		style.border_width_right = 1
+		style.border_width_bottom = 1
+
+	return style

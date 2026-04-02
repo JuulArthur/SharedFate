@@ -3,7 +3,7 @@ extends CharacterBody2D
 @export var move_speed := 180.0
 @export var max_health := 60
 @export var attack_damage := 12
-@export var attack_range := 36.0
+@export var attack_range := 44.0
 @export var attack_cooldown := 0.8
 @export var target_refresh_interval := 0.25
 
@@ -20,12 +20,14 @@ var turn_active := false
 var turn_remaining_move_cells := 0
 var turn_attack_available := false
 var health_bar_fill: Sprite2D
+var hover_outline: Sprite2D
 
 
 func _ready() -> void:
 	_ensure_collision_shape()
 	collision_layer = 4
-	collision_mask = 1
+	# Collide with world (1) and player (2).
+	collision_mask = 1 | 2
 	current_health = max_health
 
 	navigation_agent.navigation_layers = 1
@@ -35,6 +37,7 @@ func _ready() -> void:
 	_setup_health_bar()
 	_update_health_bar()
 	sprite.texture = _create_enemy_texture()
+	_setup_hover_outline()
 
 
 func _physics_process(delta: float) -> void:
@@ -159,8 +162,19 @@ func _refresh_target_position() -> void:
 		return
 
 	var nav_map_rid := navigation_agent.get_navigation_map()
-	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, _target.global_position)
+	var approach_point := _compute_approach_point(_target.global_position, attack_range)
+	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, approach_point)
 	navigation_agent.target_position = closest_nav_point
+
+
+func _compute_approach_point(target_world_position: Vector2, stop_distance: float) -> Vector2:
+	var to_mover := global_position - target_world_position
+	var distance := to_mover.length()
+	if distance <= stop_distance:
+		return global_position
+	if distance <= 0.001:
+		return target_world_position
+	return target_world_position + (to_mover / distance) * stop_distance
 
 
 func _ensure_collision_shape() -> void:
@@ -168,7 +182,7 @@ func _ensure_collision_shape() -> void:
 	if circle == null:
 		circle = CircleShape2D.new()
 		collision_shape.shape = circle
-	circle.radius = 10.0
+	circle.radius = 14.0
 	collision_shape.position = Vector2(0, -2)
 
 
@@ -210,6 +224,37 @@ func _update_health_bar() -> void:
 func _create_solid_texture(size: Vector2i, color: Color) -> Texture2D:
 	var image := Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
 	image.fill(color)
+	return ImageTexture.create_from_image(image)
+
+
+func _setup_hover_outline() -> void:
+	hover_outline = get_node_or_null("HoverOutline") as Sprite2D
+	if hover_outline == null:
+		hover_outline = Sprite2D.new()
+		hover_outline.name = "HoverOutline"
+		add_child(hover_outline)
+
+	hover_outline.texture = _create_outline_texture(Vector2i(28, 36), Color(0.95, 0.14, 0.14, 0.95), 2)
+	hover_outline.position = Vector2(0, -16)
+	hover_outline.z_index = sprite.z_index + 2
+	hover_outline.visible = false
+
+
+func set_hover_highlighted(enabled: bool) -> void:
+	if hover_outline != null:
+		hover_outline.visible = enabled
+
+
+func _create_outline_texture(size: Vector2i, color: Color, border: int) -> Texture2D:
+	var image := Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+
+	for y in range(size.y):
+		for x in range(size.x):
+			var on_border := x < border or x >= size.x - border or y < border or y >= size.y - border
+			if on_border:
+				image.set_pixel(x, y, color)
+
 	return ImageTexture.create_from_image(image)
 
 
