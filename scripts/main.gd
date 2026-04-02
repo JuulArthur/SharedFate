@@ -10,8 +10,10 @@ const TURN_MOVE_METERS := 6.0
 const ENEMY_TURN_MOVE_CELLS := 6
 const TURN_METER_WORLD_UNITS := float(TILE_SIZE.x)
 const COMBAT_TRIGGER_DISTANCE_CELLS := 6
+const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
 const ENEMY_SPAWN_OFFSET := Vector2i(6, -6)
 const ENEMY_SPAWN_SEARCH_RADIUS := 14
+const ENEMY_TURN_DELAY_SECONDS := 1.0
 
 enum CombatState {
 	EXPLORATION,
@@ -48,6 +50,11 @@ var turn_ui_title_label: Label
 var turn_ui_phase_label: Label
 var turn_ui_move_label: Label
 var turn_ui_attack_label: Label
+var turn_ui_order_panel: PanelContainer
+var turn_ui_player_icon: TextureRect
+var turn_ui_enemy_icon: TextureRect
+var turn_ui_player_label: Label
+var turn_ui_enemy_label: Label
 
 
 func _ready() -> void:
@@ -175,7 +182,8 @@ func _place_player_on_layer(layer: TileMapLayer) -> void:
 		return
 
 	var center_cell := used_rect.position + (used_rect.size / 2)
-	var spawn_position := layer.map_to_local(center_cell)
+	var spawn_cell := _clamp_cell_to_region(center_cell + PLAYER_SPAWN_OFFSET, used_rect)
+	var spawn_position := layer.map_to_local(spawn_cell)
 	if player.has_method("snap_to"):
 		player.call("snap_to", spawn_position)
 	else:
@@ -288,6 +296,7 @@ func _is_close_enough_for_combat_start() -> bool:
 
 
 func _start_turn_based_combat() -> void:
+	_stop_all_combatants_immediately()
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
 
@@ -303,6 +312,19 @@ func _start_turn_based_combat() -> void:
 
 	print("Turn-based combat started")
 	_update_turn_ui()
+
+
+func _stop_all_combatants_immediately() -> void:
+	if player != null and player.has_method("stop_movement_immediately"):
+		player.call("stop_movement_immediately")
+	elif player != null and player.has_method("set_navigation_target"):
+		player.call("set_navigation_target", player.global_position)
+
+	if enemy != null and is_instance_valid(enemy):
+		if enemy.has_method("stop_movement_immediately"):
+			enemy.call("stop_movement_immediately")
+		elif enemy.has_method("set_navigation_target"):
+			enemy.call("set_navigation_target", enemy.global_position)
 
 
 func _end_turn_based_combat() -> void:
@@ -426,6 +448,11 @@ func _run_enemy_turn() -> void:
 		return
 
 	enemy_turn_running = true
+	await get_tree().create_timer(ENEMY_TURN_DELAY_SECONDS).timeout
+	if combat_state != CombatState.ENEMY_TURN or enemy == null or not is_instance_valid(enemy):
+		enemy_turn_running = false
+		return
+
 	if enemy.has_method("start_turn"):
 		enemy.call("start_turn", ENEMY_TURN_MOVE_CELLS)
 
@@ -784,6 +811,74 @@ func _setup_turn_ui() -> void:
 	turn_ui_layer.layer = 5
 	add_child(turn_ui_layer)
 
+	turn_ui_order_panel = PanelContainer.new()
+	turn_ui_order_panel.name = "TurnOrderUI"
+	turn_ui_order_panel.visible = false
+	turn_ui_order_panel.anchor_left = 0.5
+	turn_ui_order_panel.anchor_top = 0.0
+	turn_ui_order_panel.anchor_right = 0.5
+	turn_ui_order_panel.anchor_bottom = 0.0
+	turn_ui_order_panel.offset_left = -130.0
+	turn_ui_order_panel.offset_top = 18.0
+	turn_ui_order_panel.offset_right = 130.0
+	turn_ui_order_panel.offset_bottom = 112.0
+
+	var top_style := StyleBoxFlat.new()
+	top_style.bg_color = Color(0.08, 0.07, 0.05, 0.92)
+	top_style.border_color = Color(0.66, 0.56, 0.33, 0.95)
+	top_style.border_width_left = 2
+	top_style.border_width_top = 2
+	top_style.border_width_right = 2
+	top_style.border_width_bottom = 2
+	top_style.corner_radius_top_left = 4
+	top_style.corner_radius_top_right = 4
+	top_style.corner_radius_bottom_left = 4
+	top_style.corner_radius_bottom_right = 4
+	turn_ui_order_panel.add_theme_stylebox_override("panel", top_style)
+	turn_ui_layer.add_child(turn_ui_order_panel)
+
+	var top_margin := MarginContainer.new()
+	top_margin.add_theme_constant_override("margin_left", 10)
+	top_margin.add_theme_constant_override("margin_top", 8)
+	top_margin.add_theme_constant_override("margin_right", 10)
+	top_margin.add_theme_constant_override("margin_bottom", 8)
+	turn_ui_order_panel.add_child(top_margin)
+
+	var order_hbox := HBoxContainer.new()
+	order_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	order_hbox.add_theme_constant_override("separation", 22)
+	top_margin.add_child(order_hbox)
+
+	var player_box := VBoxContainer.new()
+	player_box.add_theme_constant_override("separation", 4)
+	order_hbox.add_child(player_box)
+
+	turn_ui_player_icon = TextureRect.new()
+	turn_ui_player_icon.custom_minimum_size = Vector2(48, 48)
+	turn_ui_player_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	turn_ui_player_icon.texture = _create_placeholder_icon(Color(0.26, 0.50, 0.84, 1.0))
+	player_box.add_child(turn_ui_player_icon)
+
+	turn_ui_player_label = Label.new()
+	turn_ui_player_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	turn_ui_player_label.text = "Player"
+	player_box.add_child(turn_ui_player_label)
+
+	var enemy_box := VBoxContainer.new()
+	enemy_box.add_theme_constant_override("separation", 4)
+	order_hbox.add_child(enemy_box)
+
+	turn_ui_enemy_icon = TextureRect.new()
+	turn_ui_enemy_icon.custom_minimum_size = Vector2(48, 48)
+	turn_ui_enemy_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	turn_ui_enemy_icon.texture = _create_placeholder_icon(Color(0.82, 0.26, 0.26, 1.0))
+	enemy_box.add_child(turn_ui_enemy_icon)
+
+	turn_ui_enemy_label = Label.new()
+	turn_ui_enemy_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	turn_ui_enemy_label.text = "Enemy"
+	enemy_box.add_child(turn_ui_enemy_label)
+
 	turn_ui_panel = PanelContainer.new()
 	turn_ui_panel.name = "TurnUI"
 	turn_ui_panel.visible = false
@@ -853,8 +948,26 @@ func _update_turn_ui() -> void:
 
 	var in_turn_mode := combat_state != CombatState.EXPLORATION
 	turn_ui_panel.visible = in_turn_mode
+	if turn_ui_order_panel != null:
+		turn_ui_order_panel.visible = in_turn_mode
 	if not in_turn_mode:
 		return
+
+	var player_turn_active := combat_state == CombatState.PLAYER_TURN
+	var player_icon_dim := Color(0.45, 0.45, 0.45, 0.95)
+	var enemy_icon_dim := Color(0.45, 0.45, 0.45, 0.95)
+	if player_turn_active:
+		player_icon_dim = Color(1.0, 1.0, 1.0, 1.0)
+	else:
+		enemy_icon_dim = Color(1.0, 1.0, 1.0, 1.0)
+	if turn_ui_player_icon != null:
+		turn_ui_player_icon.modulate = player_icon_dim
+	if turn_ui_enemy_icon != null:
+		turn_ui_enemy_icon.modulate = enemy_icon_dim
+	if turn_ui_player_label != null:
+		turn_ui_player_label.add_theme_color_override("font_color", Color(0.72, 0.90, 1.0, 1.0) if player_turn_active else Color(0.68, 0.68, 0.68, 1.0))
+	if turn_ui_enemy_label != null:
+		turn_ui_enemy_label.add_theme_color_override("font_color", Color(1.0, 0.73, 0.73, 1.0) if not player_turn_active else Color(0.68, 0.68, 0.68, 1.0))
 
 	var phase_text := "Phase: -"
 	var move_text := "Move: -"
@@ -886,3 +999,19 @@ func _update_turn_ui() -> void:
 	turn_ui_phase_label.text = phase_text
 	turn_ui_move_label.text = move_text
 	turn_ui_attack_label.text = attack_text
+
+
+func _create_placeholder_icon(base_color: Color) -> Texture2D:
+	var size := 64
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(base_color)
+
+	var border_color := base_color.darkened(0.42)
+	for x in range(size):
+		image.set_pixel(x, 0, border_color)
+		image.set_pixel(x, size - 1, border_color)
+	for y in range(size):
+		image.set_pixel(0, y, border_color)
+		image.set_pixel(size - 1, y, border_color)
+
+	return ImageTexture.create_from_image(image)

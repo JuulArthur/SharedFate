@@ -136,6 +136,7 @@ func _try_attack_target() -> void:
 			return
 
 		_target.call("receive_damage", attack_damage)
+		_flash_attack_feedback()
 		turn_attack_available = false
 		return
 
@@ -149,6 +150,7 @@ func _try_attack_target() -> void:
 		return
 
 	_target.call("receive_damage", attack_damage)
+	_flash_attack_feedback()
 	_attack_cooldown_left = attack_cooldown
 
 
@@ -211,6 +213,12 @@ func _create_solid_texture(size: Vector2i, color: Color) -> Texture2D:
 	return ImageTexture.create_from_image(image)
 
 
+func _flash_attack_feedback() -> void:
+	sprite.modulate = Color(1.0, 0.72, 0.72, 1.0)
+	var tween := create_tween()
+	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), 0.12)
+
+
 func _create_enemy_texture() -> Texture2D:
 	var image := Image.create(24, 32, false, Image.FORMAT_RGBA8)
 	image.fill(Color(0, 0, 0, 0))
@@ -238,8 +246,18 @@ func _create_enemy_texture() -> Texture2D:
 	return ImageTexture.create_from_image(image)
 
 
+func stop_movement_immediately() -> void:
+	velocity = Vector2.ZERO
+	navigation_agent.target_position = global_position
+	move_and_slide()
+
+
 func set_turn_based_combat(enabled: bool) -> void:
 	in_turn_based_combat = enabled
+	if enabled:
+		stop_movement_immediately()
+		return
+
 	if not enabled:
 		turn_active = false
 		turn_remaining_move_cells = 0

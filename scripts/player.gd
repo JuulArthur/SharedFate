@@ -5,6 +5,7 @@ extends CharacterBody2D
 @export var attack_damage := 20
 @export var attack_range := 28.0
 @export var attack_cooldown := 0.35
+@export var attack_animation_speed_scale := 1.6
 @export var target_refresh_interval := 0.2
 @export var attack_action_name := "attack"
 
@@ -22,6 +23,9 @@ var in_turn_based_combat := false
 var turn_active := false
 var turn_remaining_move_meters := 0.0
 var turn_attack_available := false
+var facing_direction := Vector2.RIGHT
+var attack_slash: Sprite2D
+var sprite_idle_position := Vector2.ZERO
 
 
 func _ready() -> void:
@@ -39,7 +43,9 @@ func _ready() -> void:
 	_update_health_bar()
 
 	sprite.texture = _create_placeholder_texture()
+	sprite_idle_position = sprite.position
 	vision_light.texture = _create_vision_light_texture()
+	_setup_attack_vfx()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -58,6 +64,7 @@ func _physics_process(delta: float) -> void:
 
 		var turn_next_position := navigation_agent.get_next_path_position()
 		velocity = global_position.direction_to(turn_next_position) * move_speed
+		_update_facing_from_velocity(velocity)
 		move_and_slide()
 		return
 
@@ -79,6 +86,7 @@ func _physics_process(delta: float) -> void:
 			elif not navigation_agent.is_navigation_finished():
 				var target_next_position := navigation_agent.get_next_path_position()
 				velocity = global_position.direction_to(target_next_position) * move_speed
+				_update_facing_from_velocity(velocity)
 				move_and_slide()
 			else:
 				velocity = Vector2.ZERO
@@ -92,6 +100,7 @@ func _physics_process(delta: float) -> void:
 
 	var next_position := navigation_agent.get_next_path_position()
 	velocity = global_position.direction_to(next_position) * move_speed
+	_update_facing_from_velocity(velocity)
 	move_and_slide()
 
 
@@ -206,9 +215,85 @@ func _apply_attack_damage() -> void:
 
 
 func _flash_attack_feedback() -> void:
+	var speed_scale := maxf(attack_animation_speed_scale, 0.1)
+	var t_fast := 0.06 * speed_scale
+	var t_med := 0.08 * speed_scale
+	var t_reset := 0.12 * speed_scale
+	var t_slash_in := 0.04 * speed_scale
+	var t_slash_hold := 0.08 * speed_scale
+	var t_slash_out := 0.10 * speed_scale
+
+	var attack_dir := facing_direction.normalized()
+	if attack_dir.length() <= 0.001:
+		attack_dir = Vector2.RIGHT
+
 	sprite.modulate = Color(1.0, 0.72, 0.72, 1.0)
+	sprite.position = sprite_idle_position
+	sprite.scale = Vector2.ONE
+
+	if attack_slash != null:
+		attack_slash.visible = true
+		attack_slash.modulate = Color(1.0, 0.95, 0.85, 0.0)
+		attack_slash.position = Vector2(sign(attack_dir.x) * 14.0, -16.0)
+		attack_slash.rotation = attack_dir.angle()
+		attack_slash.scale = Vector2(0.7, 0.7)
+
 	var tween := create_tween()
-	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), 0.12)
+	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), t_reset)
+	tween.parallel().tween_property(sprite, "position", sprite_idle_position + attack_dir * 3.5, t_fast)
+	tween.parallel().tween_property(sprite, "scale", Vector2(1.08, 0.94), t_fast)
+
+	var return_tween := create_tween()
+	return_tween.tween_interval(t_fast)
+	return_tween.tween_property(sprite, "position", sprite_idle_position, t_med)
+	return_tween.parallel().tween_property(sprite, "scale", Vector2.ONE, t_med)
+
+	if attack_slash != null:
+		var slash_tween := create_tween()
+		slash_tween.tween_property(attack_slash, "modulate", Color(1.0, 0.95, 0.85, 0.95), t_slash_in)
+		slash_tween.parallel().tween_property(attack_slash, "scale", Vector2(1.2, 1.2), t_slash_hold)
+		slash_tween.tween_property(attack_slash, "modulate", Color(1.0, 0.95, 0.85, 0.0), t_slash_out)
+		slash_tween.tween_callback(func() -> void:
+			if attack_slash != null:
+				attack_slash.visible = false
+		)
+
+
+func _update_facing_from_velocity(v: Vector2) -> void:
+	if v.length() < 0.001:
+		return
+	facing_direction = v.normalized()
+	sprite.flip_h = facing_direction.x < 0.0
+
+
+func _setup_attack_vfx() -> void:
+	attack_slash = get_node_or_null("AttackSlash") as Sprite2D
+	if attack_slash == null:
+		attack_slash = Sprite2D.new()
+		attack_slash.name = "AttackSlash"
+		add_child(attack_slash)
+
+	attack_slash.texture = _create_slash_texture()
+	attack_slash.z_index = sprite.z_index + 1
+	attack_slash.centered = true
+	attack_slash.visible = false
+	attack_slash.position = Vector2(14, -16)
+
+
+func _create_slash_texture() -> Texture2D:
+	var image := Image.create(28, 28, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+
+	var center := Vector2(14.0, 14.0)
+	for y in range(28):
+		for x in range(28):
+			var p := Vector2(float(x), float(y))
+			var r := p.distance_to(center)
+			var a := atan2(p.y - center.y, p.x - center.x)
+			if r >= 7.0 and r <= 11.0 and a > -1.6 and a < -0.2:
+				image.set_pixel(x, y, Color(1.0, 0.96, 0.84, 0.95))
+
+	return ImageTexture.create_from_image(image)
 
 
 func _setup_health_bar() -> void:
@@ -321,8 +406,19 @@ func _on_navigation_agent_2d_velocity_computed(safe_velocity: Vector2) -> void:
 	velocity = safe_velocity
 
 
+func stop_movement_immediately() -> void:
+	velocity = Vector2.ZERO
+	navigation_agent.target_position = global_position
+	clear_attack_target()
+	move_and_slide()
+
+
 func set_turn_based_combat(enabled: bool) -> void:
 	in_turn_based_combat = enabled
+	if enabled:
+		stop_movement_immediately()
+		return
+
 	if not enabled:
 		turn_active = false
 		turn_remaining_move_meters = 0.0
