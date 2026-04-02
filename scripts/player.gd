@@ -18,6 +18,10 @@ var attack_cooldown_left := 0.0
 var health_bar_fill: Sprite2D
 var attack_target: Node2D
 var target_refresh_left := 0.0
+var in_turn_based_combat := false
+var turn_active := false
+var turn_remaining_move_meters := 0.0
+var turn_attack_available := false
 
 
 func _ready() -> void:
@@ -39,11 +43,24 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if in_turn_based_combat:
+		return
 	if event.is_action_pressed(attack_action_name):
 		_try_attack()
 
 
 func _physics_process(delta: float) -> void:
+	if in_turn_based_combat:
+		if navigation_agent.is_navigation_finished():
+			velocity = Vector2.ZERO
+			move_and_slide()
+			return
+
+		var turn_next_position := navigation_agent.get_next_path_position()
+		velocity = global_position.direction_to(turn_next_position) * move_speed
+		move_and_slide()
+		return
+
 	attack_cooldown_left = maxf(attack_cooldown_left - delta, 0.0)
 	target_refresh_left -= delta
 
@@ -127,6 +144,23 @@ func _try_attack() -> void:
 
 
 func try_attack(_target: Node2D = null) -> void:
+	if in_turn_based_combat:
+		if not turn_active:
+			return
+		if not turn_attack_available:
+			return
+		if _target == null or not is_instance_valid(_target):
+			return
+		if not _target.has_method("receive_damage"):
+			return
+		if global_position.distance_to(_target.global_position) > attack_range:
+			return
+
+		turn_attack_available = false
+		_flash_attack_feedback()
+		_target.call("receive_damage", attack_damage)
+		return
+
 	_try_attack()
 
 
@@ -285,3 +319,58 @@ func _create_vision_light_texture() -> Texture2D:
 
 func _on_navigation_agent_2d_velocity_computed(safe_velocity: Vector2) -> void:
 	velocity = safe_velocity
+
+
+func set_turn_based_combat(enabled: bool) -> void:
+	in_turn_based_combat = enabled
+	if not enabled:
+		turn_active = false
+		turn_remaining_move_meters = 0.0
+		turn_attack_available = false
+		clear_attack_target()
+
+
+func start_turn(max_move_meters: float = 6.0) -> void:
+	turn_active = true
+	turn_remaining_move_meters = maxf(0.0, max_move_meters)
+	turn_attack_available = true
+
+
+func end_turn() -> void:
+	turn_active = false
+	turn_remaining_move_meters = 0.0
+	turn_attack_available = false
+
+
+func consume_turn_movement_meters(used_meters: float) -> void:
+	turn_remaining_move_meters = maxf(0.0, turn_remaining_move_meters - maxf(0.0, used_meters))
+
+
+func consume_turn_movement(used_cells: int) -> void:
+	# Backward-compatible alias (1 cell == 1 meter in turn mode).
+	consume_turn_movement_meters(float(maxi(0, used_cells)))
+
+
+func is_turn_active() -> bool:
+	return turn_active
+
+
+func can_turn_attack() -> bool:
+	return turn_attack_available
+
+
+func get_turn_remaining_move_meters() -> float:
+	return turn_remaining_move_meters
+
+
+func get_turn_remaining_move_cells() -> int:
+	# Backward-compatible alias.
+	return int(round(turn_remaining_move_meters))
+
+
+func is_moving() -> bool:
+	return not navigation_agent.is_navigation_finished()
+
+
+func is_alive() -> bool:
+	return current_health > 0

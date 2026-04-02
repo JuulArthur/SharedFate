@@ -15,6 +15,11 @@ var current_health := 0
 var _attack_cooldown_left := 0.0
 var _target_refresh_left := 0.0
 var _target: Node2D
+var in_turn_based_combat := false
+var turn_active := false
+var turn_remaining_move_cells := 0
+var turn_attack_available := false
+var health_bar_fill: Sprite2D
 
 
 func _ready() -> void:
@@ -27,10 +32,23 @@ func _ready() -> void:
 	navigation_agent.path_desired_distance = 4.0
 	navigation_agent.target_desired_distance = 8.0
 
+	_setup_health_bar()
+	_update_health_bar()
 	sprite.texture = _create_enemy_texture()
 
 
 func _physics_process(delta: float) -> void:
+	if in_turn_based_combat:
+		if navigation_agent.is_navigation_finished():
+			velocity = Vector2.ZERO
+			move_and_slide()
+			return
+
+		var turn_next_position := navigation_agent.get_next_path_position()
+		velocity = global_position.direction_to(turn_next_position) * move_speed
+		move_and_slide()
+		return
+
 	_attack_cooldown_left = maxf(0.0, _attack_cooldown_left - delta)
 	_target_refresh_left -= delta
 
@@ -79,10 +97,22 @@ func snap_to(world_position: Vector2) -> void:
 	navigation_agent.target_position = world_position
 
 
+func set_navigation_target(world_position: Vector2) -> void:
+	var nav_map_rid := navigation_agent.get_navigation_map()
+	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, world_position)
+	navigation_agent.target_position = closest_nav_point
+
+
+func try_attack(target: Node2D) -> void:
+	_target = target
+	_try_attack_target()
+
+
 func receive_damage(amount: int) -> void:
 	if amount <= 0:
 		return
 	current_health = maxi(0, current_health - amount)
+	_update_health_bar()
 	print("Enemy HP: %d/%d" % [current_health, max_health])
 	if current_health == 0:
 		queue_free()
@@ -93,6 +123,22 @@ func is_alive() -> bool:
 
 
 func _try_attack_target() -> void:
+	if in_turn_based_combat:
+		if not turn_active:
+			return
+		if not turn_attack_available:
+			return
+		if _target == null or not is_instance_valid(_target):
+			return
+		if global_position.distance_to(_target.global_position) > attack_range:
+			return
+		if not _target.has_method("receive_damage"):
+			return
+
+		_target.call("receive_damage", attack_damage)
+		turn_attack_available = false
+		return
+
 	if _attack_cooldown_left > 0.0:
 		return
 	if _target == null or not is_instance_valid(_target):
@@ -124,6 +170,47 @@ func _ensure_collision_shape() -> void:
 	collision_shape.position = Vector2(0, -2)
 
 
+func _setup_health_bar() -> void:
+	var root := get_node_or_null("HealthBarRoot") as Node2D
+	if root == null:
+		root = Node2D.new()
+		root.name = "HealthBarRoot"
+		root.position = Vector2(-14, -34)
+		add_child(root)
+
+	var bg := root.get_node_or_null("Background") as Sprite2D
+	if bg == null:
+		bg = Sprite2D.new()
+		bg.name = "Background"
+		bg.centered = false
+		root.add_child(bg)
+	bg.texture = _create_solid_texture(Vector2i(28, 4), Color(0.16, 0.16, 0.16, 0.95))
+
+	health_bar_fill = root.get_node_or_null("Fill") as Sprite2D
+	if health_bar_fill == null:
+		health_bar_fill = Sprite2D.new()
+		health_bar_fill.name = "Fill"
+		health_bar_fill.centered = false
+		root.add_child(health_bar_fill)
+	health_bar_fill.texture = _create_solid_texture(Vector2i(28, 4), Color(0.88, 0.2, 0.2, 1.0))
+
+
+func _update_health_bar() -> void:
+	if health_bar_fill == null:
+		return
+
+	var ratio := 0.0
+	if max_health > 0:
+		ratio = clampf(float(current_health) / float(max_health), 0.0, 1.0)
+	health_bar_fill.scale = Vector2(ratio, 1.0)
+
+
+func _create_solid_texture(size: Vector2i, color: Color) -> Texture2D:
+	var image := Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
+	image.fill(color)
+	return ImageTexture.create_from_image(image)
+
+
 func _create_enemy_texture() -> Texture2D:
 	var image := Image.create(24, 32, false, Image.FORMAT_RGBA8)
 	image.fill(Color(0, 0, 0, 0))
@@ -149,3 +236,39 @@ func _create_enemy_texture() -> Texture2D:
 			image.set_pixel(x, y, Color(0.08, 0.08, 0.08))
 
 	return ImageTexture.create_from_image(image)
+
+
+func set_turn_based_combat(enabled: bool) -> void:
+	in_turn_based_combat = enabled
+	if not enabled:
+		turn_active = false
+		turn_remaining_move_cells = 0
+		turn_attack_available = false
+
+
+func start_turn(max_move_cells: int = 6) -> void:
+	turn_active = true
+	turn_remaining_move_cells = maxi(0, max_move_cells)
+	turn_attack_available = true
+
+
+func end_turn() -> void:
+	turn_active = false
+	turn_remaining_move_cells = 0
+	turn_attack_available = false
+
+
+func consume_turn_movement(used_cells: int) -> void:
+	turn_remaining_move_cells = maxi(0, turn_remaining_move_cells - maxi(0, used_cells))
+
+
+func can_turn_attack() -> bool:
+	return turn_attack_available
+
+
+func get_turn_remaining_move_cells() -> int:
+	return turn_remaining_move_cells
+
+
+func is_moving() -> bool:
+	return not navigation_agent.is_navigation_finished()

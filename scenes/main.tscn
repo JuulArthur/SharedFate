@@ -497,8 +497,8 @@ position = Vector2(0, 160)
 
 [node name="Player" type="CharacterBody2D" parent="." unique_id=395874733]
 z_index = 4
+position = Vector2(-1, 0)
 script = ExtResource("2_kh1n2")
-move_speed = null
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="Player" unique_id=432009201]
 position = Vector2(0, -4)
