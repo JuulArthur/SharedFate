@@ -28,6 +28,7 @@ enum CombatState {
 @onready var canvas_modulate: CanvasModulate = $CanvasModulate
 @onready var camera_2d: Camera2D = $Camera2D
 @onready var player: CharacterBody2D = $Player
+@onready var nav_region: NavigationRegion2D = $NavigationRegion2D
 
 @export var prefer_hand_painted_layout: bool = true
 @export var runtime_canvas_modulate_color: Color = Color(0.06, 0.06, 0.08, 1.0)
@@ -39,6 +40,7 @@ var border_source_id: int = -1
 var obstacle_a_source_id: int = -1
 var obstacle_b_source_id: int = -1
 var blocked_cells: Dictionary = {}
+var _original_nav_poly: NavigationPolygon
 var enemy_blocked_cells: Dictionary = {}
 var astar_grid: AStarGrid2D = AStarGrid2D.new()
 var active_nav_layer: TileMapLayer
@@ -76,6 +78,9 @@ func _ready() -> void:
 		extra_enemies.append(second_enemy)
 	_center_camera()
 
+	if nav_region and nav_region.navigation_polygon:
+		_original_nav_poly = nav_region.navigation_polygon.duplicate()
+
 
 func _process(delta: float) -> void:
 	var weight := clampf(delta * CAMERA_FOLLOW_SPEED, 0.0, 1.0)
@@ -94,15 +99,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		var click_position := get_global_mouse_position()
 		var clicked_enemy := _get_enemy_at_position(click_position)
 		if clicked_enemy != null and player.has_method("set_attack_target"):
+			# attack_target system handles navigation internally via _refresh_attack_target_position
 			player.call("set_attack_target", clicked_enemy)
-			# Also route through closest-reachable movement, so enemy clicks behave
-			# like obstacle clicks when the exact point is invalid/too tight.
-			_request_player_move(clicked_enemy.global_position, -1, true)
 		elif player.has_method("clear_attack_target"):
 			player.call("clear_attack_target")
-			_request_player_move(click_position, -1, true)
+			_request_player_move(click_position)
 		else:
-			_request_player_move(click_position, -1, true)
+			_request_player_move(click_position)
 	elif event.is_action_pressed("ui_accept"):
 		_request_player_attack()
 		get_viewport().set_input_as_handled()
@@ -320,6 +323,8 @@ func _start_turn_based_combat() -> void:
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
 
+	_carve_enemy_holes_in_navmesh()
+
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", true)
 	for enemy_actor in _get_all_alive_enemies():
@@ -355,6 +360,8 @@ func _end_turn_based_combat() -> void:
 	active_enemy_turn_actor = null
 	_set_hovered_enemy(null)
 	active_enemy_turn_actor = null
+
+	_restore_navmesh()
 
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", false)
@@ -511,6 +518,8 @@ func _run_enemy_turn() -> void:
 		if is_instance_valid(enemy_actor) and enemy_actor.has_method("end_turn"):
 			enemy_actor.call("end_turn")
 
+	_carve_enemy_holes_in_navmesh()
+
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
 	active_enemy_turn_actor = null
@@ -635,6 +644,33 @@ func _cache_custom_blocked_cells() -> void:
 		blocked_cells[cell] = true
 
 
+func _carve_enemy_holes_in_navmesh() -> void:
+	if _original_nav_poly == null or nav_region == null:
+		return
+
+	var modified := _original_nav_poly.duplicate() as NavigationPolygon
+	var alive_enemies := _get_all_alive_enemies()
+	var hole_radius := 24.0
+
+	for enemy_actor in alive_enemies:
+		var enemy_local_pos := nav_region.to_local(enemy_actor.global_position)
+		var hole := PackedVector2Array()
+		var segments := 12
+		for i in range(segments - 1, -1, -1):
+			var angle := TAU * float(i) / float(segments)
+			hole.append(enemy_local_pos + Vector2(cos(angle), sin(angle)) * hole_radius)
+		modified.add_outline(hole)
+
+	modified.make_polygons_from_outlines()
+	nav_region.navigation_polygon = modified
+
+
+func _restore_navmesh() -> void:
+	if _original_nav_poly == null or nav_region == null:
+		return
+	nav_region.navigation_polygon = _original_nav_poly.duplicate()
+
+
 func _rebuild_navigation_for_layer(layer: TileMapLayer) -> void:
 	if layer == null:
 		return
@@ -656,50 +692,13 @@ func _rebuild_navigation_for_layer(layer: TileMapLayer) -> void:
 			astar_grid.set_point_solid(cell, blocked_cells.has(cell) or enemy_blocked_cells.has(cell))
 
 
-func _request_player_move(target_world_position: Vector2, max_cells: int = -1, avoid_enemy_cell: bool = false) -> int:
-	if active_nav_layer == null:
-		return 0
-	if avoid_enemy_cell:
-		_refresh_enemy_blocked_cells()
-	else:
-		enemy_blocked_cells.clear()
-	_rebuild_navigation_for_layer(active_nav_layer)
-	if astar_grid.region.size == Vector2i.ZERO:
-		return 0
-
-	var from_cell := _world_to_cell(active_nav_layer, player.global_position)
-	if not astar_grid.is_in_boundsv(from_cell):
-		return 0
-
-	var to_cell := _world_to_cell(active_nav_layer, target_world_position)
-	to_cell = _clamp_cell_to_region(to_cell, astar_grid.region)
-
-	var id_path := _build_astar_id_path(from_cell, to_cell, [])
-	if id_path.size() <= 1:
-		return 0
-
-	var total_steps := id_path.size() - 1
-	var used_steps := total_steps
-	if max_cells >= 0:
-		used_steps = mini(total_steps, max_cells)
-
-	var truncated_path: Array[Vector2i] = id_path.slice(0, used_steps + 1)
-	var valid_index := _find_farthest_valid_player_path_index(truncated_path)
-	if valid_index <= 0:
-		return 0
-
-	used_steps = valid_index
-	var world_path: Array[Vector2] = []
-	for i in range(1, valid_index + 1):
-		world_path.append(active_nav_layer.map_to_local(truncated_path[i]))
-
-	if player.has_method("set_navigation_path"):
-		player.call("set_navigation_path", world_path)
-	elif player.has_method("set_navigation_target"):
-		var destination_cell := truncated_path[valid_index]
-		var destination_world := active_nav_layer.map_to_local(destination_cell)
-		player.call("set_navigation_target", destination_world)
-	return used_steps
+func _request_player_move(target_world_position: Vector2) -> void:
+	# Use navmesh routing directly; NavigationObstacle2D on enemies carves them out
+	# of the navmesh so the path routes around them automatically.
+	if player == null or not is_instance_valid(player):
+		return
+	if player.has_method("set_navigation_target"):
+		player.call("set_navigation_target", target_world_position)
 
 
 func _collect_enemy_personal_space_cells() -> Array[Vector2i]:

@@ -9,7 +9,7 @@ extends CharacterBody2D
 @export var attack_animation_speed_scale := 1.6
 @export var target_refresh_interval := 0.2
 @export var attack_action_name := "attack"
-
+ 
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
 @onready var sprite: Sprite2D = $Sprite2D
@@ -29,6 +29,10 @@ var attack_slash: Sprite2D
 var sprite_idle_position := Vector2.ZERO
 var manual_path_points: Array[Vector2] = []
 var manual_path_index := 0
+var _stuck_timer := 0.0
+var _last_position := Vector2.ZERO
+const STUCK_THRESHOLD := 1.0
+const STUCK_MOVE_EPSILON := 2.0
 
 
 func _ready() -> void:
@@ -40,6 +44,16 @@ func _ready() -> void:
 	navigation_agent.navigation_layers = 1
 	navigation_agent.path_desired_distance = 4.0
 	navigation_agent.target_desired_distance = 8.0
+	navigation_agent.avoidance_enabled = true
+	navigation_agent.avoidance_layers = 1
+	navigation_agent.avoidance_mask = 1
+	navigation_agent.radius = 9.0
+	navigation_agent.neighbor_distance = 300.0
+	navigation_agent.time_horizon_agents = 4.0
+	navigation_agent.max_neighbors = 10
+	navigation_agent.max_speed = move_speed
+	if not navigation_agent.velocity_computed.is_connected(_on_navigation_agent_2d_velocity_computed):
+		navigation_agent.velocity_computed.connect(_on_navigation_agent_2d_velocity_computed)
 
 	_ensure_attack_input()
 	_setup_health_bar()
@@ -60,6 +74,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	_check_stuck(delta)
+
 	if _process_manual_path_movement():
 		return
 
@@ -70,9 +86,12 @@ func _physics_process(delta: float) -> void:
 			return
 
 		var turn_next_position := navigation_agent.get_next_path_position()
-		velocity = global_position.direction_to(turn_next_position) * move_speed
-		_update_facing_from_velocity(velocity)
-		move_and_slide()
+		var new_velocity := global_position.direction_to(turn_next_position) * move_speed
+		_update_facing_from_velocity(new_velocity)
+		if navigation_agent.avoidance_enabled:
+			navigation_agent.set_velocity(new_velocity)
+		else:
+			_on_navigation_agent_2d_velocity_computed(new_velocity)
 		return
 
 	attack_cooldown_left = maxf(attack_cooldown_left - delta, 0.0)
@@ -92,9 +111,9 @@ func _physics_process(delta: float) -> void:
 				_try_attack_target(attack_target)
 			elif not navigation_agent.is_navigation_finished():
 				var target_next_position := navigation_agent.get_next_path_position()
-				velocity = global_position.direction_to(target_next_position) * move_speed
-				_update_facing_from_velocity(velocity)
-				move_and_slide()
+				var desired_v := global_position.direction_to(target_next_position) * move_speed
+				_update_facing_from_velocity(desired_v)
+				navigation_agent.set_velocity(desired_v)
 			else:
 				velocity = Vector2.ZERO
 				move_and_slide()
@@ -106,9 +125,9 @@ func _physics_process(delta: float) -> void:
 		return
 
 	var next_position := navigation_agent.get_next_path_position()
-	velocity = global_position.direction_to(next_position) * move_speed
-	_update_facing_from_velocity(velocity)
-	move_and_slide()
+	var desired_velocity := global_position.direction_to(next_position) * move_speed
+	_update_facing_from_velocity(desired_velocity)
+	navigation_agent.set_velocity(desired_velocity)
 
 
 func snap_to(world_position: Vector2) -> void:
@@ -120,6 +139,8 @@ func set_navigation_target(world_position: Vector2) -> void:
 	clear_attack_target()
 	manual_path_points.clear()
 	manual_path_index = 0
+	_stuck_timer = 0.0
+	_last_position = global_position
 	var nav_map_rid := navigation_agent.get_navigation_map()
 	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, world_position)
 	navigation_agent.target_position = closest_nav_point
@@ -383,7 +404,7 @@ func _ensure_collision_shape() -> void:
 	if circle == null:
 		circle = CircleShape2D.new()
 		collision_shape.shape = circle
-	circle.radius = 14.0
+	circle.radius = 7.0
 	collision_shape.position = Vector2(0, -2)
 
 
@@ -434,6 +455,25 @@ func _create_vision_light_texture() -> Texture2D:
 
 func _on_navigation_agent_2d_velocity_computed(safe_velocity: Vector2) -> void:
 	velocity = safe_velocity
+	move_and_slide()
+
+
+func _check_stuck(delta: float) -> void:
+	var is_trying_to_move := not navigation_agent.is_navigation_finished() or manual_path_index < manual_path_points.size()
+	if not is_trying_to_move:
+		_stuck_timer = 0.0
+		_last_position = global_position
+		return
+
+	if global_position.distance_to(_last_position) > STUCK_MOVE_EPSILON:
+		_stuck_timer = 0.0
+		_last_position = global_position
+		return
+
+	_stuck_timer += delta
+	if _stuck_timer >= STUCK_THRESHOLD:
+		stop_movement_immediately()
+		_stuck_timer = 0.0
 
 
 func stop_movement_immediately() -> void:
