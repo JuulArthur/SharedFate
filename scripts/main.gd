@@ -62,6 +62,9 @@ var turn_ui_player_icon: TextureRect
 var turn_ui_player_label: Label
 var turn_ui_enemy_icons_container: HBoxContainer
 var turn_ui_enemy_icon_entries: Array[Dictionary] = []
+var path_preview_glow: Line2D
+var path_preview_line: Line2D
+var path_preview_label: Label
 
 
 func _ready() -> void:
@@ -81,6 +84,8 @@ func _ready() -> void:
 	if nav_region and nav_region.navigation_polygon:
 		_original_nav_poly = nav_region.navigation_polygon.duplicate()
 
+	_setup_path_preview()
+
 
 func _process(delta: float) -> void:
 	var weight := clampf(delta * CAMERA_FOLLOW_SPEED, 0.0, 1.0)
@@ -88,6 +93,7 @@ func _process(delta: float) -> void:
 	_update_combat_state()
 	_update_enemy_hover_state()
 	_update_turn_ui()
+	_update_path_preview()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -970,7 +976,7 @@ func _build_world_path_from_navigation(from_world: Vector2, to_world: Vector2) -
 
 	var from_point := NavigationServer2D.map_get_closest_point(nav_map_rid, from_world)
 	var to_point := NavigationServer2D.map_get_closest_point(nav_map_rid, to_world)
-	var nav_path := NavigationServer2D.map_get_path(nav_map_rid, from_point, to_point, false)
+	var nav_path := NavigationServer2D.map_get_path(nav_map_rid, from_point, to_point, true)
 	if nav_path.is_empty():
 		return []
 
@@ -1042,6 +1048,101 @@ func _find_nearest_walkable_cell(origin: Vector2i, max_radius: int) -> Vector2i:
 					return cell
 
 	return Vector2i(-1, -1)
+
+
+func _setup_path_preview() -> void:
+	path_preview_glow = Line2D.new()
+	path_preview_glow.name = "PathPreviewGlow"
+	path_preview_glow.width = 6.0
+	path_preview_glow.default_color = Color(0.6, 0.75, 1.0, 0.25)
+	path_preview_glow.z_index = 9
+	path_preview_glow.visible = false
+	add_child(path_preview_glow)
+
+	path_preview_line = Line2D.new()
+	path_preview_line.name = "PathPreviewLine"
+	path_preview_line.width = 2.0
+	path_preview_line.default_color = Color(1.0, 1.0, 1.0, 0.9)
+	path_preview_line.z_index = 10
+	path_preview_line.visible = false
+	add_child(path_preview_line)
+
+	path_preview_label = Label.new()
+	path_preview_label.name = "PathPreviewLabel"
+	path_preview_label.z_index = 11
+	path_preview_label.visible = false
+	path_preview_label.add_theme_font_size_override("font_size", 11)
+	path_preview_label.add_theme_color_override("font_color", Color(1.0, 0.95, 0.7, 0.95))
+	path_preview_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	path_preview_label.add_theme_constant_override("shadow_offset_x", 1)
+	path_preview_label.add_theme_constant_override("shadow_offset_y", 1)
+	add_child(path_preview_label)
+
+
+func _hide_path_preview() -> void:
+	path_preview_line.visible = false
+	path_preview_glow.visible = false
+	path_preview_label.visible = false
+
+
+func _update_path_preview() -> void:
+	if combat_state != CombatState.PLAYER_TURN or player_turn_action_running:
+		_hide_path_preview()
+		return
+
+	if player.has_method("is_moving") and player.call("is_moving"):
+		_hide_path_preview()
+		return
+
+	var remaining_meters := 0.0
+	if player.has_method("get_turn_remaining_move_meters"):
+		remaining_meters = float(player.call("get_turn_remaining_move_meters"))
+	if remaining_meters <= 0.01:
+		_hide_path_preview()
+		return
+
+	var mouse_world := get_global_mouse_position()
+	var world_path := _build_world_path_from_navigation(player.global_position, mouse_world)
+	if world_path.size() <= 1:
+		_hide_path_preview()
+		return
+
+	var max_world_distance := remaining_meters * TURN_METER_WORLD_UNITS
+	var total_length := _path_length(world_path)
+	var used_distance := minf(max_world_distance, total_length)
+	var used_meters := used_distance / TURN_METER_WORLD_UNITS
+
+	var trimmed: Array[Vector2] = []
+	trimmed.append(world_path[0])
+	var remaining_dist := used_distance
+	for i in range(1, world_path.size()):
+		var seg_len := world_path[i - 1].distance_to(world_path[i])
+		if remaining_dist <= seg_len:
+			trimmed.append(world_path[i - 1].lerp(world_path[i], remaining_dist / maxf(seg_len, 0.001)))
+			break
+		trimmed.append(world_path[i])
+		remaining_dist -= seg_len
+
+	path_preview_line.clear_points()
+	path_preview_glow.clear_points()
+	for p in trimmed:
+		path_preview_line.add_point(p)
+		path_preview_glow.add_point(p)
+
+	var over_budget := total_length > max_world_distance
+	if over_budget:
+		path_preview_line.default_color = Color(1.0, 0.75, 0.75, 0.9)
+		path_preview_glow.default_color = Color(1.0, 0.5, 0.5, 0.2)
+	else:
+		path_preview_line.default_color = Color(1.0, 1.0, 1.0, 0.9)
+		path_preview_glow.default_color = Color(0.6, 0.75, 1.0, 0.25)
+	path_preview_line.visible = true
+	path_preview_glow.visible = true
+
+	var end_point := trimmed[trimmed.size() - 1]
+	path_preview_label.text = "%.1fm / %.1fm" % [used_meters, remaining_meters]
+	path_preview_label.position = end_point + Vector2(6, -14)
+	path_preview_label.visible = true
 
 
 func _setup_turn_ui() -> void:
