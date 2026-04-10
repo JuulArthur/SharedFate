@@ -26,20 +26,14 @@ var hover_outline: Sprite2D
 func _ready() -> void:
 	_ensure_collision_shape()
 	collision_layer = 4
-	# Collide with world (1) and player (2).
-	collision_mask = 1 | 2
+	# Collide with world only — player walks through enemies.
+	collision_mask = 1
 	current_health = max_health
 
 	navigation_agent.navigation_layers = 1
 	navigation_agent.path_desired_distance = 4.0
 	navigation_agent.target_desired_distance = 8.0
-	navigation_agent.avoidance_enabled = true
-	navigation_agent.avoidance_layers = 1
-	navigation_agent.avoidance_mask = 1
-	navigation_agent.radius = 10.0
-	navigation_agent.max_speed = move_speed
-
-	_setup_nav_obstacle()
+	navigation_agent.avoidance_enabled = false
 	_setup_health_bar()
 	_update_health_bar()
 	sprite.texture = _create_enemy_texture()
@@ -190,23 +184,6 @@ func _ensure_collision_shape() -> void:
 		collision_shape.shape = circle
 	circle.radius = 7.0
 	collision_shape.position = Vector2(0, -2)
-
-
-func _setup_nav_obstacle() -> void:
-	var obstacle := NavigationObstacle2D.new()
-	obstacle.name = "NavObstacle"
-	# Carves a hole in the navmesh at runtime so pathfinding routes around the enemy.
-	obstacle.affect_navigation_mesh = true
-	obstacle.avoidance_enabled = true
-	# Build a circle polygon matching the collision shape (radius 14, offset (0,-2)).
-	var verts := PackedVector2Array()
-	var radius := 8.0
-	var segments := 12
-	for i: int in range(segments):
-		var angle := TAU * float(i) / float(segments)
-		verts.append(Vector2(cos(angle), sin(angle)) * radius + Vector2(0.0, -2.0))
-	obstacle.vertices = verts
-	add_child(obstacle)
 
 
 func _setup_health_bar() -> void:

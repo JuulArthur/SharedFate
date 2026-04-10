@@ -4,7 +4,7 @@ extends CharacterBody2D
 @export var max_health := 100
 @export var attack_damage := 20
 @export var attack_range := 40.0
-@export var attack_approach_buffer := 6.0
+@export var attack_approach_buffer := 20.0
 @export var attack_cooldown := 0.35
 @export var attack_animation_speed_scale := 1.6
 @export var target_refresh_interval := 0.2
@@ -38,22 +38,13 @@ const STUCK_MOVE_EPSILON := 2.0
 func _ready() -> void:
 	_ensure_collision_shape()
 	collision_layer = 2
-	# Collide with world (1) and enemies (4).
-	collision_mask = 1 | 4
+	# Collide with world only — walk through enemies.
+	collision_mask = 1
 
 	navigation_agent.navigation_layers = 1
 	navigation_agent.path_desired_distance = 4.0
 	navigation_agent.target_desired_distance = 8.0
-	navigation_agent.avoidance_enabled = true
-	navigation_agent.avoidance_layers = 1
-	navigation_agent.avoidance_mask = 1
-	navigation_agent.radius = 9.0
-	navigation_agent.neighbor_distance = 300.0
-	navigation_agent.time_horizon_agents = 4.0
-	navigation_agent.max_neighbors = 10
-	navigation_agent.max_speed = move_speed
-	if not navigation_agent.velocity_computed.is_connected(_on_navigation_agent_2d_velocity_computed):
-		navigation_agent.velocity_computed.connect(_on_navigation_agent_2d_velocity_computed)
+	navigation_agent.avoidance_enabled = false
 
 	_ensure_attack_input()
 	_setup_health_bar()
@@ -86,12 +77,9 @@ func _physics_process(delta: float) -> void:
 			return
 
 		var turn_next_position := navigation_agent.get_next_path_position()
-		var new_velocity := global_position.direction_to(turn_next_position) * move_speed
-		_update_facing_from_velocity(new_velocity)
-		if navigation_agent.avoidance_enabled:
-			navigation_agent.set_velocity(new_velocity)
-		else:
-			_on_navigation_agent_2d_velocity_computed(new_velocity)
+		velocity = global_position.direction_to(turn_next_position) * move_speed
+		_update_facing_from_velocity(velocity)
+		move_and_slide()
 		return
 
 	attack_cooldown_left = maxf(attack_cooldown_left - delta, 0.0)
@@ -111,9 +99,9 @@ func _physics_process(delta: float) -> void:
 				_try_attack_target(attack_target)
 			elif not navigation_agent.is_navigation_finished():
 				var target_next_position := navigation_agent.get_next_path_position()
-				var desired_v := global_position.direction_to(target_next_position) * move_speed
-				_update_facing_from_velocity(desired_v)
-				navigation_agent.set_velocity(desired_v)
+				velocity = global_position.direction_to(target_next_position) * move_speed
+				_update_facing_from_velocity(velocity)
+				move_and_slide()
 			else:
 				velocity = Vector2.ZERO
 				move_and_slide()
@@ -125,9 +113,9 @@ func _physics_process(delta: float) -> void:
 		return
 
 	var next_position := navigation_agent.get_next_path_position()
-	var desired_velocity := global_position.direction_to(next_position) * move_speed
-	_update_facing_from_velocity(desired_velocity)
-	navigation_agent.set_velocity(desired_velocity)
+	velocity = global_position.direction_to(next_position) * move_speed
+	_update_facing_from_velocity(velocity)
+	move_and_slide()
 
 
 func snap_to(world_position: Vector2) -> void:

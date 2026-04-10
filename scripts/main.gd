@@ -323,8 +323,6 @@ func _start_turn_based_combat() -> void:
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
 
-	_carve_enemy_holes_in_navmesh()
-
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", true)
 	for enemy_actor in _get_all_alive_enemies():
@@ -360,8 +358,6 @@ func _end_turn_based_combat() -> void:
 	active_enemy_turn_actor = null
 	_set_hovered_enemy(null)
 	active_enemy_turn_actor = null
-
-	_restore_navmesh()
 
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", false)
@@ -518,8 +514,6 @@ func _run_enemy_turn() -> void:
 		if is_instance_valid(enemy_actor) and enemy_actor.has_method("end_turn"):
 			enemy_actor.call("end_turn")
 
-	_carve_enemy_holes_in_navmesh()
-
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
 	active_enemy_turn_actor = null
@@ -539,26 +533,19 @@ func _player_can_attack_enemy_now() -> bool:
 	return player.global_position.distance_to(target_enemy.global_position) <= float(player.get("attack_range"))
 
 
+const ENEMY_CLICK_RADIUS := 24.0
+
 func _get_enemy_at_position(world_position: Vector2) -> Node2D:
-	var params := PhysicsPointQueryParameters2D.new()
-	params.position = world_position
-	params.collide_with_areas = true
-	params.collide_with_bodies = true
-	params.collision_mask = 0xFFFFFFFF
+	var closest_enemy: Node2D = null
+	var closest_dist := ENEMY_CLICK_RADIUS
 
-	var hits := get_world_2d().direct_space_state.intersect_point(params, 16)
-	for hit in hits:
-		var collider := hit.get("collider") as Object
-		if collider == null:
-			continue
-		if not (collider is Node2D):
-			continue
-		var candidate := collider as Node2D
-		for enemy_actor in _get_all_alive_enemies():
-			if candidate == enemy_actor:
-				return enemy_actor
+	for enemy_actor in _get_all_alive_enemies():
+		var dist := world_position.distance_to(enemy_actor.global_position)
+		if dist < closest_dist:
+			closest_dist = dist
+			closest_enemy = enemy_actor
 
-	return null
+	return closest_enemy
 
 
 func _pick_ground_tile(x: int, y: int) -> int:
