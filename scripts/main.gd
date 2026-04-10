@@ -821,7 +821,7 @@ func _request_enemy_move_towards_player(enemy_actor: CharacterBody2D, max_cells:
 	_rebuild_navigation_for_layer(active_nav_layer)
 
 	var enemy_attack_range := float(enemy_actor.get("attack_range"))
-	var approach_point := _compute_approach_world_point(enemy_actor.global_position, player.global_position, enemy_attack_range)
+	var approach_point := _compute_approach_world_point(enemy_actor.global_position, player.global_position, maxf(4.0, enemy_attack_range - 20.0))
 	var cell_path := _build_cell_path_from_navigation(enemy_actor.global_position, approach_point)
 	if cell_path.size() <= 1:
 		return 0

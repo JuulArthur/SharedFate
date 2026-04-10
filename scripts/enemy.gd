@@ -162,7 +162,7 @@ func _refresh_target_position() -> void:
 		return
 
 	var nav_map_rid := navigation_agent.get_navigation_map()
-	var approach_point := _compute_approach_point(_target.global_position, attack_range)
+	var approach_point := _compute_approach_point(_target.global_position, maxf(4.0, attack_range - 20.0))
 	var closest_nav_point := NavigationServer2D.map_get_closest_point(nav_map_rid, approach_point)
 	navigation_agent.target_position = closest_nav_point
 
