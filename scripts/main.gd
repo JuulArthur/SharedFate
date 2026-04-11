@@ -22,6 +22,11 @@ enum CombatState {
 	ENEMY_TURN
 }
 
+enum PlayerTurnAction {
+	MOVE,
+	ATTACK
+}
+
 @onready var custom_layout: TileMapLayer = get_node_or_null("MyCustomLayout")
 @onready var custom_background: TileMapLayer = get_node_or_null("MyCustomBackground")
 @onready var custom_objects: TileMapLayer = get_node_or_null("MyCustomObjects")
@@ -62,6 +67,11 @@ var turn_ui_player_icon: TextureRect
 var turn_ui_player_label: Label
 var turn_ui_enemy_icons_container: HBoxContainer
 var turn_ui_enemy_icon_entries: Array[Dictionary] = []
+var turn_ui_actions_panel: PanelContainer
+var turn_ui_attack_button: Button
+var turn_ui_block_button: Button
+var turn_ui_wait_button: Button
+var selected_player_turn_action: PlayerTurnAction = PlayerTurnAction.ATTACK
 var path_preview_glow: Line2D
 var path_preview_line: Line2D
 var path_preview_label: Label
@@ -281,13 +291,17 @@ func _handle_turn_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		var click_position := get_global_mouse_position()
 		var clicked_enemy := _get_enemy_at_position(click_position)
-		if clicked_enemy != null:
-			_request_player_turn_engage_enemy(clicked_enemy as CharacterBody2D)
+		if selected_player_turn_action == PlayerTurnAction.ATTACK:
+			if clicked_enemy != null:
+				_request_player_turn_engage_enemy(clicked_enemy as CharacterBody2D)
+		elif clicked_enemy != null:
+			_request_player_turn_move((clicked_enemy as CharacterBody2D).global_position)
 		else:
 			_request_player_turn_move(click_position)
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("ui_accept"):
-		_request_player_turn_attack()
+		if selected_player_turn_action == PlayerTurnAction.ATTACK:
+			_request_player_turn_attack()
 		get_viewport().set_input_as_handled()
 
 
@@ -325,6 +339,7 @@ func _is_close_enough_for_combat_start() -> bool:
 
 func _start_turn_based_combat() -> void:
 	_stop_all_combatants_immediately()
+	_set_player_turn_action(PlayerTurnAction.ATTACK)
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
@@ -360,6 +375,7 @@ func _stop_all_combatants_immediately() -> void:
 
 func _end_turn_based_combat() -> void:
 	combat_state = CombatState.EXPLORATION
+	_set_player_turn_action(PlayerTurnAction.ATTACK)
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
 	_set_hovered_enemy(null)
@@ -474,6 +490,7 @@ func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> 
 func _begin_enemy_turn() -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
+	_set_player_turn_action(PlayerTurnAction.ATTACK)
 	if player.has_method("end_turn"):
 		player.call("end_turn")
 	combat_state = CombatState.ENEMY_TURN
@@ -522,6 +539,7 @@ func _run_enemy_turn() -> void:
 
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
+	_set_player_turn_action(PlayerTurnAction.ATTACK)
 	active_enemy_turn_actor = null
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
@@ -1270,6 +1288,51 @@ func _setup_turn_ui() -> void:
 	turn_ui_attack_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
 	vbox.add_child(turn_ui_attack_label)
 
+	turn_ui_actions_panel = PanelContainer.new()
+	turn_ui_actions_panel.name = "TurnActionsUI"
+	turn_ui_actions_panel.visible = false
+	turn_ui_actions_panel.anchor_left = 0.5
+	turn_ui_actions_panel.anchor_top = 1.0
+	turn_ui_actions_panel.anchor_right = 0.5
+	turn_ui_actions_panel.anchor_bottom = 1.0
+	turn_ui_actions_panel.offset_left = -240.0
+	turn_ui_actions_panel.offset_top = -82.0
+	turn_ui_actions_panel.offset_right = 240.0
+	turn_ui_actions_panel.offset_bottom = -18.0
+	turn_ui_actions_panel.add_theme_stylebox_override("panel", panel_style.duplicate())
+	turn_ui_layer.add_child(turn_ui_actions_panel)
+
+	var actions_margin := MarginContainer.new()
+	actions_margin.add_theme_constant_override("margin_left", 12)
+	actions_margin.add_theme_constant_override("margin_top", 8)
+	actions_margin.add_theme_constant_override("margin_right", 12)
+	actions_margin.add_theme_constant_override("margin_bottom", 8)
+	turn_ui_actions_panel.add_child(actions_margin)
+
+	var actions_hbox := HBoxContainer.new()
+	actions_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	actions_hbox.add_theme_constant_override("separation", 10)
+	actions_margin.add_child(actions_hbox)
+
+	turn_ui_attack_button = Button.new()
+	turn_ui_attack_button.text = "Attack"
+	turn_ui_attack_button.toggle_mode = true
+	turn_ui_attack_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_attack_button.pressed.connect(_on_turn_attack_button_pressed)
+	actions_hbox.add_child(turn_ui_attack_button)
+
+	turn_ui_block_button = Button.new()
+	turn_ui_block_button.text = "Block"
+	turn_ui_block_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_block_button.pressed.connect(_on_turn_block_button_pressed)
+	actions_hbox.add_child(turn_ui_block_button)
+
+	turn_ui_wait_button = Button.new()
+	turn_ui_wait_button.text = "Wait"
+	turn_ui_wait_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_wait_button.pressed.connect(_on_turn_wait_button_pressed)
+	actions_hbox.add_child(turn_ui_wait_button)
+
 	_rebuild_turn_enemy_icons()
 
 
@@ -1281,12 +1344,37 @@ func _update_turn_ui() -> void:
 	turn_ui_panel.visible = in_turn_mode
 	if turn_ui_order_panel != null:
 		turn_ui_order_panel.visible = in_turn_mode
+	if turn_ui_actions_panel != null:
+		turn_ui_actions_panel.visible = in_turn_mode
 	if not in_turn_mode:
 		return
 
 	var alive_enemies := _get_all_alive_enemies()
 	if turn_ui_enemy_icon_entries.size() != alive_enemies.size():
 		_rebuild_turn_enemy_icons()
+
+	var can_attack := false
+	var is_blocking := false
+	if player != null and player.has_method("can_turn_attack"):
+		can_attack = bool(player.call("can_turn_attack"))
+	if player != null and player.has_method("is_blocking"):
+		is_blocking = bool(player.call("is_blocking"))
+
+	var can_player_use_actions := combat_state == CombatState.PLAYER_TURN and not player_turn_action_running
+	if can_player_use_actions and player != null and player.has_method("is_moving"):
+		can_player_use_actions = not bool(player.call("is_moving"))
+	if not can_attack and selected_player_turn_action == PlayerTurnAction.ATTACK:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+
+	if turn_ui_attack_button != null:
+		turn_ui_attack_button.disabled = not can_player_use_actions or not can_attack
+		turn_ui_attack_button.button_pressed = selected_player_turn_action == PlayerTurnAction.ATTACK
+		turn_ui_attack_button.text = "Attack (Select Target)" if selected_player_turn_action == PlayerTurnAction.ATTACK else "Attack"
+	if turn_ui_block_button != null:
+		turn_ui_block_button.disabled = not can_player_use_actions
+		turn_ui_block_button.text = "Block (Active)" if is_blocking else "Block"
+	if turn_ui_wait_button != null:
+		turn_ui_wait_button.disabled = not can_player_use_actions
 
 	var player_turn_active := combat_state == CombatState.PLAYER_TURN
 	var player_icon_dim := Color(1.0, 1.0, 1.0, 1.0) if player_turn_active else Color(0.45, 0.45, 0.45, 0.95)
@@ -1333,19 +1421,20 @@ func _update_turn_ui() -> void:
 
 	if combat_state == CombatState.PLAYER_TURN:
 		var remaining_meters := 0.0
-		var can_attack := false
+		var can_attack_now := false
 
 		if player != null and player.has_method("get_turn_remaining_move_meters"):
 			remaining_meters = float(player.call("get_turn_remaining_move_meters"))
 		if player != null and player.has_method("can_turn_attack"):
-			can_attack = bool(player.call("can_turn_attack"))
+			can_attack_now = bool(player.call("can_turn_attack"))
 
 		phase_text = "Phase: Your turn"
 		move_text = "Movement: %.1f m left" % remaining_meters
-		attack_text = "Attack: %s" % ("Ready" if can_attack else "Used")
+		var attack_mode_text := "Targeting" if selected_player_turn_action == PlayerTurnAction.ATTACK else "Move"
+		attack_text = "Attack: %s | Mode: %s" % [("Ready" if can_attack_now else "Used"), attack_mode_text]
 		turn_ui_phase_label.add_theme_color_override("font_color", Color(0.62, 0.84, 0.66, 1.0))
 		turn_ui_move_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
-		turn_ui_attack_label.add_theme_color_override("font_color", Color(0.65, 0.88, 0.67, 1.0) if can_attack else Color(0.88, 0.57, 0.57, 1.0))
+		turn_ui_attack_label.add_theme_color_override("font_color", Color(0.65, 0.88, 0.67, 1.0) if can_attack_now else Color(0.88, 0.57, 0.57, 1.0))
 	elif combat_state == CombatState.ENEMY_TURN:
 		phase_text = "Phase: Enemy turn"
 		move_text = "Movement: Enemy acting..."
@@ -1357,6 +1446,44 @@ func _update_turn_ui() -> void:
 	turn_ui_phase_label.text = phase_text
 	turn_ui_move_label.text = move_text
 	turn_ui_attack_label.text = attack_text
+
+
+func _set_player_turn_action(action: PlayerTurnAction) -> void:
+	selected_player_turn_action = action
+
+
+func _on_turn_attack_button_pressed() -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if player_turn_action_running:
+		return
+	if selected_player_turn_action == PlayerTurnAction.ATTACK:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+		_update_turn_ui()
+		return
+	if player != null and player.has_method("can_turn_attack"):
+		if not bool(player.call("can_turn_attack")):
+			return
+	_set_player_turn_action(PlayerTurnAction.ATTACK)
+	_update_turn_ui()
+
+
+func _on_turn_block_button_pressed() -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if player_turn_action_running:
+		return
+	if player != null and player.has_method("set_blocking"):
+		player.call("set_blocking", true)
+	_begin_enemy_turn()
+
+
+func _on_turn_wait_button_pressed() -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if player_turn_action_running:
+		return
+	_begin_enemy_turn()
 
 
 func _create_placeholder_icon(base_color: Color) -> Texture2D:

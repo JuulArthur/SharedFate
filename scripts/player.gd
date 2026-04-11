@@ -24,6 +24,7 @@ var in_turn_based_combat := false
 var turn_active := false
 var turn_remaining_move_meters := 0.0
 var turn_attack_available := false
+var blocking_active := false
 var facing_direction := Vector2.RIGHT
 var attack_slash: Sprite2D
 var sprite_idle_position := Vector2.ZERO
@@ -154,7 +155,10 @@ func clear_attack_target() -> void:
 
 
 func take_damage(amount: int) -> void:
-	current_health = maxi(0, current_health - maxi(amount, 0))
+	var final_amount := maxi(amount, 0)
+	if blocking_active and final_amount > 0:
+		final_amount = maxi(1, int(ceil(float(final_amount) * 0.5)))
+	current_health = maxi(0, current_health - final_amount)
 	_update_health_bar()
 
 
@@ -475,6 +479,7 @@ func stop_movement_immediately() -> void:
 
 func set_turn_based_combat(enabled: bool) -> void:
 	in_turn_based_combat = enabled
+	blocking_active = false
 	if enabled:
 		stop_movement_immediately()
 		return
@@ -490,6 +495,7 @@ func start_turn(max_move_meters: float = 6.0) -> void:
 	turn_active = true
 	turn_remaining_move_meters = maxf(0.0, max_move_meters)
 	turn_attack_available = true
+	blocking_active = false
 
 
 func end_turn() -> void:
@@ -530,6 +536,14 @@ func is_moving() -> bool:
 
 func is_alive() -> bool:
 	return current_health > 0
+
+
+func set_blocking(enabled: bool) -> void:
+	blocking_active = enabled
+
+
+func is_blocking() -> bool:
+	return blocking_active
 
 
 func _process_manual_path_movement() -> bool:
