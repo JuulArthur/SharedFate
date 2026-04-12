@@ -9,15 +9,23 @@ extends CharacterBody2D
 @export var attack_animation_speed_scale := 1.6
 @export var target_refresh_interval := 0.2
 @export var attack_action_name := "attack"
- 
+@export var ranged_attack_damage := 16
+
+const XP_BASE_TO_LEVEL_2 := 100.0
+const XP_PER_LEVEL_MULT := 1.5
+
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
 @onready var sprite: Sprite2D = $Sprite2D
 @onready var vision_light: PointLight2D = $VisionLight
 
 var current_health := 100
+var player_level := 1
+var experience_points := 0.0
 var attack_cooldown_left := 0.0
 var health_bar_fill: Sprite2D
+var xp_bar_fill: Sprite2D
+var level_label: Label
 var attack_target: Node2D
 var target_refresh_left := 0.0
 var in_turn_based_combat := false
@@ -47,10 +55,15 @@ func _ready() -> void:
 	navigation_agent.target_desired_distance = 8.0
 	navigation_agent.avoidance_enabled = false
 
+	add_to_group("player")
+
 	_ensure_attack_input()
 	_setup_health_bar()
+	_setup_level_and_xp_ui()
 	current_health = max_health
 	_update_health_bar()
+	_update_xp_bar()
+	_update_level_label()
 
 	sprite.texture = _create_placeholder_texture()
 	sprite_idle_position = sprite.position
@@ -199,6 +212,52 @@ func try_attack(_target: Node2D = null) -> void:
 		return
 
 	_try_attack()
+
+
+func try_ranged_attack(_target: Node2D = null) -> void:
+	if in_turn_based_combat:
+		if not turn_active:
+			return
+		if not turn_attack_available:
+			return
+		if _target == null or not is_instance_valid(_target):
+			return
+		if not _target.has_method("receive_damage"):
+			return
+
+		turn_attack_available = false
+		_face_toward_world(_target.global_position)
+		_flash_ranged_feedback(_target)
+		_target.call("receive_damage", ranged_attack_damage)
+		return
+
+
+func _face_toward_world(world_position: Vector2) -> void:
+	var d := world_position - global_position
+	if d.length() > 0.01:
+		facing_direction = d.normalized()
+		sprite.flip_h = facing_direction.x < 0.0
+
+
+func _flash_ranged_feedback(_target: Node2D) -> void:
+	var speed_scale := maxf(attack_animation_speed_scale, 0.1)
+	var t_col := 0.1 * speed_scale
+	var t_reset := 0.18 * speed_scale
+
+	sprite.modulate = Color(0.75, 0.92, 1.0, 1.0)
+	var tween := create_tween()
+	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), t_reset)
+
+	var bolt := Line2D.new()
+	bolt.width = 2.5
+	bolt.default_color = Color(0.4, 0.85, 1.0, 0.95)
+	bolt.z_index = sprite.z_index + 2
+	add_child(bolt)
+	bolt.add_point(Vector2.ZERO)
+	bolt.add_point(to_local(_target.global_position))
+	var bolt_tween := create_tween()
+	bolt_tween.tween_property(bolt, "default_color:a", 0.0, 0.22 * speed_scale)
+	bolt_tween.tween_callback(bolt.queue_free)
 
 
 func _try_attack_target(target: Node2D) -> void:
@@ -362,6 +421,83 @@ func _setup_health_bar() -> void:
 		health_bar_fill.centered = false
 		root.add_child(health_bar_fill)
 	health_bar_fill.texture = _create_solid_texture(Vector2i(28, 4), Color(0.15, 0.82, 0.22, 1.0))
+
+
+func _setup_level_and_xp_ui() -> void:
+	level_label = Label.new()
+	level_label.name = "LevelLabel"
+	level_label.text = "Lv 1"
+	level_label.position = Vector2(-22, -52)
+	level_label.add_theme_font_size_override("font_size", 10)
+	level_label.add_theme_color_override("font_color", Color(0.95, 0.88, 0.65, 1.0))
+	level_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
+	level_label.add_theme_constant_override("shadow_offset_x", 1)
+	level_label.add_theme_constant_override("shadow_offset_y", 1)
+	add_child(level_label)
+
+	var xp_root := Node2D.new()
+	xp_root.name = "XpBarRoot"
+	xp_root.position = Vector2(-14, -44)
+	add_child(xp_root)
+
+	var xp_bg := Sprite2D.new()
+	xp_bg.name = "Background"
+	xp_bg.centered = false
+	xp_bg.texture = _create_solid_texture(Vector2i(28, 3), Color(0.12, 0.12, 0.14, 0.95))
+	xp_root.add_child(xp_bg)
+
+	xp_bar_fill = Sprite2D.new()
+	xp_bar_fill.name = "Fill"
+	xp_bar_fill.centered = false
+	xp_bar_fill.texture = _create_solid_texture(Vector2i(28, 3), Color(0.55, 0.45, 0.95, 1.0))
+	xp_root.add_child(xp_bar_fill)
+
+
+func xp_required_for_next_level() -> float:
+	return XP_BASE_TO_LEVEL_2 * pow(XP_PER_LEVEL_MULT, float(player_level - 1))
+
+
+func add_experience(amount: int) -> void:
+	if amount <= 0:
+		return
+	experience_points += float(amount)
+	while experience_points + 0.0001 >= xp_required_for_next_level():
+		experience_points -= xp_required_for_next_level()
+		player_level += 1
+		_on_level_up()
+	_update_xp_bar()
+	_update_level_label()
+
+
+func _on_level_up() -> void:
+	pass
+
+
+func get_player_level() -> int:
+	return player_level
+
+
+func get_experience_toward_next() -> float:
+	return experience_points
+
+
+func get_xp_required_for_next_level() -> float:
+	return xp_required_for_next_level()
+
+
+func _update_level_label() -> void:
+	if level_label != null:
+		level_label.text = "Lv %d" % player_level
+
+
+func _update_xp_bar() -> void:
+	if xp_bar_fill == null:
+		return
+	var need := xp_required_for_next_level()
+	var ratio := 0.0
+	if need > 0.0:
+		ratio = clampf(experience_points / need, 0.0, 1.0)
+	xp_bar_fill.scale = Vector2(ratio, 1.0)
 
 
 func _update_health_bar() -> void:

@@ -6,6 +6,7 @@ extends CharacterBody2D
 @export var attack_range := 44.0
 @export var attack_cooldown := 0.8
 @export var target_refresh_interval := 0.25
+@export var experience_reward := 50
 
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
@@ -17,13 +18,14 @@ var _target_refresh_left := 0.0
 var _target: Node2D
 var in_turn_based_combat := false
 var turn_active := false
-var turn_remaining_move_cells := 0
+var turn_remaining_move_meters := 0.0
 var turn_attack_available := false
 var health_bar_fill: Sprite2D
 var hover_outline: Sprite2D
 
 
 func _ready() -> void:
+	add_to_group("enemies")
 	_ensure_collision_shape()
 	collision_layer = 4
 	# Collide with world only — player walks through enemies.
@@ -118,6 +120,7 @@ func receive_damage(amount: int) -> void:
 	_update_health_bar()
 	print("Enemy HP: %d/%d" % [current_health, max_health])
 	if current_health == 0:
+		get_tree().call_group("player", "add_experience", experience_reward)
 		queue_free()
 
 
@@ -305,24 +308,28 @@ func set_turn_based_combat(enabled: bool) -> void:
 
 	if not enabled:
 		turn_active = false
-		turn_remaining_move_cells = 0
+		turn_remaining_move_meters = 0.0
 		turn_attack_available = false
 
 
-func start_turn(max_move_cells: int = 6) -> void:
+func start_turn(max_move_meters: float = 6.0) -> void:
 	turn_active = true
-	turn_remaining_move_cells = maxi(0, max_move_cells)
+	turn_remaining_move_meters = maxf(0.0, max_move_meters)
 	turn_attack_available = true
 
 
 func end_turn() -> void:
 	turn_active = false
-	turn_remaining_move_cells = 0
+	turn_remaining_move_meters = 0.0
 	turn_attack_available = false
 
 
-func consume_turn_movement(used_cells: int) -> void:
-	turn_remaining_move_cells = maxi(0, turn_remaining_move_cells - maxi(0, used_cells))
+func consume_turn_movement_meters(used: float) -> void:
+	turn_remaining_move_meters = maxf(0.0, turn_remaining_move_meters - maxf(0.0, used))
+
+
+func get_turn_remaining_move_meters() -> float:
+	return turn_remaining_move_meters
 
 
 func can_turn_attack() -> bool:
@@ -330,7 +337,7 @@ func can_turn_attack() -> bool:
 
 
 func get_turn_remaining_move_cells() -> int:
-	return turn_remaining_move_cells
+	return int(round(turn_remaining_move_meters))
 
 
 func is_moving() -> bool:

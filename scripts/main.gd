@@ -7,12 +7,9 @@ const CAMERA_FOLLOW_SPEED := 6.0
 const CAMERA_ZOOM := Vector2(3.35, 3.35)
 const ASSET_DIR := "res://assets/kenney_isometric-miniature-dungeon 2/Isometric/"
 const TURN_MOVE_METERS := 6.0
-const ENEMY_TURN_MOVE_CELLS := 6
-const TURN_METER_WORLD_UNITS := float(TILE_SIZE.x)
+const RANGED_ATTACK_RANGE_METERS := 12.0
 const COMBAT_TRIGGER_DISTANCE_CELLS := 6
 const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
-const ENEMY_SPAWN_OFFSET := Vector2i(6, -6)
-const ENEMY_SPAWN_SEARCH_RADIUS := 14
 const ENEMY_TURN_DELAY_SECONDS := 1.0
 const TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS := 20.0
 
@@ -24,7 +21,8 @@ enum CombatState {
 
 enum PlayerTurnAction {
 	MOVE,
-	ATTACK
+	ATTACK,
+	RANGED
 }
 
 @onready var custom_layout: TileMapLayer = get_node_or_null("MyCustomLayout")
@@ -62,6 +60,7 @@ var turn_ui_title_label: Label
 var turn_ui_phase_label: Label
 var turn_ui_move_label: Label
 var turn_ui_attack_label: Label
+var turn_ui_level_xp_label: Label
 var turn_ui_order_panel: PanelContainer
 var turn_ui_player_icon: TextureRect
 var turn_ui_player_label: Label
@@ -69,26 +68,34 @@ var turn_ui_enemy_icons_container: HBoxContainer
 var turn_ui_enemy_icon_entries: Array[Dictionary] = []
 var turn_ui_actions_panel: PanelContainer
 var turn_ui_attack_button: Button
+var turn_ui_ranged_button: Button
 var turn_ui_block_button: Button
 var turn_ui_wait_button: Button
-var selected_player_turn_action: PlayerTurnAction = PlayerTurnAction.ATTACK
+var selected_player_turn_action: PlayerTurnAction = PlayerTurnAction.MOVE
 var path_preview_glow: Line2D
 var path_preview_line: Line2D
 var path_preview_label: Label
+var _turn_meter_world_units_cache: float = -1.0
+var music_exploration: AudioStreamPlayer
+var music_combat: AudioStreamPlayer
+var music_muted := true
+var mute_button: Button
+const MUSIC_CROSSFADE_SECONDS := 1.2
+const MUSIC_VOLUME_DB := -6.0
 
 
 func _ready() -> void:
 	canvas_modulate.color = runtime_canvas_modulate_color
 	_setup_turn_ui()
+	_setup_music()
 
 	active_nav_layer = custom_background
+	_refresh_turn_meter_world_units()
 	_setup_tile_set()
 	_rebuild_navigation_for_layer(active_nav_layer)
 	_place_player()
-	_spawn_enemy()
-	var second_enemy := _spawn_additional_enemy(Vector2i(-ENEMY_SPAWN_OFFSET.x, ENEMY_SPAWN_OFFSET.y), "Enemy2")
-	if second_enemy != null:
-		extra_enemies.append(second_enemy)
+	_register_placed_enemies()
+	_wire_enemy_ai_targets()
 	_center_camera()
 
 	if nav_region and nav_region.navigation_polygon:
@@ -127,36 +134,33 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
-func _spawn_enemy() -> void:
-	enemy = _spawn_additional_enemy(ENEMY_SPAWN_OFFSET, "Enemy")
+func _register_placed_enemies() -> void:
+	var found: Array[CharacterBody2D] = []
+	for node in get_tree().get_nodes_in_group("enemies"):
+		if not (node is CharacterBody2D):
+			continue
+		if not is_ancestor_of(node):
+			continue
+		found.append(node as CharacterBody2D)
+
+	if found.is_empty():
+		push_warning("No enemies found: add instances of res://scenes/enemy.tscn under Main (group \"enemies\").")
+		return
+
+	found.sort_custom(func(a: CharacterBody2D, b: CharacterBody2D) -> bool:
+		return str(a.get_path()) < str(b.get_path())
+	)
+
+	enemy = found[0]
+	extra_enemies.clear()
+	for i in range(1, found.size()):
+		extra_enemies.append(found[i])
 
 
-func _spawn_additional_enemy(offset_from_player: Vector2i, enemy_name: String) -> CharacterBody2D:
-	var enemy_actor := CharacterBody2D.new()
-	enemy_actor.name = enemy_name
-	enemy_actor.z_index = 4
-	enemy_actor.script = load("res://scripts/enemy.gd")
-
-	var collision_shape := CollisionShape2D.new()
-	collision_shape.name = "CollisionShape2D"
-	enemy_actor.add_child(collision_shape)
-
-	var navigation_agent := NavigationAgent2D.new()
-	navigation_agent.name = "NavigationAgent2D"
-	navigation_agent.path_desired_distance = 4.0
-	navigation_agent.target_desired_distance = 8.0
-	enemy_actor.add_child(navigation_agent)
-
-	var sprite := Sprite2D.new()
-	sprite.name = "Sprite2D"
-	sprite.position = Vector2(0, -16)
-	enemy_actor.add_child(sprite)
-
-	add_child(enemy_actor)
-	_place_enemy_on_layer(enemy_actor, custom_background, offset_from_player)
-	if enemy_actor.has_method("set_target"):
-		enemy_actor.call("set_target", player)
-	return enemy_actor
+func _wire_enemy_ai_targets() -> void:
+	for enemy_actor in _get_all_alive_enemies():
+		if enemy_actor.has_method("set_target"):
+			enemy_actor.call("set_target", player)
 
 
 func _load_custom_layout_mode() -> void:
@@ -226,51 +230,6 @@ func _place_player_on_layer(layer: TileMapLayer) -> void:
 		player.global_position = spawn_position
 
 
-func _place_enemy_on_layer(enemy_actor: CharacterBody2D, layer: TileMapLayer, offset_from_player: Vector2i) -> void:
-	if enemy_actor == null or not is_instance_valid(enemy_actor):
-		return
-	if layer == null:
-		return
-
-	var used_rect := layer.get_used_rect()
-	if used_rect.size == Vector2i.ZERO:
-		return
-
-	var player_cell := layer.local_to_map(layer.to_local(player.global_position))
-	var preferred_cell := player_cell + offset_from_player
-	var spawn_cell := _find_nearest_walkable_spawn_cell(layer, preferred_cell, ENEMY_SPAWN_SEARCH_RADIUS)
-	var spawn_position := layer.map_to_local(spawn_cell)
-
-	if enemy_actor.has_method("snap_to"):
-		enemy_actor.call("snap_to", spawn_position)
-	else:
-		enemy_actor.global_position = spawn_position
-
-
-func _find_nearest_walkable_spawn_cell(layer: TileMapLayer, origin: Vector2i, max_radius: int) -> Vector2i:
-	var used_rect := layer.get_used_rect()
-	if used_rect.size == Vector2i.ZERO:
-		return origin
-
-	var clamped_origin := _clamp_cell_to_region(origin, used_rect)
-	if not blocked_cells.has(clamped_origin):
-		return clamped_origin
-
-	for radius in range(1, max_radius + 1):
-		for x in range(clamped_origin.x - radius, clamped_origin.x + radius + 1):
-			for y in range(clamped_origin.y - radius, clamped_origin.y + radius + 1):
-				var cell := Vector2i(x, y)
-				var is_ring := x == clamped_origin.x - radius or x == clamped_origin.x + radius or y == clamped_origin.y - radius or y == clamped_origin.y + radius
-				if not is_ring:
-					continue
-				if not used_rect.has_point(cell):
-					continue
-				if not blocked_cells.has(cell):
-					return cell
-
-	return clamped_origin
-
-
 func _request_player_attack() -> void:
 	if not player.has_method("try_attack"):
 		return
@@ -291,16 +250,18 @@ func _handle_turn_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		var click_position := get_global_mouse_position()
 		var clicked_enemy := _get_enemy_at_position(click_position)
-		if selected_player_turn_action == PlayerTurnAction.ATTACK:
-			if clicked_enemy != null:
+		if clicked_enemy != null:
+			if selected_player_turn_action == PlayerTurnAction.RANGED:
+				_request_player_turn_ranged_attack(clicked_enemy as CharacterBody2D)
+			else:
 				_request_player_turn_engage_enemy(clicked_enemy as CharacterBody2D)
-		elif clicked_enemy != null:
-			_request_player_turn_move((clicked_enemy as CharacterBody2D).global_position)
 		else:
 			_request_player_turn_move(click_position)
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("ui_accept"):
-		if selected_player_turn_action == PlayerTurnAction.ATTACK:
+		if selected_player_turn_action == PlayerTurnAction.RANGED:
+			_request_player_turn_ranged_attack()
+		elif selected_player_turn_action == PlayerTurnAction.ATTACK:
 			_request_player_turn_attack()
 		get_viewport().set_input_as_handled()
 
@@ -339,7 +300,7 @@ func _is_close_enough_for_combat_start() -> bool:
 
 func _start_turn_based_combat() -> void:
 	_stop_all_combatants_immediately()
-	_set_player_turn_action(PlayerTurnAction.ATTACK)
+	_set_player_turn_action(PlayerTurnAction.MOVE)
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
@@ -356,6 +317,7 @@ func _start_turn_based_combat() -> void:
 		if enemy_actor.has_method("end_turn"):
 			enemy_actor.call("end_turn")
 
+	_crossfade_music(music_combat, music_exploration)
 	print("Turn-based combat started")
 	_update_turn_ui()
 
@@ -375,7 +337,7 @@ func _stop_all_combatants_immediately() -> void:
 
 func _end_turn_based_combat() -> void:
 	combat_state = CombatState.EXPLORATION
-	_set_player_turn_action(PlayerTurnAction.ATTACK)
+	_set_player_turn_action(PlayerTurnAction.MOVE)
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
 	_set_hovered_enemy(null)
@@ -387,6 +349,7 @@ func _end_turn_based_combat() -> void:
 		if enemy_actor.has_method("set_turn_based_combat"):
 			enemy_actor.call("set_turn_based_combat", false)
 
+	_crossfade_music(music_exploration, music_combat)
 	print("Turn-based combat ended")
 	_update_turn_ui()
 
@@ -429,6 +392,28 @@ func _request_player_turn_attack(target_enemy: CharacterBody2D = null) -> void:
 		return
 
 	player.call("try_attack", target_enemy)
+	_begin_enemy_turn()
+
+
+func _get_ranged_attack_range_world() -> float:
+	return RANGED_ATTACK_RANGE_METERS * _get_turn_meter_world_units()
+
+
+func _request_player_turn_ranged_attack(target_enemy: CharacterBody2D = null) -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if not player.has_method("try_ranged_attack"):
+		return
+	if not player.call("can_turn_attack"):
+		return
+	if target_enemy == null:
+		target_enemy = _get_closest_enemy_to_player()
+	if target_enemy == null:
+		return
+	var max_dist := _get_ranged_attack_range_world()
+	if player.global_position.distance_to(target_enemy.global_position) > max_dist:
+		return
+	player.call("try_ranged_attack", target_enemy)
 	_begin_enemy_turn()
 
 
@@ -490,7 +475,7 @@ func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> 
 func _begin_enemy_turn() -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
-	_set_player_turn_action(PlayerTurnAction.ATTACK)
+	_set_player_turn_action(PlayerTurnAction.MOVE)
 	if player.has_method("end_turn"):
 		player.call("end_turn")
 	combat_state = CombatState.ENEMY_TURN
@@ -517,11 +502,11 @@ func _run_enemy_turn() -> void:
 	for enemy_actor in _get_all_alive_enemies():
 		active_enemy_turn_actor = enemy_actor
 		if enemy_actor.has_method("start_turn"):
-			enemy_actor.call("start_turn", ENEMY_TURN_MOVE_CELLS)
+			enemy_actor.call("start_turn", TURN_MOVE_METERS)
 
-		var used_cells := _request_enemy_move_towards_player(enemy_actor, ENEMY_TURN_MOVE_CELLS)
-		if used_cells > 0 and enemy_actor.has_method("consume_turn_movement"):
-			enemy_actor.call("consume_turn_movement", used_cells)
+		var used_meters := _request_enemy_turn_move_by_distance(enemy_actor, TURN_MOVE_METERS)
+		if used_meters > 0.0 and enemy_actor.has_method("consume_turn_movement_meters"):
+			enemy_actor.call("consume_turn_movement_meters", used_meters)
 
 		if enemy_actor.has_method("is_moving"):
 			while enemy_actor.call("is_moving"):
@@ -539,7 +524,7 @@ func _run_enemy_turn() -> void:
 
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
-	_set_player_turn_action(PlayerTurnAction.ATTACK)
+	_set_player_turn_action(PlayerTurnAction.MOVE)
 	active_enemy_turn_actor = null
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
@@ -834,50 +819,68 @@ func _is_player_position_blocked(world_position: Vector2) -> bool:
 	return false
 
 
-func _request_enemy_move_towards_player(enemy_actor: CharacterBody2D, max_cells: int) -> int:
+func _request_enemy_turn_move_by_distance(enemy_actor: CharacterBody2D, max_meters: float) -> float:
 	if active_nav_layer == null:
-		return 0
+		return 0.0
 	if enemy_actor == null or not is_instance_valid(enemy_actor):
-		return 0
+		return 0.0
+	if max_meters <= 0.0:
+		return 0.0
 
-	# Rebuild grid while excluding this mover from dynamic enemy blockers.
 	_refresh_enemy_blocked_cells(enemy_actor)
 	_rebuild_navigation_for_layer(active_nav_layer)
 
 	var enemy_attack_range := float(enemy_actor.get("attack_range"))
 	var approach_point := _compute_approach_world_point(enemy_actor.global_position, player.global_position, maxf(4.0, enemy_attack_range - 20.0))
-	var cell_path := _build_cell_path_from_navigation(enemy_actor.global_position, approach_point)
-	if cell_path.size() <= 1:
-		return 0
+	var world_path := _build_world_path_from_navigation(enemy_actor.global_position, approach_point, enemy_actor)
+	if world_path.size() <= 1:
+		return 0.0
 
-	var player_cell := _world_to_cell(active_nav_layer, player.global_position)
-	while cell_path.size() > 1 and cell_path[cell_path.size() - 1] == player_cell:
-		cell_path.remove_at(cell_path.size() - 1)
-	if cell_path.size() <= 1:
-		return 0
+	var meter_units := _get_turn_meter_world_units()
+	var max_world_distance := max_meters * meter_units
+	var path_length := _path_length(world_path)
+	if path_length <= 0.001:
+		return 0.0
 
-	var total_steps := cell_path.size() - 1
-	var used_steps := mini(total_steps, maxi(0, max_cells))
-	if used_steps <= 0:
-		return 0
-
-	var destination_cell := cell_path[used_steps]
-	var destination_world := active_nav_layer.map_to_local(destination_cell)
+	var used_world_distance := minf(max_world_distance, path_length)
+	var destination_world := _point_on_path_at_distance(world_path, used_world_distance)
 	if enemy_actor.has_method("set_navigation_target"):
 		enemy_actor.call("set_navigation_target", destination_world)
-	return used_steps
+
+	return used_world_distance / meter_units
 
 
 func _get_all_alive_enemies() -> Array[CharacterBody2D]:
+	var seen: Dictionary = {}
 	var result: Array[CharacterBody2D] = []
+
+	for node in get_tree().get_nodes_in_group("enemies"):
+		_collect_alive_enemy_under_main(node, seen, result)
+
 	if enemy != null and is_instance_valid(enemy):
-		if not enemy.has_method("is_alive") or bool(enemy.call("is_alive")):
-			result.append(enemy)
+		_collect_alive_enemy_under_main(enemy, seen, result)
 	for enemy_actor in extra_enemies:
 		if enemy_actor != null and is_instance_valid(enemy_actor):
-			if not enemy_actor.has_method("is_alive") or bool(enemy_actor.call("is_alive")):
-				result.append(enemy_actor)
+			_collect_alive_enemy_under_main(enemy_actor, seen, result)
+
+	result.sort_custom(func(a: CharacterBody2D, b: CharacterBody2D) -> bool:
+		return str(a.get_path()) < str(b.get_path())
+	)
 	return result
+
+
+func _collect_alive_enemy_under_main(node: Node, seen: Dictionary, out: Array[CharacterBody2D]) -> void:
+	if not (node is CharacterBody2D):
+		return
+	var actor := node as CharacterBody2D
+	if not is_ancestor_of(actor):
+		return
+	if seen.has(actor):
+		return
+	if actor.has_method("is_alive") and not bool(actor.call("is_alive")):
+		return
+	seen[actor] = true
+	out.append(actor)
 
 
 func _get_closest_enemy_to_player() -> CharacterBody2D:
@@ -912,11 +915,12 @@ func _request_player_turn_move_by_distance(target_world_position: Vector2, max_m
 	if max_meters <= 0.0:
 		return 0.0
 
-	var world_path := _build_world_path_from_navigation(player.global_position, target_world_position)
+	var world_path := _build_world_path_from_navigation(player.global_position, target_world_position, player)
 	if world_path.size() <= 1:
 		return 0.0
 
-	var max_world_distance := max_meters * TURN_METER_WORLD_UNITS
+	var meter_units := _get_turn_meter_world_units()
+	var max_world_distance := max_meters * meter_units
 	var path_length := _path_length(world_path)
 	if path_length <= 0.001:
 		return 0.0
@@ -926,7 +930,7 @@ func _request_player_turn_move_by_distance(target_world_position: Vector2, max_m
 	if player.has_method("set_navigation_target"):
 		player.call("set_navigation_target", destination_world)
 
-	return used_world_distance / TURN_METER_WORLD_UNITS
+	return used_world_distance / meter_units
 
 
 func _build_cell_path_from_navigation(from_world: Vector2, to_world: Vector2) -> Array[Vector2i]:
@@ -983,8 +987,9 @@ func _build_astar_id_path(from_cell: Vector2i, to_cell: Vector2i, dynamic_blocke
 	return path
 
 
-func _build_world_path_from_navigation(from_world: Vector2, to_world: Vector2) -> Array[Vector2]:
-	var nav_agent := player.get_node_or_null("NavigationAgent2D") as NavigationAgent2D
+func _build_world_path_from_navigation(from_world: Vector2, to_world: Vector2, path_actor: CharacterBody2D = null) -> Array[Vector2]:
+	var actor := path_actor if path_actor != null else player
+	var nav_agent := actor.get_node_or_null("NavigationAgent2D") as NavigationAgent2D
 	if nav_agent == null:
 		return []
 
@@ -1034,6 +1039,38 @@ func _point_on_path_at_distance(path: Array[Vector2], distance_on_path: float) -
 		remaining -= segment_len
 
 	return path[path.size() - 1]
+
+
+func _refresh_turn_meter_world_units() -> void:
+	_turn_meter_world_units_cache = -1.0
+	_get_turn_meter_world_units()
+
+
+func _get_turn_meter_world_units() -> float:
+	if _turn_meter_world_units_cache > 0.0:
+		return _turn_meter_world_units_cache
+	if active_nav_layer == null:
+		_turn_meter_world_units_cache = 64.0
+		return _turn_meter_world_units_cache
+	var used_rect := active_nav_layer.get_used_rect()
+	if used_rect.size == Vector2i.ZERO:
+		_turn_meter_world_units_cache = 64.0
+		return _turn_meter_world_units_cache
+	var c0: Vector2i = used_rect.position
+	var c1: Vector2i = c0
+	for delta in [Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(0, -1)]:
+		var cand: Vector2i = c0 + delta
+		if used_rect.has_point(cand):
+			c1 = cand
+			break
+	if c1 == c0:
+		_turn_meter_world_units_cache = 64.0
+		return _turn_meter_world_units_cache
+	var d := active_nav_layer.map_to_local(c0).distance_to(active_nav_layer.map_to_local(c1))
+	if d <= 0.001:
+		d = 64.0
+	_turn_meter_world_units_cache = d
+	return _turn_meter_world_units_cache
 
 
 func _world_to_cell(layer: TileMapLayer, world_position: Vector2) -> Vector2i:
@@ -1097,6 +1134,101 @@ func _setup_path_preview() -> void:
 	add_child(path_preview_label)
 
 
+func _setup_music() -> void:
+	music_exploration = AudioStreamPlayer.new()
+	music_exploration.name = "MusicExploration"
+	music_exploration.bus = "Master"
+	music_exploration.volume_db = MUSIC_VOLUME_DB
+	var exploration_stream := load("res://assets/music/forest1.mp3") as AudioStream
+	if exploration_stream is AudioStreamMP3:
+		exploration_stream.loop = true
+	music_exploration.stream = exploration_stream
+	add_child(music_exploration)
+
+	music_combat = AudioStreamPlayer.new()
+	music_combat.name = "MusicCombat"
+	music_combat.bus = "Master"
+	music_combat.volume_db = -80.0
+	var combat_stream := load("res://assets/music/combat1.mp3") as AudioStream
+	if combat_stream is AudioStreamMP3:
+		combat_stream.loop = true
+	music_combat.stream = combat_stream
+	add_child(music_combat)
+
+	if not music_muted:
+		music_exploration.play()
+		music_combat.play()
+
+	_setup_mute_button()
+
+
+func _setup_mute_button() -> void:
+	mute_button = Button.new()
+	mute_button.name = "MuteButton"
+	mute_button.toggle_mode = true
+	mute_button.button_pressed = music_muted
+	mute_button.text = "Sound: OFF" if music_muted else "Sound: ON"
+	mute_button.custom_minimum_size = Vector2(100, 32)
+	mute_button.anchor_left = 1.0
+	mute_button.anchor_top = 0.0
+	mute_button.anchor_right = 1.0
+	mute_button.anchor_bottom = 0.0
+	mute_button.offset_left = -118.0
+	mute_button.offset_top = 18.0
+	mute_button.offset_right = -18.0
+	mute_button.offset_bottom = 50.0
+
+	var style_normal := StyleBoxFlat.new()
+	style_normal.bg_color = Color(0.08, 0.07, 0.05, 0.92)
+	style_normal.border_color = Color(0.66, 0.56, 0.33, 0.95)
+	style_normal.border_width_left = 2
+	style_normal.border_width_top = 2
+	style_normal.border_width_right = 2
+	style_normal.border_width_bottom = 2
+	style_normal.corner_radius_top_left = 4
+	style_normal.corner_radius_top_right = 4
+	style_normal.corner_radius_bottom_left = 4
+	style_normal.corner_radius_bottom_right = 4
+	style_normal.content_margin_left = 8
+	style_normal.content_margin_right = 8
+
+	var style_hover := style_normal.duplicate() as StyleBoxFlat
+	style_hover.bg_color = Color(0.12, 0.11, 0.08, 0.95)
+
+	var style_pressed := style_normal.duplicate() as StyleBoxFlat
+	style_pressed.bg_color = Color(0.05, 0.04, 0.03, 0.95)
+
+	mute_button.add_theme_stylebox_override("normal", style_normal)
+	mute_button.add_theme_stylebox_override("hover", style_hover)
+	mute_button.add_theme_stylebox_override("pressed", style_pressed)
+	mute_button.add_theme_stylebox_override("focus", style_normal)
+	mute_button.add_theme_color_override("font_color", Color(0.88, 0.78, 0.53, 1.0))
+	mute_button.add_theme_color_override("font_hover_color", Color(0.95, 0.88, 0.65, 1.0))
+	mute_button.add_theme_font_size_override("font_size", 13)
+	mute_button.focus_mode = Control.FOCUS_NONE
+
+	mute_button.pressed.connect(_on_mute_button_pressed)
+	turn_ui_layer.add_child(mute_button)
+
+
+func _on_mute_button_pressed() -> void:
+	music_muted = mute_button.button_pressed
+	if music_muted:
+		music_exploration.stop()
+		music_combat.stop()
+	else:
+		music_exploration.play()
+		music_combat.play()
+	mute_button.text = "Sound: OFF" if music_muted else "Sound: ON"
+
+
+func _crossfade_music(fade_in_player: AudioStreamPlayer, fade_out_player: AudioStreamPlayer) -> void:
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(fade_in_player, "volume_db", MUSIC_VOLUME_DB, MUSIC_CROSSFADE_SECONDS)
+	tween.tween_property(fade_out_player, "volume_db", -80.0, MUSIC_CROSSFADE_SECONDS)
+
+
 func _hide_path_preview() -> void:
 	path_preview_line.visible = false
 	path_preview_glow.visible = false
@@ -1105,6 +1237,9 @@ func _hide_path_preview() -> void:
 
 func _update_path_preview() -> void:
 	if combat_state != CombatState.PLAYER_TURN or player_turn_action_running:
+		_hide_path_preview()
+		return
+	if selected_player_turn_action != PlayerTurnAction.MOVE:
 		_hide_path_preview()
 		return
 
@@ -1120,15 +1255,16 @@ func _update_path_preview() -> void:
 		return
 
 	var mouse_world := get_global_mouse_position()
-	var world_path := _build_world_path_from_navigation(player.global_position, mouse_world)
+	var world_path := _build_world_path_from_navigation(player.global_position, mouse_world, player)
 	if world_path.size() <= 1:
 		_hide_path_preview()
 		return
 
-	var max_world_distance := remaining_meters * TURN_METER_WORLD_UNITS
+	var meter_units := _get_turn_meter_world_units()
+	var max_world_distance := remaining_meters * meter_units
 	var total_length := _path_length(world_path)
 	var used_distance := minf(max_world_distance, total_length)
-	var used_meters := used_distance / TURN_METER_WORLD_UNITS
+	var used_meters := used_distance / meter_units
 
 	var trimmed: Array[Vector2] = []
 	trimmed.append(world_path[0])
@@ -1288,6 +1424,11 @@ func _setup_turn_ui() -> void:
 	turn_ui_attack_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
 	vbox.add_child(turn_ui_attack_label)
 
+	turn_ui_level_xp_label = Label.new()
+	turn_ui_level_xp_label.text = "Level 1 | XP: 0 / 100"
+	turn_ui_level_xp_label.add_theme_color_override("font_color", Color(0.82, 0.78, 0.95, 1.0))
+	vbox.add_child(turn_ui_level_xp_label)
+
 	turn_ui_actions_panel = PanelContainer.new()
 	turn_ui_actions_panel.name = "TurnActionsUI"
 	turn_ui_actions_panel.visible = false
@@ -1320,6 +1461,13 @@ func _setup_turn_ui() -> void:
 	turn_ui_attack_button.custom_minimum_size = Vector2(128, 36)
 	turn_ui_attack_button.pressed.connect(_on_turn_attack_button_pressed)
 	actions_hbox.add_child(turn_ui_attack_button)
+
+	turn_ui_ranged_button = Button.new()
+	turn_ui_ranged_button.text = "Ranged 12m"
+	turn_ui_ranged_button.toggle_mode = true
+	turn_ui_ranged_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_ranged_button.pressed.connect(_on_turn_ranged_button_pressed)
+	actions_hbox.add_child(turn_ui_ranged_button)
 
 	turn_ui_block_button = Button.new()
 	turn_ui_block_button.text = "Block"
@@ -1363,13 +1511,17 @@ func _update_turn_ui() -> void:
 	var can_player_use_actions := combat_state == CombatState.PLAYER_TURN and not player_turn_action_running
 	if can_player_use_actions and player != null and player.has_method("is_moving"):
 		can_player_use_actions = not bool(player.call("is_moving"))
-	if not can_attack and selected_player_turn_action == PlayerTurnAction.ATTACK:
+	if not can_attack and (selected_player_turn_action == PlayerTurnAction.ATTACK or selected_player_turn_action == PlayerTurnAction.RANGED):
 		_set_player_turn_action(PlayerTurnAction.MOVE)
 
 	if turn_ui_attack_button != null:
 		turn_ui_attack_button.disabled = not can_player_use_actions or not can_attack
 		turn_ui_attack_button.button_pressed = selected_player_turn_action == PlayerTurnAction.ATTACK
-		turn_ui_attack_button.text = "Attack (Select Target)" if selected_player_turn_action == PlayerTurnAction.ATTACK else "Attack"
+		turn_ui_attack_button.text = "Melee (Select Target)" if selected_player_turn_action == PlayerTurnAction.ATTACK else "Melee"
+	if turn_ui_ranged_button != null:
+		turn_ui_ranged_button.disabled = not can_player_use_actions or not can_attack
+		turn_ui_ranged_button.button_pressed = selected_player_turn_action == PlayerTurnAction.RANGED
+		turn_ui_ranged_button.text = "Ranged 12m (Select)" if selected_player_turn_action == PlayerTurnAction.RANGED else "Ranged 12m"
 	if turn_ui_block_button != null:
 		turn_ui_block_button.disabled = not can_player_use_actions
 		turn_ui_block_button.text = "Block (Active)" if is_blocking else "Block"
@@ -1430,8 +1582,15 @@ func _update_turn_ui() -> void:
 
 		phase_text = "Phase: Your turn"
 		move_text = "Movement: %.1f m left" % remaining_meters
-		var attack_mode_text := "Targeting" if selected_player_turn_action == PlayerTurnAction.ATTACK else "Move"
-		attack_text = "Attack: %s | Mode: %s" % [("Ready" if can_attack_now else "Used"), attack_mode_text]
+		var attack_mode_text := "Move"
+		match selected_player_turn_action:
+			PlayerTurnAction.ATTACK:
+				attack_mode_text = "Melee aim"
+			PlayerTurnAction.RANGED:
+				attack_mode_text = "Ranged 12m aim"
+			_:
+				attack_mode_text = "Move"
+		attack_text = "Actions: %s | Mode: %s" % [("Ready" if can_attack_now else "Used"), attack_mode_text]
 		turn_ui_phase_label.add_theme_color_override("font_color", Color(0.62, 0.84, 0.66, 1.0))
 		turn_ui_move_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
 		turn_ui_attack_label.add_theme_color_override("font_color", Color(0.65, 0.88, 0.67, 1.0) if can_attack_now else Color(0.88, 0.57, 0.57, 1.0))
@@ -1446,6 +1605,17 @@ func _update_turn_ui() -> void:
 	turn_ui_phase_label.text = phase_text
 	turn_ui_move_label.text = move_text
 	turn_ui_attack_label.text = attack_text
+
+	if turn_ui_level_xp_label != null and player != null:
+		if player.has_method("get_player_level"):
+			var plv := int(player.call("get_player_level"))
+			var cur_xp := 0.0
+			var need_xp := 100.0
+			if player.has_method("get_experience_toward_next"):
+				cur_xp = float(player.call("get_experience_toward_next"))
+			if player.has_method("get_xp_required_for_next_level"):
+				need_xp = float(player.call("get_xp_required_for_next_level"))
+			turn_ui_level_xp_label.text = "Level %d | XP: %.0f / %.0f" % [plv, cur_xp, need_xp]
 
 
 func _set_player_turn_action(action: PlayerTurnAction) -> void:
@@ -1465,6 +1635,22 @@ func _on_turn_attack_button_pressed() -> void:
 		if not bool(player.call("can_turn_attack")):
 			return
 	_set_player_turn_action(PlayerTurnAction.ATTACK)
+	_update_turn_ui()
+
+
+func _on_turn_ranged_button_pressed() -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if player_turn_action_running:
+		return
+	if selected_player_turn_action == PlayerTurnAction.RANGED:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+		_update_turn_ui()
+		return
+	if player != null and player.has_method("can_turn_attack"):
+		if not bool(player.call("can_turn_attack")):
+			return
+	_set_player_turn_action(PlayerTurnAction.RANGED)
 	_update_turn_ui()
 
 

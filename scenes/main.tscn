@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://lovm8bnd1qty" path="res://scripts/main.gd" id="1_hj6aa"]
 [ext_resource type="Script" uid="uid://d33nkgsm3qwy7" path="res://scripts/player.gd" id="2_kh1n2"]
+[ext_resource type="PackedScene" uid="uid://w1mvynooar2w" path="res://scenes/enemy.tscn" id="2_tefeu"]
 [ext_resource type="Texture2D" uid="uid://cox102fms44x5" path="res://assets/Screenshot 2026-03-10 at 21.26.48.png" id="3_jyhfs"]
 [ext_resource type="Texture2D" uid="uid://uvuhpqxbxs6n" path="res://assets/isometric tileset/spritesheet.png" id="4_tbgi4"]
 [ext_resource type="Script" uid="uid://cvl78i8ka04ar" path="res://scenes/backgroundMap.gd" id="5_tbgi4"]
@@ -487,6 +488,12 @@ sources/2 = SubResource("TileSetAtlasSource_tbgi4")
 [node name="Main" type="Node2D" unique_id=577816727]
 script = ExtResource("1_hj6aa")
 metadata/_edit_horizontal_guides_ = [-140.0]
+
+[node name="Enemy" parent="." unique_id=904186787 instance=ExtResource("2_tefeu")]
+position = Vector2(155, -24)
+
+[node name="Enemy2" parent="." unique_id=1355517160 instance=ExtResource("2_tefeu")]
+position = Vector2(310, 63)
 
 [node name="CanvasModulate" type="CanvasModulate" parent="." unique_id=99714011]
 visible = false

@@ -1,0 +1,24 @@
+[gd_scene format=4 uid="uid://w1mvynooar2w"]
+
+[ext_resource type="Script" uid="uid://cdhwf3x5dtmc0" path="res://scripts/enemy.gd" id="1_enemy"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_enemy"]
+radius = 10.0
+
+[node name="Enemy" type="CharacterBody2D" groups=["enemies"]]
+z_index = 4
+collision_layer = 4
+collision_mask = 1
+script = ExtResource("1_enemy")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+position = Vector2(0, -2)
+shape = SubResource("CircleShape2D_enemy")
+
+[node name="NavigationAgent2D" type="NavigationAgent2D" parent="."]
+path_desired_distance = 4.0
+target_desired_distance = 8.0
+avoidance_enabled = false
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(0, -16)
