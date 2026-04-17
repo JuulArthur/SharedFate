@@ -9,6 +9,7 @@ extends CharacterBody2D
 @export var attack_animation_speed_scale := 1.6
 @export var target_refresh_interval := 0.2
 @export var attack_action_name := "attack"
+@export var counter_action_name := "counter"
 @export var ranged_attack_damage := 16
 
 const XP_BASE_TO_LEVEL_2 := 100.0
@@ -43,6 +44,14 @@ var _last_position := Vector2.ZERO
 const STUCK_THRESHOLD := 1.0
 const STUCK_MOVE_EPSILON := 2.0
 
+const COUNTER_PHASE_NONE := 0
+const COUNTER_PHASE_WINDUP := 1
+const COUNTER_PHASE_STRIKE := 2
+
+var _counter_phase := COUNTER_PHASE_NONE
+var _counter_early_pressed := false
+var _counter_perfect_pressed := false
+
 
 func _ready() -> void:
 	_ensure_collision_shape()
@@ -58,6 +67,7 @@ func _ready() -> void:
 	add_to_group("player")
 
 	_ensure_attack_input()
+	_ensure_counter_input()
 	_setup_health_bar()
 	_setup_level_and_xp_ui()
 	current_health = max_health
@@ -72,6 +82,10 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if _counter_phase != COUNTER_PHASE_NONE and event.is_action_pressed(counter_action_name):
+		_register_counter_press()
+		get_viewport().set_input_as_handled()
+		return
 	if in_turn_based_combat:
 		return
 	if event.is_action_pressed(attack_action_name):
@@ -177,6 +191,46 @@ func take_damage(amount: int) -> void:
 
 func receive_damage(amount: int) -> void:
 	take_damage(amount)
+
+
+func begin_enemy_counter_windup(_attacker: Node2D, _base_damage: int) -> void:
+	_counter_phase = COUNTER_PHASE_WINDUP
+	_counter_early_pressed = false
+	_counter_perfect_pressed = false
+
+
+func begin_enemy_counter_strike() -> void:
+	if _counter_phase == COUNTER_PHASE_WINDUP:
+		_counter_phase = COUNTER_PHASE_STRIKE
+
+
+func cancel_enemy_counter() -> void:
+	_counter_phase = COUNTER_PHASE_NONE
+	_counter_early_pressed = false
+	_counter_perfect_pressed = false
+
+
+func resolve_enemy_attack(attacker: Node2D, base_damage: int) -> void:
+	if _counter_phase == COUNTER_PHASE_NONE:
+		take_damage(base_damage)
+		return
+	var early := _counter_early_pressed
+	var perfect := _counter_perfect_pressed
+	cancel_enemy_counter()
+	if early:
+		take_damage(base_damage * 2)
+	elif perfect:
+		if is_instance_valid(attacker) and attacker.has_method("receive_damage"):
+			attacker.call("receive_damage", attack_damage)
+	else:
+		take_damage(base_damage)
+
+
+func _register_counter_press() -> void:
+	if _counter_phase == COUNTER_PHASE_WINDUP:
+		_counter_early_pressed = true
+	elif _counter_phase == COUNTER_PHASE_STRIKE:
+		_counter_perfect_pressed = true
 
 
 func heal(amount: int) -> void:
@@ -525,6 +579,22 @@ func _ensure_attack_input() -> void:
 		var key_event := InputEventKey.new()
 		key_event.physical_keycode = KEY_SPACE
 		InputMap.action_add_event(attack_action_name, key_event)
+
+
+func _ensure_counter_input() -> void:
+	if not InputMap.has_action(counter_action_name):
+		InputMap.add_action(counter_action_name)
+
+	var has_f_key := false
+	for e in InputMap.action_get_events(counter_action_name):
+		if e is InputEventKey and e.physical_keycode == KEY_F:
+			has_f_key = true
+			break
+
+	if not has_f_key:
+		var key_event := InputEventKey.new()
+		key_event.physical_keycode = KEY_F
+		InputMap.action_add_event(counter_action_name, key_event)
 
 
 func _ensure_collision_shape() -> void:

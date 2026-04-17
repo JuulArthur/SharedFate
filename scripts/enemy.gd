@@ -7,11 +7,16 @@ extends CharacterBody2D
 @export var attack_cooldown := 0.8
 @export var target_refresh_interval := 0.25
 @export var experience_reward := 50
+@export var attack_wind_up_duration := 0.2
+@export var attack_strike_duration := 0.12
+@export var attack_recovery_duration := 0.2
 
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
 @onready var sprite: Sprite2D = $Sprite2D
 
+var _sprite_idle_local := Vector2(0, -16)
+var _attack_sequence_active := false
 var current_health := 0
 var _attack_cooldown_left := 0.0
 var _target_refresh_left := 0.0
@@ -39,6 +44,7 @@ func _ready() -> void:
 	_setup_health_bar()
 	_update_health_bar()
 	sprite.texture = _create_enemy_texture()
+	_sprite_idle_local = sprite.position
 	_setup_hover_outline()
 
 
@@ -110,7 +116,13 @@ func set_navigation_target(world_position: Vector2) -> void:
 
 func try_attack(target: Node2D) -> void:
 	_target = target
-	_try_attack_target()
+	if _attack_sequence_active:
+		return
+	if not _attack_precheck():
+		return
+	if in_turn_based_combat:
+		turn_attack_available = false
+	await _run_attack_sequence_full()
 
 
 func receive_damage(amount: int) -> void:
@@ -129,35 +141,111 @@ func is_alive() -> bool:
 
 
 func _try_attack_target() -> void:
+	if _attack_sequence_active:
+		return
+	if not _attack_precheck():
+		return
+	_run_attack_sequence_full()
+
+
+func _attack_precheck() -> bool:
 	if in_turn_based_combat:
-		if not turn_active:
-			return
-		if not turn_attack_available:
-			return
-		if _target == null or not is_instance_valid(_target):
-			return
-		if global_position.distance_to(_target.global_position) > attack_range:
-			return
-		if not _target.has_method("receive_damage"):
-			return
-
-		_target.call("receive_damage", attack_damage)
-		_flash_attack_feedback()
-		turn_attack_available = false
-		return
-
-	if _attack_cooldown_left > 0.0:
-		return
+		if not turn_active or not turn_attack_available:
+			return false
+	else:
+		if _attack_cooldown_left > 0.0:
+			return false
 	if _target == null or not is_instance_valid(_target):
-		return
+		return false
+	if _target.has_method("is_alive") and not _target.call("is_alive"):
+		return false
 	if global_position.distance_to(_target.global_position) > attack_range:
-		return
-	if not _target.has_method("receive_damage"):
+		return false
+	return _target.has_method("receive_damage")
+
+
+func _run_attack_sequence_full() -> void:
+	var target := _target
+	if target == null or not is_instance_valid(target):
 		return
 
-	_target.call("receive_damage", attack_damage)
-	_flash_attack_feedback()
-	_attack_cooldown_left = attack_cooldown
+	_attack_sequence_active = true
+	if target.has_method("begin_enemy_counter_windup"):
+		target.call("begin_enemy_counter_windup", self, attack_damage)
+
+	var idle_pos := _sprite_idle_local
+	var idle_scale := Vector2.ONE
+	var to_target := target.global_position - global_position
+	if to_target.length() < 0.001:
+		to_target = Vector2.RIGHT
+	else:
+		to_target = to_target.normalized()
+	var lunge := Vector2(to_target.x * 11.0, to_target.y * 7.0)
+
+	# 1) Wind-up — telegraph only, no damage
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(sprite, "position", idle_pos + Vector2(-6, 4), attack_wind_up_duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(sprite, "scale", Vector2(0.86, 1.12), attack_wind_up_duration)
+	tween.tween_property(sprite, "modulate", Color(0.52, 0.22, 0.22, 1.0), attack_wind_up_duration)
+	await tween.finished
+
+	if not is_instance_valid(self) or not is_alive():
+		_cancel_counter_on_target(target)
+		_attack_sequence_active = false
+		return
+	if not is_instance_valid(target) or global_position.distance_to(target.global_position) > attack_range * 1.2:
+		_cancel_counter_on_target(target)
+		_reset_attack_sprite_pose(idle_pos, idle_scale)
+		_attack_sequence_active = false
+		if not in_turn_based_combat:
+			_attack_cooldown_left = attack_cooldown * 0.35
+		return
+
+	# 2) Strike — counter window; damage resolves after the lunge
+	if target.has_method("begin_enemy_counter_strike"):
+		target.call("begin_enemy_counter_strike")
+
+	tween = create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(sprite, "position", idle_pos + lunge, attack_strike_duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_property(sprite, "scale", Vector2(1.14, 0.9), attack_strike_duration)
+	tween.tween_property(sprite, "modulate", Color(1.0, 0.48, 0.48, 1.0), attack_strike_duration * 0.45)
+	await tween.finished
+
+	if not is_instance_valid(self):
+		_cancel_counter_on_target(target)
+		_attack_sequence_active = false
+		return
+
+	if is_instance_valid(target):
+		if target.has_method("resolve_enemy_attack"):
+			target.call("resolve_enemy_attack", self, attack_damage)
+		elif target.has_method("receive_damage"):
+			target.call("receive_damage", attack_damage)
+
+	# 3) Recovery — after damage, return to neutral
+	tween = create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(sprite, "position", idle_pos, attack_recovery_duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(sprite, "scale", idle_scale, attack_recovery_duration)
+	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), attack_recovery_duration)
+	await tween.finished
+
+	_attack_sequence_active = false
+	if not in_turn_based_combat:
+		_attack_cooldown_left = attack_cooldown
+
+
+func _cancel_counter_on_target(counter_target: Node2D) -> void:
+	if counter_target != null and is_instance_valid(counter_target) and counter_target.has_method("cancel_enemy_counter"):
+		counter_target.call("cancel_enemy_counter")
+
+
+func _reset_attack_sprite_pose(idle_pos: Vector2, idle_scale: Vector2) -> void:
+	sprite.position = idle_pos
+	sprite.scale = idle_scale
+	sprite.modulate = Color(1, 1, 1, 1)
 
 
 func _refresh_target_position() -> void:
@@ -259,12 +347,6 @@ func _create_outline_texture(size: Vector2i, color: Color, border: int) -> Textu
 				image.set_pixel(x, y, color)
 
 	return ImageTexture.create_from_image(image)
-
-
-func _flash_attack_feedback() -> void:
-	sprite.modulate = Color(1.0, 0.72, 0.72, 1.0)
-	var tween := create_tween()
-	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), 0.12)
 
 
 func _create_enemy_texture() -> Texture2D:

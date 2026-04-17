@@ -71,6 +71,7 @@ var turn_ui_attack_button: Button
 var turn_ui_ranged_button: Button
 var turn_ui_block_button: Button
 var turn_ui_wait_button: Button
+var turn_ui_end_turn_button: Button
 var selected_player_turn_action: PlayerTurnAction = PlayerTurnAction.MOVE
 var path_preview_glow: Line2D
 var path_preview_line: Line2D
@@ -259,10 +260,7 @@ func _handle_turn_input(event: InputEvent) -> void:
 			_request_player_turn_move(click_position)
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("ui_accept"):
-		if selected_player_turn_action == PlayerTurnAction.RANGED:
-			_request_player_turn_ranged_attack()
-		elif selected_player_turn_action == PlayerTurnAction.ATTACK:
-			_request_player_turn_attack()
+		_request_end_player_turn()
 		get_viewport().set_input_as_handled()
 
 
@@ -372,9 +370,6 @@ func _request_player_turn_move(target_world_position: Vector2) -> void:
 	elif player.has_method("consume_turn_movement"):
 		player.call("consume_turn_movement", int(round(used_meters)))
 
-	var move_left := float(player.call("get_turn_remaining_move_meters"))
-	if move_left <= 0.01 and not _player_can_attack_enemy_now():
-		_begin_enemy_turn()
 
 
 func _request_player_turn_attack(target_enemy: CharacterBody2D = null) -> void:
@@ -392,7 +387,7 @@ func _request_player_turn_attack(target_enemy: CharacterBody2D = null) -> void:
 		return
 
 	player.call("try_attack", target_enemy)
-	_begin_enemy_turn()
+	_update_turn_ui()
 
 
 func _get_ranged_attack_range_world() -> float:
@@ -414,7 +409,7 @@ func _request_player_turn_ranged_attack(target_enemy: CharacterBody2D = null) ->
 	if player.global_position.distance_to(target_enemy.global_position) > max_dist:
 		return
 	player.call("try_ranged_attack", target_enemy)
-	_begin_enemy_turn()
+	_update_turn_ui()
 
 
 func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> void:
@@ -462,14 +457,18 @@ func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> 
 
 	if _player_can_attack_enemy_now():
 		_request_player_turn_attack(target_enemy)
-	else:
-		var move_left := 0.0
-		if player.has_method("get_turn_remaining_move_meters"):
-			move_left = float(player.call("get_turn_remaining_move_meters"))
-		if move_left <= 0.01:
-			_begin_enemy_turn()
 
 	player_turn_action_running = false
+
+
+func _request_end_player_turn() -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if player_turn_action_running:
+		return
+	if player != null and player.has_method("is_moving") and player.call("is_moving"):
+		return
+	_begin_enemy_turn()
 
 
 func _begin_enemy_turn() -> void:
@@ -518,7 +517,7 @@ func _run_enemy_turn() -> void:
 					break
 
 		if is_instance_valid(enemy_actor) and enemy_actor.has_method("try_attack"):
-			enemy_actor.call("try_attack", player)
+			await enemy_actor.try_attack(player)
 		if is_instance_valid(enemy_actor) and enemy_actor.has_method("end_turn"):
 			enemy_actor.call("end_turn")
 
@@ -1436,9 +1435,9 @@ func _setup_turn_ui() -> void:
 	turn_ui_actions_panel.anchor_top = 1.0
 	turn_ui_actions_panel.anchor_right = 0.5
 	turn_ui_actions_panel.anchor_bottom = 1.0
-	turn_ui_actions_panel.offset_left = -240.0
+	turn_ui_actions_panel.offset_left = -410.0
 	turn_ui_actions_panel.offset_top = -82.0
-	turn_ui_actions_panel.offset_right = 240.0
+	turn_ui_actions_panel.offset_right = 410.0
 	turn_ui_actions_panel.offset_bottom = -18.0
 	turn_ui_actions_panel.add_theme_stylebox_override("panel", panel_style.duplicate())
 	turn_ui_layer.add_child(turn_ui_actions_panel)
@@ -1480,6 +1479,12 @@ func _setup_turn_ui() -> void:
 	turn_ui_wait_button.custom_minimum_size = Vector2(128, 36)
 	turn_ui_wait_button.pressed.connect(_on_turn_wait_button_pressed)
 	actions_hbox.add_child(turn_ui_wait_button)
+
+	turn_ui_end_turn_button = Button.new()
+	turn_ui_end_turn_button.text = "End Turn"
+	turn_ui_end_turn_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_end_turn_button.pressed.connect(_on_turn_end_turn_button_pressed)
+	actions_hbox.add_child(turn_ui_end_turn_button)
 
 	_rebuild_turn_enemy_icons()
 
@@ -1527,6 +1532,8 @@ func _update_turn_ui() -> void:
 		turn_ui_block_button.text = "Block (Active)" if is_blocking else "Block"
 	if turn_ui_wait_button != null:
 		turn_ui_wait_button.disabled = not can_player_use_actions
+	if turn_ui_end_turn_button != null:
+		turn_ui_end_turn_button.disabled = not can_player_use_actions
 
 	var player_turn_active := combat_state == CombatState.PLAYER_TURN
 	var player_icon_dim := Color(1.0, 1.0, 1.0, 1.0) if player_turn_active else Color(0.45, 0.45, 0.45, 0.95)
@@ -1580,7 +1587,7 @@ func _update_turn_ui() -> void:
 		if player != null and player.has_method("can_turn_attack"):
 			can_attack_now = bool(player.call("can_turn_attack"))
 
-		phase_text = "Phase: Your turn"
+		phase_text = "Phase: Your turn (Space = end turn)"
 		move_text = "Movement: %.1f m left" % remaining_meters
 		var attack_mode_text := "Move"
 		match selected_player_turn_action:
@@ -1670,6 +1677,10 @@ func _on_turn_wait_button_pressed() -> void:
 	if player_turn_action_running:
 		return
 	_begin_enemy_turn()
+
+
+func _on_turn_end_turn_button_pressed() -> void:
+	_request_end_player_turn()
 
 
 func _create_placeholder_icon(base_color: Color) -> Texture2D:
