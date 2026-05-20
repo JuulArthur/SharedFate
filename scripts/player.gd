@@ -17,7 +17,7 @@ const XP_PER_LEVEL_MULT := 1.5
 
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
-@onready var sprite: Sprite2D = $Sprite2D
+@onready var sprite: AnimatedSprite2D = $Sprite2D
 @onready var vision_light: PointLight2D = $VisionLight
 
 var current_health := 100
@@ -37,6 +37,20 @@ var blocking_active := false
 var facing_direction := Vector2.RIGHT
 var attack_slash: Sprite2D
 var sprite_idle_position := Vector2.ZERO
+var inventory: Inventory
+var weapon_flip_root: Node2D
+var equipped_weapon_holder: Node2D
+var equipped_weapon_sprite: Sprite2D
+var attack_animation_player: AnimationPlayer
+
+# Constant hand point on the player sprite. The holder sits here; weapon-
+# specific tuning (grip_offset / grip_rotation_deg on Item) is applied to the
+# weapon sprite *inside* the holder so attack animations can rotate/translate
+# the holder freely without fighting per-item offsets.
+const WEAPON_HAND_POINT := Vector2(10, -14)
+# Facing flip is applied to `weapon_flip_root` (scale.x = ±1) so every
+# child — holder, sprite, animated swings — mirror together. Animations key
+# the holder in flipper-local space and remain facing-agnostic.
 var manual_path_points: Array[Vector2] = []
 var manual_path_index := 0
 var _stuck_timer := 0.0
@@ -75,10 +89,11 @@ func _ready() -> void:
 	_update_xp_bar()
 	_update_level_label()
 
-	sprite.texture = _create_placeholder_texture()
+	_setup_knight_visual()
 	sprite_idle_position = sprite.position
 	vision_light.texture = _create_vision_light_texture()
 	_setup_attack_vfx()
+	_setup_inventory()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -121,7 +136,7 @@ func _physics_process(delta: float) -> void:
 				_refresh_attack_target_position()
 				target_refresh_left = target_refresh_interval
 
-			if global_position.distance_to(attack_target.global_position) <= attack_range:
+			if global_position.distance_to(attack_target.global_position) <= get_melee_range():
 				velocity = Vector2.ZERO
 				move_and_slide()
 				_try_attack_target(attack_target)
@@ -221,7 +236,7 @@ func resolve_enemy_attack(attacker: Node2D, base_damage: int) -> void:
 		take_damage(base_damage * 2)
 	elif perfect:
 		if is_instance_valid(attacker) and attacker.has_method("receive_damage"):
-			attacker.call("receive_damage", attack_damage)
+			attacker.call("receive_damage", get_melee_damage())
 	else:
 		take_damage(base_damage)
 
@@ -257,12 +272,12 @@ func try_attack(_target: Node2D = null) -> void:
 			return
 		if not _target.has_method("receive_damage"):
 			return
-		if global_position.distance_to(_target.global_position) > attack_range:
+		if global_position.distance_to(_target.global_position) > get_melee_range():
 			return
 
 		turn_attack_available = false
 		_flash_attack_feedback()
-		_target.call("receive_damage", attack_damage)
+		_target.call("receive_damage", get_melee_damage())
 		return
 
 	_try_attack()
@@ -291,9 +306,19 @@ func _face_toward_world(world_position: Vector2) -> void:
 	if d.length() > 0.01:
 		facing_direction = d.normalized()
 		sprite.flip_h = facing_direction.x < 0.0
+		_update_weapon_facing()
 
 
 func _flash_ranged_feedback(_target: Node2D) -> void:
+	# Weapon motion comes from the archetype stub — bow pull + release for
+	# bows, raised staff with cast tint for magic. The body tint and
+	# projectile line below stay here as ranged-specific VFX that are common
+	# to both archetypes.
+	var ranged_archetype := _resolve_attack_archetype()
+	if ranged_archetype != Item.ARCHETYPE_CAST_STAFF:
+		ranged_archetype = Item.ARCHETYPE_RANGED_BOW
+	_play_attack_animation(ranged_archetype)
+
 	var speed_scale := maxf(attack_animation_speed_scale, 0.1)
 	var t_col := 0.1 * speed_scale
 	var t_reset := 0.18 * speed_scale
@@ -319,14 +344,14 @@ func _try_attack_target(target: Node2D) -> void:
 		return
 	if target == null or not is_instance_valid(target):
 		return
-	if global_position.distance_to(target.global_position) > attack_range:
+	if global_position.distance_to(target.global_position) > get_melee_range():
 		return
 	if not target.has_method("receive_damage"):
 		return
 
 	attack_cooldown_left = attack_cooldown
 	_flash_attack_feedback()
-	target.call("receive_damage", attack_damage)
+	target.call("receive_damage", get_melee_damage())
 
 
 func _refresh_attack_target_position() -> void:
@@ -350,12 +375,12 @@ func _compute_approach_point(target_world_position: Vector2, stop_distance: floa
 
 
 func get_preferred_attack_approach_distance() -> float:
-	return maxf(4.0, attack_range - attack_approach_buffer)
+	return maxf(4.0, get_melee_range() - attack_approach_buffer)
 
 
 func _apply_attack_damage() -> void:
 	var shape := CircleShape2D.new()
-	shape.radius = attack_range
+	shape.radius = get_melee_range()
 
 	var params := PhysicsShapeQueryParameters2D.new()
 	params.shape = shape
@@ -363,14 +388,29 @@ func _apply_attack_damage() -> void:
 	params.collision_mask = collision_mask
 	params.exclude = [self]
 
+	var damage := get_melee_damage()
 	var hits := get_world_2d().direct_space_state.intersect_shape(params, 16)
 	for hit in hits:
 		var collider := hit.get("collider") as Object
 		if collider != null and collider.has_method("take_damage"):
-			collider.call("take_damage", attack_damage)
+			collider.call("take_damage", damage)
 
 
 func _flash_attack_feedback() -> void:
+	# Drive the weapon holder from the shared archetype animation. For melee
+	# archetypes this just swings the weapon; the body tween below still does
+	# the lunge, tint and slash VFX. For non-melee archetypes we stop here —
+	# callers like `_flash_ranged_feedback` handle their own body + projectile.
+	_play_attack_animation()
+	var archetype := _resolve_attack_archetype()
+	if archetype != Item.ARCHETYPE_MELEE_SLASH \
+			and archetype != Item.ARCHETYPE_MELEE_THRUST \
+			and archetype != Item.ARCHETYPE_MELEE_CHOP \
+			and archetype != Item.ARCHETYPE_UNARMED:
+		return
+
+	_play_knight_melee_attack_visual()
+
 	var speed_scale := maxf(attack_animation_speed_scale, 0.1)
 	var t_fast := 0.06 * speed_scale
 	var t_med := 0.08 * speed_scale
@@ -420,6 +460,16 @@ func _update_facing_from_velocity(v: Vector2) -> void:
 		return
 	facing_direction = v.normalized()
 	sprite.flip_h = facing_direction.x < 0.0
+	_update_weapon_facing()
+
+
+func _update_weapon_facing() -> void:
+	# Mirror the whole weapon subtree with the body. scale.x = -1 flips the
+	# hand point, the held weapon texture, AND any running swing motion, so
+	# archetype animations read correctly regardless of facing.
+	if weapon_flip_root == null:
+		return
+	weapon_flip_root.scale.x = -1.0 if facing_direction.x < 0.0 else 1.0
 
 
 func _setup_attack_vfx() -> void:
@@ -612,6 +662,64 @@ func _create_solid_texture(size: Vector2i, color: Color) -> Texture2D:
 	return ImageTexture.create_from_image(image)
 
 
+func _setup_knight_visual() -> void:
+	const idle_path := "res://assets/player/knight_south.png"
+	var sf := SpriteFrames.new()
+	sf.add_animation("idle")
+	sf.set_animation_loop("idle", true)
+
+	if not ResourceLoader.exists(idle_path):
+		push_warning("Player knight art not found at %s — using placeholder." % idle_path)
+		sf.add_frame("idle", _create_placeholder_texture(), 1.0)
+		sprite.sprite_frames = sf
+		sprite.play("idle")
+		return
+
+	sf.add_frame("idle", load(idle_path) as Texture2D, 0.4)
+
+	var speed := maxf(attack_animation_speed_scale, 0.1)
+	var attack_total := 0.32 / speed
+	var frame_dur := attack_total / 6.0
+	var attack_textures: Array[Texture2D] = []
+	for i in range(6):
+		var p := "res://assets/player/knight_attack_%02d.png" % i
+		if not ResourceLoader.exists(p):
+			push_warning("Missing knight attack frame: %s" % p)
+			attack_textures.clear()
+			break
+		attack_textures.append(load(p) as Texture2D)
+
+	if attack_textures.size() == 6:
+		sf.add_animation("attack")
+		sf.set_animation_loop("attack", false)
+		for t in attack_textures:
+			sf.add_frame("attack", t, frame_dur)
+
+	sprite.sprite_frames = sf
+	sprite.play("idle")
+	if attack_textures.size() == 6 and not sprite.animation_finished.is_connected(_on_knight_attack_visual_finished):
+		sprite.animation_finished.connect(_on_knight_attack_visual_finished)
+
+
+func _play_knight_melee_attack_visual() -> void:
+	if sprite.sprite_frames == null:
+		return
+	if not sprite.sprite_frames.has_animation("attack"):
+		return
+	if sprite.sprite_frames.get_frame_count("attack") < 1:
+		return
+	sprite.play("attack")
+
+
+func _on_knight_attack_visual_finished() -> void:
+	if sprite.sprite_frames == null:
+		return
+	if str(sprite.animation) != "attack":
+		return
+	if sprite.sprite_frames.has_animation("idle"):
+		sprite.play("idle")
+
+
 func _create_placeholder_texture() -> Texture2D:
 	var image := Image.create(24, 32, false, Image.FORMAT_RGBA8)
 	image.fill(Color(0, 0, 0, 0))
@@ -771,3 +879,247 @@ func _process_manual_path_movement() -> bool:
 	_update_facing_from_velocity(velocity)
 	move_and_slide()
 	return true
+
+
+func _setup_inventory() -> void:
+	inventory = Inventory.new()
+	inventory.name = "Inventory"
+	add_child(inventory)
+	inventory.equipped_weapon_changed.connect(_on_equipped_weapon_changed)
+
+	_setup_equipped_weapon_sprite()
+	_setup_attack_animations()
+
+	# Give the player a starter sword so melee combat has a concrete weapon.
+	var starter_sword := ItemFactory.create_sword()
+	inventory.equip_weapon(starter_sword)
+
+
+func _setup_equipped_weapon_sprite() -> void:
+	# Node layering for the held weapon:
+	#   WeaponFlipRoot   – scale.x = ±1 to mirror with the player's facing.
+	#   └─ EquippedWeaponHolder – position/rotation driven by archetype anims.
+	#      └─ EquippedWeaponSprite – texture swap + per-item grip tuning.
+	# Keeping flip / anim / grip on separate nodes means none of them fight,
+	# and all our archetype animations key the holder in flipper-local space
+	# so they work for both left- and right-facing without extra logic.
+	weapon_flip_root = Node2D.new()
+	weapon_flip_root.name = "WeaponFlipRoot"
+	weapon_flip_root.z_index = 1
+	add_child(weapon_flip_root)
+
+	equipped_weapon_holder = Node2D.new()
+	equipped_weapon_holder.name = "EquippedWeaponHolder"
+	equipped_weapon_holder.position = WEAPON_HAND_POINT
+	weapon_flip_root.add_child(equipped_weapon_holder)
+
+	equipped_weapon_sprite = Sprite2D.new()
+	equipped_weapon_sprite.name = "EquippedWeaponSprite"
+	equipped_weapon_sprite.centered = true
+	equipped_weapon_sprite.visible = false
+	equipped_weapon_holder.add_child(equipped_weapon_sprite)
+
+
+func _on_equipped_weapon_changed(weapon: Item) -> void:
+	if equipped_weapon_sprite == null:
+		return
+	if weapon == null or weapon.icon == null:
+		equipped_weapon_sprite.texture = null
+		equipped_weapon_sprite.visible = false
+		return
+	equipped_weapon_sprite.texture = weapon.icon
+	equipped_weapon_sprite.position = weapon.grip_offset
+	equipped_weapon_sprite.rotation_degrees = weapon.grip_rotation_deg
+	equipped_weapon_sprite.visible = true
+
+
+func get_equipped_weapon() -> Item:
+	if inventory == null:
+		return null
+	return inventory.get_equipped_weapon()
+
+
+func get_melee_damage() -> int:
+	var weapon := get_equipped_weapon()
+	if weapon != null and weapon.weapon_type == Item.WeaponType.MELEE:
+		return weapon.damage
+	return attack_damage
+
+
+func get_melee_range() -> float:
+	var weapon := get_equipped_weapon()
+	if weapon != null and weapon.weapon_type == Item.WeaponType.MELEE:
+		return weapon.weapon_range
+	return attack_range
+
+
+# --- Attack animations (archetype-based) -------------------------------------
+# Weapons declare an `animation_archetype` (e.g. "melee_slash", "ranged_bow").
+# All weapons that share an archetype play the same animation here — authors
+# only add new archetypes when the *motion* genuinely changes, not per skin.
+# See CODEBASE_GUIDE.md > "Weapon animations" for the full pattern and
+# roadmap (sprite sheets, Skeleton2D hand bone, etc.).
+
+func _setup_attack_animations() -> void:
+	attack_animation_player = AnimationPlayer.new()
+	attack_animation_player.name = "AttackAnimations"
+	add_child(attack_animation_player)
+
+	var lib := AnimationLibrary.new()
+	lib.add_animation(Item.ARCHETYPE_MELEE_SLASH, _build_melee_slash_animation())
+	lib.add_animation(Item.ARCHETYPE_MELEE_THRUST, _build_melee_thrust_animation())
+	lib.add_animation(Item.ARCHETYPE_MELEE_CHOP, _build_melee_chop_animation())
+	lib.add_animation(Item.ARCHETYPE_RANGED_BOW, _build_ranged_bow_animation())
+	lib.add_animation(Item.ARCHETYPE_CAST_STAFF, _build_cast_staff_animation())
+	lib.add_animation(Item.ARCHETYPE_UNARMED, _build_unarmed_animation())
+	attack_animation_player.add_animation_library("", lib)
+
+
+func _resolve_attack_archetype() -> StringName:
+	var weapon := get_equipped_weapon()
+	if weapon == null:
+		return Item.ARCHETYPE_MELEE_SLASH
+	if weapon.animation_override != &"":
+		return weapon.animation_override
+	return weapon.animation_archetype
+
+
+func _play_attack_animation(archetype_override: StringName = &"") -> void:
+	if attack_animation_player == null:
+		return
+	var archetype := archetype_override if archetype_override != &"" else _resolve_attack_archetype()
+	var anim_name := str(archetype)
+	if not attack_animation_player.has_animation(anim_name):
+		return
+	attack_animation_player.stop()
+	attack_animation_player.play(anim_name)
+
+
+# Each stub animates the weapon holder (arm swing) and a body accent on
+# AnimatedSprite2D body scale/modulate. Lunge / tint / slash VFX are still
+# produced by the tween in `_flash_attack_feedback` so the layers compose.
+
+const _HOLDER_ROT_PATH := "WeaponFlipRoot/EquippedWeaponHolder:rotation"
+const _HOLDER_POS_PATH := "WeaponFlipRoot/EquippedWeaponHolder:position"
+const _BODY_SCALE_PATH := "Sprite2D:scale"
+const _BODY_MOD_PATH := "Sprite2D:modulate"
+
+
+func _add_value_track(anim: Animation, path: String, keys: Array) -> void:
+	# `keys` is an array of [time, value] pairs. Keeps each animation builder
+	# short and readable.
+	var idx := anim.add_track(Animation.TYPE_VALUE)
+	anim.track_set_path(idx, NodePath(path))
+	for pair in keys:
+		anim.track_insert_key(idx, float(pair[0]), pair[1])
+
+
+func _build_melee_slash_animation() -> Animation:
+	# Horizontal one-handed swing: wind back, swing forward, settle. Stubs
+	# animate ONLY the weapon holder — body tint + lunge + slash VFX stay in
+	# `_flash_attack_feedback` so we don't fight the existing tween. When the
+	# body gets sprite-sheet animated, move those tracks in here and drop the
+	# tween.
+	var anim := Animation.new()
+	anim.length = 0.32
+	_add_value_track(anim, _HOLDER_ROT_PATH, [
+		[0.00, 0.0],
+		[0.06, -0.7],
+		[0.18, 0.9],
+		[0.32, 0.0],
+	])
+	return anim
+
+
+func _build_melee_thrust_animation() -> Animation:
+	# Straight forward stab: push the holder along +x, snap back.
+	var anim := Animation.new()
+	anim.length = 0.28
+	_add_value_track(anim, _HOLDER_POS_PATH, [
+		[0.00, WEAPON_HAND_POINT],
+		[0.10, WEAPON_HAND_POINT + Vector2(8.0, 0.0)],
+		[0.20, WEAPON_HAND_POINT],
+		[0.28, WEAPON_HAND_POINT],
+	])
+	_add_value_track(anim, _HOLDER_ROT_PATH, [
+		[0.00, 0.0],
+		[0.10, 0.15],
+		[0.28, 0.0],
+	])
+	return anim
+
+
+func _build_melee_chop_animation() -> Animation:
+	# Two-handed overhead chop: raise up, slam down, settle. Slower arc than
+	# the one-handed slash so heavy weapons read as heavy.
+	var anim := Animation.new()
+	anim.length = 0.45
+	_add_value_track(anim, _HOLDER_ROT_PATH, [
+		[0.00, 0.0],
+		[0.12, -1.5],
+		[0.28, 1.3],
+		[0.45, 0.0],
+	])
+	_add_value_track(anim, _HOLDER_POS_PATH, [
+		[0.00, WEAPON_HAND_POINT],
+		[0.12, WEAPON_HAND_POINT + Vector2(-2.0, -4.0)],
+		[0.28, WEAPON_HAND_POINT + Vector2(2.0, 3.0)],
+		[0.45, WEAPON_HAND_POINT],
+	])
+	return anim
+
+
+func _build_ranged_bow_animation() -> Animation:
+	# Draw (pull arm back via small body squash), release (quick forward flick
+	# on the holder), settle. Projectile VFX lives in `_flash_ranged_feedback`.
+	var anim := Animation.new()
+	anim.length = 0.45
+	_add_value_track(anim, _BODY_SCALE_PATH, [
+		[0.00, Vector2.ONE],
+		[0.18, Vector2(0.96, 1.04)],
+		[0.30, Vector2.ONE],
+		[0.45, Vector2.ONE],
+	])
+	_add_value_track(anim, _HOLDER_ROT_PATH, [
+		[0.00, 0.0],
+		[0.18, -0.25],
+		[0.26, 0.35],
+		[0.45, 0.0],
+	])
+	return anim
+
+
+func _build_cast_staff_animation() -> Animation:
+	# Raise the staff, hold briefly with a magical body tint, then settle.
+	var anim := Animation.new()
+	anim.length = 0.55
+	_add_value_track(anim, _BODY_MOD_PATH, [
+		[0.00, Color(1, 1, 1, 1)],
+		[0.20, Color(1.15, 1.1, 1.45, 1)],
+		[0.55, Color(1, 1, 1, 1)],
+	])
+	_add_value_track(anim, _HOLDER_ROT_PATH, [
+		[0.00, 0.0],
+		[0.15, -0.5],
+		[0.40, -0.5],
+		[0.55, 0.0],
+	])
+	_add_value_track(anim, _HOLDER_POS_PATH, [
+		[0.00, WEAPON_HAND_POINT],
+		[0.15, WEAPON_HAND_POINT + Vector2(-2, -6)],
+		[0.40, WEAPON_HAND_POINT + Vector2(-2, -6)],
+		[0.55, WEAPON_HAND_POINT],
+	])
+	return anim
+
+
+func _build_unarmed_animation() -> Animation:
+	# Punch: quick jab forward. Reused when no weapon is equipped.
+	var anim := Animation.new()
+	anim.length = 0.22
+	_add_value_track(anim, _HOLDER_POS_PATH, [
+		[0.00, WEAPON_HAND_POINT],
+		[0.08, WEAPON_HAND_POINT + Vector2(6.0, 0.0)],
+		[0.22, WEAPON_HAND_POINT],
+	])
+	return anim

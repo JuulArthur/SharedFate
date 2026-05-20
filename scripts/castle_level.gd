@@ -1,0 +1,33 @@
+extends Node2D
+
+# Minimal level script for the hand-drawn Castle level. The background is
+# a single pre-rendered pixel-art image so there is no TileMap / navigation
+# region here; click-to-move goes straight to the player as a manual path.
+
+@export var camera_follow_speed: float = 6.0
+
+@onready var player: CharacterBody2D = $Player
+@onready var camera: Camera2D = $Camera2D
+
+
+func _ready() -> void:
+	LevelLoader.apply_spawn(self)
+	if camera != null:
+		camera.make_current()
+
+
+func _process(delta: float) -> void:
+	if camera == null or player == null:
+		return
+	var weight := clampf(delta * camera_follow_speed, 0.0, 1.0)
+	camera.global_position = camera.global_position.lerp(player.global_position, weight)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		if player == null:
+			return
+		var click_position := get_global_mouse_position()
+		if player.has_method("set_navigation_path"):
+			var points: Array[Vector2] = [click_position]
+			player.call("set_navigation_path", points)

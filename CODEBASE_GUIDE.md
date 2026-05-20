@@ -8,6 +8,9 @@ This page explains how the current prototype is structured, where systems live, 
 - `scripts/main.gd`: Core game orchestration (phase switching, turn flow, UI, spawning, movement requests).
 - `scripts/player.gd`: Player actor logic (movement, attacks, HP/XP, turn resources, combat VFX).
 - `scripts/enemy.gd`: Enemy actor logic (AI chase/attack, HP, turn resources, hover highlight, death reward).
+- `scripts/inventory/item.gd`: `Item` Resource — flexible weapon/item definition (damage, type, range, icon, free-form `properties` dict).
+- `scripts/inventory/item_factory.gd`: `ItemFactory` — static builders for items including procedural pixel-art textures (e.g. `create_sword()`).
+- `scripts/inventory/inventory.gd`: `Inventory` Node — list of items + equipped weapon, emits signals on change.
 - `scenes/backgroundMap.gd`: Tilemap helper script for obstacle/navigation updates (currently minimal/partial).
 - `project.godot`: Project-level display/window config.
 
@@ -81,16 +84,14 @@ Combat currently has two behavior modes sharing core stats:
 
 ## How animations are implemented
 
-There is currently no `AnimationPlayer`-driven animation pipeline. Most effects are procedural:
+Animations are layered across two cooperating systems — see "Weapon animations" below for the full design.
 
-- Attack feedback uses tweens in `player.gd::_flash_attack_feedback()`:
-  - sprite tint flash
-  - short lunge and scale squash
-  - temporary slash sprite fade/scale
-- Enemy hit feedback also uses a tween color flash in `enemy.gd::_flash_attack_feedback()`.
-- Visuals are generated from runtime textures in code (`_create_placeholder_texture`, `_create_enemy_texture`, `_create_slash_texture`, etc.).
+- **Weapon motion** is driven by an `AnimationPlayer` (`AttackAnimations`) under the player. It stores one short `Animation` per archetype (`melee_slash`, `melee_thrust`, `melee_chop`, `ranged_bow`, `cast_staff`, `unarmed`) and keys the weapon holder's rotation/position. Built in code by `Player._setup_attack_animations()`.
+- **Body feedback** is still procedural tweens (`player.gd::_flash_attack_feedback()` for melee, `_flash_ranged_feedback()` for ranged). They produce the tint flash, lunge, scale squash, slash VFX, and projectile line. This lets us compose weapon swings on top of a body that isn't sprite-sheeted yet.
+- **Enemy hit feedback** also uses a tween color flash in `enemy.gd::_flash_attack_feedback()`.
+- **Textures** are generated at runtime by code (`_create_placeholder_texture`, `_create_enemy_texture`, `_create_slash_texture`, `ItemFactory._create_sword_texture`, etc.).
 
-If you later move to sprite sheet animations, this is the system to replace first.
+When you introduce a player sprite sheet, migrate the body tweens into the archetype `Animation`s and delete `_flash_attack_feedback` — the AnimationPlayer then becomes the single source of truth for attack motion.
 
 ## How movement and pathfinding are implemented
 
@@ -139,6 +140,80 @@ Movement and pathing are split between coordinator and actor scripts:
 - Enemies are created at runtime in `_spawn_additional_enemy(...)`.
 - Spawn points are chosen near offset target cells with walkability search.
 - Enemy death (`enemy.gd`) grants XP and removes node via `queue_free()`.
+
+### Inventory and items
+
+- `Item` is a `Resource`. Core properties: `id`, `display_name`, `description`, `icon`, `damage`, `weapon_type` (`MELEE`/`RANGED`/`MAGIC`), `weapon_range`. Use `properties: Dictionary` plus `get_property`/`set_property` for future stats (crit, status effects, etc.) without changing the class.
+- Animation/fit properties: `animation_archetype`, `animation_override`, `grip_offset`, `grip_rotation_deg` (see "Weapon animations" below).
+- `ItemFactory` owns item construction and procedural pixel-art (see `create_sword()`).
+- `Inventory` is a `Node` added as a child of the player (`$Inventory`). API: `add_item`, `remove_item`, `equip_weapon`, `get_equipped_weapon`, `find_item_by_id`. Signals: `item_added`, `item_removed`, `equipped_weapon_changed`.
+- The player auto-equips an Iron Sword (`ItemFactory.create_sword()`) in `_setup_inventory()`. Melee combat reads `get_melee_damage()` / `get_melee_range()` which prefer the equipped melee weapon's stats and fall back to `attack_damage` / `attack_range` when nothing is equipped. Ranged attacks still use `ranged_attack_damage` until a ranged weapon is introduced.
+- The equipped weapon's `icon` is rendered beside the player via `EquippedWeaponSprite` (child of `EquippedWeaponHolder`), updated via the `equipped_weapon_changed` signal.
+
+### Weapon animations
+
+The goal: **share one animation across every weapon that moves the same way, swap skins freely, only author a new animation when the motion really changes.** You should not need a new animation per sword.
+
+#### Pattern
+
+1. Each weapon declares an **archetype** — the shared motion it uses. Archetype names live on `Item` as constants (`ARCHETYPE_MELEE_SLASH`, `ARCHETYPE_MELEE_THRUST`, `ARCHETYPE_MELEE_CHOP`, `ARCHETYPE_RANGED_BOW`, `ARCHETYPE_CAST_STAFF`, `ARCHETYPE_UNARMED`).
+   - All one-handed swords/daggers → `melee_slash`
+   - Spears/rapiers → `melee_thrust`
+   - Two-handed axes/mauls → `melee_chop`
+   - Bows/crossbows → `ranged_bow`
+   - Staves/wands → `cast_staff`
+2. The weapon is a separate sprite that the player holds. It lives inside a **weapon holder** (`EquippedWeaponHolder`) which sits at the player's hand point. The holder is what attack animations rotate and translate — this way one shared animation works for any weapon texture without per-item transform fights.
+3. Per-item fit (`grip_offset`, `grip_rotation_deg`) is applied to the **sprite inside** the holder. So a dagger can sit lower, a staff can be rotated upright, and both reuse the same `melee_slash` or `cast_staff` animation.
+4. For the rare signature weapon, set `animation_override` on the `Item` and author a unique animation — no archetype change needed.
+
+#### Node layout on the player
+
+```
+Player
+├── Sprite2D                        (body — today procedural, later a sprite sheet)
+├── WeaponFlipRoot                  (Node2D, scale.x = ±1 based on facing)
+│   └── EquippedWeaponHolder        (Node2D at WEAPON_HAND_POINT; driven by attack animations)
+│       └── EquippedWeaponSprite    (Sprite2D, pos = grip_offset, rot = grip_rotation_deg)
+├── AttackSlash                     (melee VFX sprite)
+├── AttackAnimations                (AnimationPlayer holding the archetype stubs)
+└── Inventory
+```
+
+Three separate nodes intentionally do three separate jobs:
+
+- `WeaponFlipRoot` handles **facing** (`_update_weapon_facing()` flips `scale.x`). One assignment mirrors the hand point, the weapon texture, and any running swing — animations stay facing-agnostic.
+- `EquippedWeaponHolder` is what **archetype animations** drive (rotation and position). Keyed in flipper-local space so the same keys read correctly both ways.
+- `EquippedWeaponSprite` carries the **per-item skin** (texture + `grip_offset` / `grip_rotation_deg`). Swapping this sprite is how we reuse one motion for every weapon of the same archetype.
+
+#### Where the animations live
+
+`Player._setup_attack_animations()` creates an `AnimationPlayer` called `AttackAnimations` and installs an `AnimationLibrary` with one `Animation` per archetype:
+
+- `melee_slash` — horizontal arm swing (holder rotation). Body lunge, tint and slash VFX are still produced by the tween in `_flash_attack_feedback` so the two layers compose cleanly.
+- `melee_thrust` — straight forward stab (holder translate + small rotation).
+- `melee_chop` — overhead two-handed chop, slower arc.
+- `ranged_bow` — body scale accent + holder pull/release. Projectile line is added by `_flash_ranged_feedback`.
+- `cast_staff` — body modulate glow + holder raised overhead.
+- `unarmed` — forward jab when no weapon is equipped.
+
+Each builder calls a shared `_add_value_track(anim, path, keys)` helper to keep the stubs short and uniform. The track paths use the constants `_HOLDER_ROT_PATH` / `_HOLDER_POS_PATH` / `_BODY_SCALE_PATH` / `_BODY_MOD_PATH`.
+
+Dispatch goes through `_resolve_attack_archetype()` (reads `animation_override` first, then `animation_archetype`, defaulting to `melee_slash` unarmed) and `_play_attack_animation(archetype_override)`. Melee attack paths call `_flash_attack_feedback()` which dispatches and also runs the melee-only body tween + slash VFX. Ranged attacks call `_flash_ranged_feedback()` which dispatches to `ranged_bow` or `cast_staff` depending on the equipped weapon's archetype.
+
+#### How to add a weapon
+
+- New weapon that moves like an existing one → build the item in `ItemFactory`, set `animation_archetype` to the shared archetype, tune `grip_offset` / `grip_rotation_deg` for the skin. **No new animation.**
+- New weapon with genuinely new motion → add a new `ARCHETYPE_*` constant on `Item`, implement `_build_<name>_animation()` in `player.gd`, register it in `_setup_attack_animations()`, and point the new item at it via `animation_archetype`.
+- Signature/boss weapon with bespoke motion → leave `animation_archetype` as a sensible default and set `animation_override` to a unique animation name; register that animation the same way.
+
+#### Roadmap (when to upgrade this system)
+
+1. **Now (done):** tween-based body feedback + weapon holder driven by small keyed stubs.
+2. **When the body becomes a sprite sheet:** move body tracks (`Sprite2D:frame`, `Sprite2D:position`, `:scale`, `:modulate`) into the archetype animations and delete the tween in `_flash_attack_feedback`. The AnimationPlayer becomes the single source of truth for attack motion.
+3. **When you want richer poses (block, idle-sway with weapon, etc.):** introduce a `Skeleton2D` with a `hand` bone and re-parent `EquippedWeaponSprite` to the bone. Archetype animations move bones instead of the holder; any held weapon follows automatically.
+4. **Only for bespoke hero/boss weapons:** per-weapon unique animation via `animation_override`. Avoid this for common loot.
+
+Rule of thumb: **don't write a per-weapon animation to differentiate a skin — tune `grip_offset`, rotation, and maybe particle children instead. Write a new archetype only when the body posture / timing / contact arc is genuinely different.**
 
 ### Progression system (current)
 
