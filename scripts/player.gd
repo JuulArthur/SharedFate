@@ -939,6 +939,12 @@ func get_equipped_weapon() -> Item:
 	return inventory.get_equipped_weapon()
 
 
+func get_inventory_items() -> Array[Item]:
+	if inventory == null:
+		return []
+	return inventory.items
+
+
 func get_melee_damage() -> int:
 	var weapon := get_equipped_weapon()
 	if weapon != null and weapon.weapon_type == Item.WeaponType.MELEE:

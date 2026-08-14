@@ -1,0 +1,19 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/forest_tree.gd" id="1_tree_script"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_tree"]
+radius = 12.0
+
+[node name="ForestTree" type="StaticBody2D"]
+z_index = 1
+y_sort_enabled = true
+collision_layer = 1
+collision_mask = 0
+script = ExtResource("1_tree_script")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(0, -26)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_tree")

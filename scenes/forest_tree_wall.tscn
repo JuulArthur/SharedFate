@@ -1,0 +1,55 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/forest_tree_wall.gd" id="1_wall_script"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_wall"]
+radius = 12.0
+
+[node name="ForestTreeWall" type="StaticBody2D"]
+z_index = 1
+y_sort_enabled = true
+collision_layer = 1
+collision_mask = 0
+script = ExtResource("1_wall_script")
+
+[node name="TreeSprite0" type="Sprite2D" parent="."]
+position = Vector2(-56, -38)
+
+[node name="TreeSprite1" type="Sprite2D" parent="."]
+position = Vector2(0, -38)
+
+[node name="TreeSprite2" type="Sprite2D" parent="."]
+position = Vector2(56, -38)
+
+[node name="TreeSprite3" type="Sprite2D" parent="."]
+position = Vector2(-28, 2)
+
+[node name="TreeSprite4" type="Sprite2D" parent="."]
+position = Vector2(28, 2)
+
+[node name="TreeSprite5" type="Sprite2D" parent="."]
+position = Vector2(0, 22)
+
+[node name="Collision0" type="CollisionShape2D" parent="."]
+position = Vector2(-56, -12)
+shape = SubResource("CircleShape2D_wall")
+
+[node name="Collision1" type="CollisionShape2D" parent="."]
+position = Vector2(0, -12)
+shape = SubResource("CircleShape2D_wall")
+
+[node name="Collision2" type="CollisionShape2D" parent="."]
+position = Vector2(56, -12)
+shape = SubResource("CircleShape2D_wall")
+
+[node name="Collision3" type="CollisionShape2D" parent="."]
+position = Vector2(-28, 28)
+shape = SubResource("CircleShape2D_wall")
+
+[node name="Collision4" type="CollisionShape2D" parent="."]
+position = Vector2(28, 28)
+shape = SubResource("CircleShape2D_wall")
+
+[node name="Collision5" type="CollisionShape2D" parent="."]
+position = Vector2(0, 48)
+shape = SubResource("CircleShape2D_wall")

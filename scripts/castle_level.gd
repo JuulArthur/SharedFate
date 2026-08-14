@@ -1,8 +1,7 @@
 extends Node2D
 
-# Minimal level script for the hand-drawn Castle level. The background is
-# a single pre-rendered pixel-art image so there is no TileMap / navigation
-# region here; click-to-move goes straight to the player as a manual path.
+# Level script for the hand-drawn Castle level. Click-to-move uses the same
+# NavigationAgent2D pathfinding as the main map (via set_navigation_target).
 
 @export var camera_follow_speed: float = 6.0
 
@@ -28,6 +27,5 @@ func _unhandled_input(event: InputEvent) -> void:
 		if player == null:
 			return
 		var click_position := get_global_mouse_position()
-		if player.has_method("set_navigation_path"):
-			var points: Array[Vector2] = [click_position]
-			player.call("set_navigation_path", points)
+		if player.has_method("set_navigation_target"):
+			player.call("set_navigation_target", click_position)
