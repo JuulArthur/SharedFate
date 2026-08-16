@@ -7,6 +7,7 @@
 [ext_resource type="Texture2D" uid="uid://uvuhpqxbxs6n" path="res://assets/isometric tileset/spritesheet.png" id="4_tbgi4"]
 [ext_resource type="Script" uid="uid://cvl78i8ka04ar" path="res://scenes/backgroundMap.gd" id="5_tbgi4"]
 [ext_resource type="PackedScene" path="res://scenes/level_transition.tscn" id="7_o6xl0"]
+[ext_resource type="PackedScene" path="res://scenes/treasure_chest.tscn" id="8_chest"]
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_c8q3v"]
 radius = 9.0
@@ -495,6 +496,9 @@ position = Vector2(155, -24)
 
 [node name="Enemy2" parent="." unique_id=1355517160 instance=ExtResource("2_tefeu")]
 position = Vector2(-179, 180)
+
+[node name="TreasureChest" parent="." instance=ExtResource("8_chest")]
+position = Vector2(-40, 120)
 
 [node name="CanvasModulate" type="CanvasModulate" parent="." unique_id=99714011]
 visible = false

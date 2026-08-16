@@ -16,7 +16,6 @@ const SPLINTER_COUNT := 8
 const SPLINTER_SPEED_MIN := 60.0
 const SPLINTER_SPEED_MAX := 140.0
 const SPLINTER_LIFETIME := 0.45
-const PICKUP_SCENE_PATH := "res://scenes/item_pickup.tscn"
 
 @export var max_health: int = 30
 @export var contained_items: Array[Item] = []
@@ -149,27 +148,4 @@ func _disable_collision() -> void:
 
 
 func _drop_contained_items() -> void:
-	if contained_items.is_empty():
-		return
-
-	var pickup_scene := load(PICKUP_SCENE_PATH) as PackedScene
-	if pickup_scene == null:
-		push_warning("BreakableCrate: missing item pickup scene at %s" % PICKUP_SCENE_PATH)
-		return
-
-	var parent := get_parent()
-	if parent == null:
-		return
-
-	for i in contained_items.size():
-		var item := contained_items[i]
-		if item == null:
-			continue
-
-		var pickup := pickup_scene.instantiate()
-		parent.call_deferred("add_child", pickup)
-
-		var offset_angle := TAU * float(i) / float(contained_items.size())
-		var offset := Vector2.RIGHT.rotated(offset_angle) * drop_spread
-		pickup.set_deferred("global_position", global_position + offset)
-		pickup.call_deferred("setup", item)
+	LootDropper.drop_items(self, contained_items, drop_spread)

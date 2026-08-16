@@ -7,6 +7,12 @@ extends CharacterBody2D
 @export var attack_cooldown := 0.8
 @export var target_refresh_interval := 0.25
 @export var experience_reward := 50
+# Loot dropped on death. Authored items always drop; when the list is empty the
+# enemy rolls `loot_drop_chance` against the shared random table instead, so
+# runtime-spawned enemies still pay out without per-instance setup.
+@export var loot_items: Array[Item] = []
+@export var loot_drop_chance := 0.6
+@export var loot_drop_spread := 20.0
 @export var attack_wind_up_duration := 0.2
 @export var attack_strike_duration := 0.12
 @export var attack_recovery_duration := 0.2
@@ -133,11 +139,26 @@ func receive_damage(amount: int) -> void:
 	print("Enemy HP: %d/%d" % [current_health, max_health])
 	if current_health == 0:
 		get_tree().call_group("player", "add_experience", experience_reward)
+		# Drop before freeing: LootDropper reads our position and parent, and
+		# spawns the pickups as siblings so they outlive us.
+		_drop_loot()
 		queue_free()
 
 
 func is_alive() -> bool:
 	return current_health > 0
+
+
+func _drop_loot() -> void:
+	var drops: Array[Item] = []
+	for item in loot_items:
+		if item != null:
+			drops.append(item)
+
+	if drops.is_empty() and randf() < loot_drop_chance:
+		drops.append(ItemFactory.create_random_loot())
+
+	LootDropper.drop_items(self, drops, loot_drop_spread)
 
 
 func _try_attack_target() -> void:

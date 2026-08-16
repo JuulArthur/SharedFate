@@ -19,6 +19,14 @@ const ARCHETYPE_RANGED_BOW := &"ranged_bow"
 const ARCHETYPE_CAST_STAFF := &"cast_staff"
 const ARCHETYPE_UNARMED := &"unarmed"
 
+# Item category. Stored inside `properties` rather than as its own field so new
+# categories (armour, quest item, ...) never require changing this class. Items
+# that don't declare one are treated as weapons, which keeps every pre-existing
+# item working unchanged.
+const PROPERTY_CATEGORY := &"category"
+const CATEGORY_WEAPON := &"weapon"
+const CATEGORY_CONSUMABLE := &"consumable"
+
 @export var id: StringName = &""
 @export var display_name: String = "Unnamed Item"
 @export var description: String = ""
@@ -56,6 +64,14 @@ func has_property(key: StringName) -> bool:
 
 func set_property(key: StringName, value: Variant) -> void:
 	properties[key] = value
+
+
+func get_category() -> StringName:
+	return properties.get(PROPERTY_CATEGORY, CATEGORY_WEAPON)
+
+
+func is_weapon() -> bool:
+	return get_category() == CATEGORY_WEAPON
 
 
 static func weapon_type_name(t: int) -> String:
