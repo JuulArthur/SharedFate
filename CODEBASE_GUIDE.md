@@ -11,6 +11,7 @@ This page explains how the current prototype is structured, where systems live, 
 - `scripts/inventory/item.gd`: `Item` Resource — flexible weapon/item definition (damage, type, range, icon, free-form `properties` dict).
 - `scripts/inventory/item_factory.gd`: `ItemFactory` — static builders for items including procedural pixel-art textures (e.g. `create_sword()`).
 - `scripts/inventory/inventory.gd`: `Inventory` Node — list of items + equipped weapon, emits signals on change.
+- `scripts/display_setup.gd`: `DisplaySetup` autoload - window sizing on launch and the F11 fullscreen toggle.
 - `scenes/backgroundMap.gd`: Tilemap helper script for obstacle/navigation updates (currently minimal/partial).
 - `project.godot`: Project-level display/window config.
 
@@ -112,6 +113,14 @@ Movement and pathing are split between coordinator and actor scripts:
   - Some A* helper methods exist for alternative routing logic and fallback behavior.
 
 ## Additional important concepts
+
+### Resolution and window scaling
+
+- The game renders at a fixed design resolution of 1600x900 (`window/size/viewport_*` in `project.godot`).
+- `window/stretch/mode="canvas_items"` scales the world *and* the UI up to the real window size, so a larger window means larger, more readable text. UI code never needs to know the resolution - keep building it in design-resolution units.
+- `window/stretch/aspect="expand"` means wider-than-16:9 windows show more world instead of letterboxing.
+- `DisplaySetup` (autoload) sizes the launch window to fill most of the desktop while keeping the 16:9 shape, and binds F11 / Alt+Enter to toggle fullscreen. Tune `TARGET_WINDOW_SIZE` and `MAX_SCREEN_FRACTION` there.
+- To change how much of the map fits on screen, change `CAMERA_ZOOM` or the design resolution - not the window size.
 
 ### Camera and readability
 

@@ -17,9 +17,11 @@ config/features=PackedStringArray("4.7")
 [autoload]
 
 LevelLoader="*res://scripts/level_loader.gd"
+DisplaySetup="*res://scripts/display_setup.gd"
 
 [display]
 
 window/size/viewport_width=1600
 window/size/viewport_height=900
-window/stretch/mode="viewport"
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
