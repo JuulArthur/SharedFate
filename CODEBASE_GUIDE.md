@@ -11,8 +11,11 @@ This page explains how the current prototype is structured, where systems live, 
 - `scripts/inventory/item.gd`: `Item` Resource — flexible weapon/item definition (damage, type, range, icon, free-form `properties` dict).
 - `scripts/inventory/item_factory.gd`: `ItemFactory` — static builders for items including procedural pixel-art textures (e.g. `create_sword()`).
 - `scripts/inventory/inventory.gd`: `Inventory` Node — list of items + equipped weapon, emits signals on change.
-- `scripts/display_setup.gd`: `DisplaySetup` autoload - window sizing on launch and the F11 fullscreen toggle.
+- `scripts/inventory/loot_dropper.gd`: `LootDropper` — turns a list of items into world pickups; every loot source funnels through it.
+- `scripts/inventory/loot_menu.gd`: `LootMenu` autoload — the "what do you want to loot?" panel for a pile on the ground.
+- `scripts/item_pickup.gd`: A single dropped item lying in the world; click it to open the loot menu.
 - `scenes/backgroundMap.gd`: Tilemap helper script for obstacle/navigation updates (currently minimal/partial).
+- `scripts/display_setup.gd`: `DisplaySetup` autoload - window sizing on launch and the F11 fullscreen toggle.
 - `project.godot`: Project-level display/window config.
 
 ## High-level architecture
@@ -158,6 +161,32 @@ Movement and pathing are split between coordinator and actor scripts:
 - `Inventory` is a `Node` added as a child of the player (`$Inventory`). API: `add_item`, `remove_item`, `equip_weapon`, `get_equipped_weapon`, `find_item_by_id`. Signals: `item_added`, `item_removed`, `equipped_weapon_changed`.
 - The player auto-equips an Iron Sword (`ItemFactory.create_sword()`) in `_setup_inventory()`. Melee combat reads `get_melee_damage()` / `get_melee_range()` which prefer the equipped melee weapon's stats and fall back to `attack_damage` / `attack_range` when nothing is equipped. Ranged attacks still use `ranged_attack_damage` until a ranged weapon is introduced.
 - The equipped weapon's `icon` is rendered beside the player via `EquippedWeaponSprite` (child of `EquippedWeaponHolder`), updated via the `equipped_weapon_changed` signal.
+
+### Looting
+
+Loot always travels the same path, no matter what dropped it:
+
+1. A source (breakable crate, treasure chest, dead enemy) collects its `Item`s and calls `LootDropper.drop_items(self, items, spread)` (`scripts/inventory/loot_dropper.gd`).
+2. `LootDropper` instances one `scenes/item_pickup.tscn` per item in a ring around the source, parented to the *source's parent* so a node that frees itself on death still leaves its loot behind.
+3. Clicking a pickup (`scripts/item_pickup.gd`) calls `LootMenu.request_loot(pickup, player)`. Within `LOOT_RANGE` the pile opens immediately and the click is swallowed. Further off the request is remembered and the click is deliberately left unhandled, so the level's own click-to-move walks the player over; the pile opens the moment they are in reach. Walking over an item without clicking does nothing, and pickups have no physics body at all.
+4. The player takes individual items, presses Take All, or closes the panel and leaves the pile on the ground.
+
+`LootMenu` (`scripts/inventory/loot_menu.gd`) is an autoload singleton — loot exists in every level scene and each of those has its own root script, so the panel can't live in `main.gd`. It builds its UI in code in the same style as the inventory panel and sits on `CanvasLayer` layer 7, above the inventory (layer 6).
+
+Notable details:
+
+- Letting the out-of-reach click fall through is what keeps the approach free of movement code: the level scripts already navigate to wherever you clicked, and `main.gd` already trims that move to the turn movement budget in combat. `LootMenu` only watches the distance, so approach-then-loot works in every level and in turn-based combat without knowing anything about either.
+- A pending approach is dropped when the player clicks anywhere else (handled in `LootMenu._input`, which runs before pickups see the click, so clicking another item just starts a new approach), when the item is taken or freed, or when the player stops making progress for `APPROACH_GIVE_UP_SECONDS` — a blocked path, or a turn's movement running out short of the item.
+- Clicks are caught in `ItemPickup._unhandled_input`, which hit-tests the icon's footprint and then calls `set_input_as_handled()`. Unhandled input travels *up* the tree and pickups are descendants of the level root, so a pickup always sees the click before the level's click-to-move / click-to-attack handler and can swallow it. GUI still wins over both, because the GUI pass runs first.
+- The hit test uses `make_input_local(event)` rather than `get_global_mouse_position()`, so it matches the exact event being handled and stays correct under the project's `canvas_items` stretch mode.
+- Hit-testing is a plain rect check against the icon at its resting position, so the bobbing animation never makes the target move under the cursor. Hovering tints the icon so it reads as clickable.
+- A full-screen backdrop `Control` swallows mouse input while the panel is open, so clicks can't fall through to the world. Clicking the backdrop closes the panel.
+- `LootMenu._input` consumes `ui_cancel` and `toggle_inventory` while open, so Esc closes the pile and the inventory can't open underneath it.
+- Taking is one-way through `ItemPickup.take(inventory)`; `is_available()` guards against double-taking a pickup that is mid-collect-animation.
+
+To add a new loot source, call `LootDropper.drop_items(...)` — the menu comes for free.
+
+For testing, `main.gd::_spawn_test_loot()` drops a sword, a potion and a dagger beside the player on startup, guarded by the `spawn_test_loot` export (on by default). Untick it in the inspector once the level has loot of its own worth testing against.
 
 ### Weapon animations
 

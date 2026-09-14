@@ -12,6 +12,7 @@ const COMBAT_TRIGGER_DISTANCE_CELLS := 6
 const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
 const ENEMY_TURN_DELAY_SECONDS := 1.0
 const TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS := 20.0
+const TEST_LOOT_SPREAD := 26.0
 
 enum CombatState {
 	EXPLORATION,
@@ -34,6 +35,10 @@ enum PlayerTurnAction {
 @onready var nav_region: NavigationRegion2D = $NavigationRegion2D
 
 @export var prefer_hand_painted_layout: bool = true
+# Debug convenience: drop a few items beside the player on startup so the loot
+# menu can be tested without hunting down a crate. Untick in the inspector once
+# the level has its own loot worth testing against.
+@export var spawn_test_loot: bool = true
 @export var runtime_canvas_modulate_color: Color = Color(0.06, 0.06, 0.08, 1.0)
 
 var grass_source_id: int = -1
@@ -101,6 +106,7 @@ func _ready() -> void:
 	_setup_tile_set()
 	_rebuild_navigation_for_layer(active_nav_layer)
 	_place_player()
+	_spawn_test_loot()
 	_register_placed_enemies()
 	_wire_enemy_ai_targets()
 	_center_camera()
@@ -228,6 +234,20 @@ func _center_camera_on_layer(layer: TileMapLayer) -> void:
 	camera_2d.zoom = CAMERA_ZOOM
 	camera_2d.enabled = true
 	camera_2d.make_current()
+
+
+func _spawn_test_loot() -> void:
+	if not spawn_test_loot:
+		return
+
+	# Goes out through LootDropper like every other drop, so what you test is
+	# exactly what a crate or a dead enemy produces.
+	var items: Array[Item] = [
+		ItemFactory.create_sword(),
+		ItemFactory.create_health_potion(),
+		ItemFactory.create_dagger(),
+	]
+	LootDropper.drop_items(player, items, TEST_LOOT_SPREAD)
 
 
 func _place_player() -> void:

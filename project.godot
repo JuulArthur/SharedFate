@@ -18,6 +18,7 @@ config/features=PackedStringArray("4.7")
 
 LevelLoader="*res://scripts/level_loader.gd"
 DisplaySetup="*res://scripts/display_setup.gd"
+LootMenu="*res://scripts/inventory/loot_menu.gd"
 
 [display]
 
