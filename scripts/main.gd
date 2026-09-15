@@ -88,18 +88,12 @@ var music_muted := true
 var mute_button: Button
 const MUSIC_CROSSFADE_SECONDS := 1.2
 const MUSIC_VOLUME_DB := -6.0
-var inventory_ui_layer: CanvasLayer
-var inventory_ui_panel: PanelContainer
-var inventory_ui_equipped_label: Label
-var inventory_ui_items_list: VBoxContainer
 
 
 func _ready() -> void:
 	canvas_modulate.color = runtime_canvas_modulate_color
 	_setup_turn_ui()
 	_setup_music()
-	_ensure_inventory_input()
-	_setup_inventory_ui()
 
 	active_nav_layer = custom_background
 	_refresh_turn_meter_world_units()
@@ -127,17 +121,6 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("toggle_inventory"):
-		_toggle_inventory_panel()
-		get_viewport().set_input_as_handled()
-		return
-
-	if inventory_ui_panel != null and inventory_ui_panel.visible:
-		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-			_toggle_inventory_panel()
-		get_viewport().set_input_as_handled()
-		return
-
 	if combat_state != CombatState.EXPLORATION:
 		_handle_turn_input(event)
 		return
@@ -241,12 +224,15 @@ func _spawn_test_loot() -> void:
 		return
 
 	# Goes out through LootDropper like every other drop, so what you test is
-	# exactly what a crate or a dead enemy produces.
+	# exactly what a crate or a dead enemy produces. One of everything, so the
+	# inventory screen has a full set of gear to try on.
 	var items: Array[Item] = [
 		ItemFactory.create_sword(),
-		ItemFactory.create_health_potion(),
 		ItemFactory.create_dagger(),
+		ItemFactory.create_health_potion(),
 	]
+	for builder in ItemFactory.gear_builders():
+		items.append(builder.call())
 	LootDropper.drop_items(player, items, TEST_LOOT_SPREAD)
 
 
@@ -1258,135 +1244,6 @@ func _on_mute_button_pressed() -> void:
 	mute_button.text = "Sound: OFF" if music_muted else "Sound: ON"
 
 
-func _ensure_inventory_input() -> void:
-	if not InputMap.has_action("toggle_inventory"):
-		InputMap.add_action("toggle_inventory")
-
-	var has_i_key := false
-	for e in InputMap.action_get_events("toggle_inventory"):
-		if e is InputEventKey and e.physical_keycode == KEY_I:
-			has_i_key = true
-			break
-
-	if not has_i_key:
-		var key_event := InputEventKey.new()
-		key_event.physical_keycode = KEY_I
-		InputMap.action_add_event("toggle_inventory", key_event)
-
-
-func _setup_inventory_ui() -> void:
-	inventory_ui_layer = CanvasLayer.new()
-	inventory_ui_layer.name = "InventoryUILayer"
-	inventory_ui_layer.layer = 6
-	add_child(inventory_ui_layer)
-
-	inventory_ui_panel = PanelContainer.new()
-	inventory_ui_panel.name = "InventoryUI"
-	inventory_ui_panel.visible = false
-	inventory_ui_panel.anchor_left = 0.5
-	inventory_ui_panel.anchor_top = 0.5
-	inventory_ui_panel.anchor_right = 0.5
-	inventory_ui_panel.anchor_bottom = 0.5
-	inventory_ui_panel.offset_left = -160.0
-	inventory_ui_panel.offset_top = -140.0
-	inventory_ui_panel.offset_right = 160.0
-	inventory_ui_panel.offset_bottom = 140.0
-
-	var panel_style := StyleBoxFlat.new()
-	panel_style.bg_color = Color(0.08, 0.07, 0.05, 0.92)
-	panel_style.border_color = Color(0.66, 0.56, 0.33, 0.95)
-	panel_style.border_width_left = 2
-	panel_style.border_width_top = 2
-	panel_style.border_width_right = 2
-	panel_style.border_width_bottom = 2
-	panel_style.corner_radius_top_left = 4
-	panel_style.corner_radius_top_right = 4
-	panel_style.corner_radius_bottom_left = 4
-	panel_style.corner_radius_bottom_right = 4
-	inventory_ui_panel.add_theme_stylebox_override("panel", panel_style)
-	inventory_ui_layer.add_child(inventory_ui_panel)
-
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 14)
-	margin.add_theme_constant_override("margin_top", 10)
-	margin.add_theme_constant_override("margin_right", 14)
-	margin.add_theme_constant_override("margin_bottom", 12)
-	inventory_ui_panel.add_child(margin)
-
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 6)
-	margin.add_child(vbox)
-
-	var title_label := Label.new()
-	title_label.text = "INVENTORY"
-	title_label.add_theme_color_override("font_color", Color(0.88, 0.78, 0.53, 1.0))
-	vbox.add_child(title_label)
-
-	inventory_ui_equipped_label = Label.new()
-	inventory_ui_equipped_label.text = "Equipped: -"
-	inventory_ui_equipped_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
-	vbox.add_child(inventory_ui_equipped_label)
-
-	var separator := ColorRect.new()
-	separator.color = Color(0.52, 0.44, 0.28, 0.85)
-	separator.custom_minimum_size = Vector2(0, 1)
-	vbox.add_child(separator)
-
-	inventory_ui_items_list = VBoxContainer.new()
-	inventory_ui_items_list.add_theme_constant_override("separation", 4)
-	vbox.add_child(inventory_ui_items_list)
-
-	var hint_label := Label.new()
-	hint_label.text = "Press I or Esc to close"
-	hint_label.add_theme_color_override("font_color", Color(0.62, 0.60, 0.56, 1.0))
-	hint_label.add_theme_font_size_override("font_size", 12)
-	vbox.add_child(hint_label)
-
-
-func _toggle_inventory_panel() -> void:
-	if inventory_ui_panel == null:
-		return
-	inventory_ui_panel.visible = not inventory_ui_panel.visible
-	if inventory_ui_panel.visible:
-		_refresh_inventory_ui()
-
-
-func _refresh_inventory_ui() -> void:
-	if inventory_ui_equipped_label == null or inventory_ui_items_list == null:
-		return
-
-	var equipped: Item = null
-	if player != null and player.has_method("get_equipped_weapon"):
-		equipped = player.call("get_equipped_weapon")
-	inventory_ui_equipped_label.text = "Equipped: %s" % (equipped.display_name if equipped != null else "None")
-
-	for child in inventory_ui_items_list.get_children():
-		child.queue_free()
-
-	var items: Array = []
-	if player != null and player.has_method("get_inventory_items"):
-		items = player.call("get_inventory_items")
-
-	if items.is_empty():
-		var empty_label := Label.new()
-		empty_label.text = "(No items)"
-		empty_label.add_theme_color_override("font_color", Color(0.62, 0.60, 0.56, 1.0))
-		inventory_ui_items_list.add_child(empty_label)
-		return
-
-	for item in items:
-		if item == null:
-			continue
-		var item_label := Label.new()
-		item_label.text = item.display_name
-		if equipped != null and item == equipped:
-			item_label.text += "  (equipped)"
-			item_label.add_theme_color_override("font_color", Color(0.88, 0.78, 0.53, 1.0))
-		else:
-			item_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
-		inventory_ui_items_list.add_child(item_label)
-
-
 func _crossfade_music(fade_in_player: AudioStreamPlayer, fade_out_player: AudioStreamPlayer) -> void:
 	var tween := create_tween()
 	tween.set_parallel(true)
@@ -1401,6 +1258,9 @@ func _hide_path_preview() -> void:
 
 
 func _update_path_preview() -> void:
+	if InventoryScreen.is_open():
+		_hide_path_preview()
+		return
 	if combat_state != CombatState.PLAYER_TURN or player_turn_action_running:
 		_hide_path_preview()
 		return
@@ -1656,6 +1516,14 @@ func _setup_turn_ui() -> void:
 
 
 func _update_turn_ui() -> void:
+	# The inventory screen is a full-screen modal; the combat HUD behind it is
+	# just noise, and none of its buttons are reachable anyway.
+	var hud_visible := not InventoryScreen.is_open()
+	if turn_ui_layer != null:
+		turn_ui_layer.visible = hud_visible
+	if player != null and player.has_method("set_overhead_ui_visible"):
+		player.call("set_overhead_ui_visible", hud_visible)
+
 	if turn_ui_panel == null:
 		return
 

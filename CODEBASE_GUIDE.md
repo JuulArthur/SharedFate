@@ -13,6 +13,8 @@ This page explains how the current prototype is structured, where systems live, 
 - `scripts/inventory/inventory.gd`: `Inventory` Node — list of items + equipped weapon, emits signals on change.
 - `scripts/inventory/loot_dropper.gd`: `LootDropper` — turns a list of items into world pickups; every loot source funnels through it.
 - `scripts/inventory/loot_menu.gd`: `LootMenu` autoload — the "what do you want to loot?" panel for a pile on the ground.
+- `scripts/inventory/inventory_screen.gd`: `InventoryScreen` autoload — the full-screen bag + equipment paperdoll (the `I` key).
+- `scripts/ui_theme.gd`: `UiTheme` — shared palette and panel/slot/button recipes for the code-built screens.
 - `scripts/item_pickup.gd`: A single dropped item lying in the world; click it to open the loot menu.
 - `scenes/backgroundMap.gd`: Tilemap helper script for obstacle/navigation updates (currently minimal/partial).
 - `scripts/display_setup.gd`: `DisplaySetup` autoload - window sizing on launch and the F11 fullscreen toggle.
@@ -153,12 +155,16 @@ Movement and pathing are split between coordinator and actor scripts:
 - Spawn points are chosen near offset target cells with walkability search.
 - Enemy death (`enemy.gd`) grants XP and removes node via `queue_free()`.
 
-### Inventory and items
+### Inventory, equipment and items
 
 - `Item` is a `Resource`. Core properties: `id`, `display_name`, `description`, `icon`, `damage`, `weapon_type` (`MELEE`/`RANGED`/`MAGIC`), `weapon_range`. Use `properties: Dictionary` plus `get_property`/`set_property` for future stats (crit, status effects, etc.) without changing the class.
 - Animation/fit properties: `animation_archetype`, `animation_override`, `grip_offset`, `grip_rotation_deg` (see "Weapon animations" below).
 - `ItemFactory` owns item construction and procedural pixel-art (see `create_sword()`).
-- `Inventory` is a `Node` added as a child of the player (`$Inventory`). API: `add_item`, `remove_item`, `equip_weapon`, `get_equipped_weapon`, `find_item_by_id`. Signals: `item_added`, `item_removed`, `equipped_weapon_changed`.
+- `Inventory` is a `Node` added as a child of the player (`$Inventory`). API: `add_item`, `remove_item`, `equip`, `unequip`, `get_equipped`, `get_slot_of`, `is_equipped`, `get_total_armor`, `find_item_by_id`. Signals: `item_added`, `item_removed`, `equipment_changed`, `equipped_weapon_changed`.
+- **Equipment** is a slot table (`Inventory.equipment`: slot → `Item`) over the slots in `Inventory.SLOTS` — head, neck, chest, back, both hands, legs, feet, two rings and a trinket. An item declares the slot it fits and the armour it adds through `properties` (`Item.PROPERTY_EQUIP_SLOT`, `Item.PROPERTY_ARMOR`), so new gear kinds never touch the `Item` class. Weapons with no declared slot default to the main hand, which keeps every pre-existing weapon equippable.
+- The main hand *is* the weapon slot, so the older weapon-only API (`equip_weapon`, `get_equipped_weapon`, `equipped_weapon_changed`) still works and stays in sync — that's what keeps `player.gd`'s melee stats and the held-weapon sprite working untouched.
+- Equipped items stay in `items`; being worn is a property of the item, not a different place it lives. That is what lets the inventory screen show a worn item in both the grid (green edge) and its slot.
+- Rings fit either hand: `Item.get_compatible_slots()` reports the pair, and `equip` prefers a free one before replacing.
 - The player auto-equips an Iron Sword (`ItemFactory.create_sword()`) in `_setup_inventory()`. Melee combat reads `get_melee_damage()` / `get_melee_range()` which prefer the equipped melee weapon's stats and fall back to `attack_damage` / `attack_range` when nothing is equipped. Ranged attacks still use `ranged_attack_damage` until a ranged weapon is introduced.
 - The equipped weapon's `icon` is rendered beside the player via `EquippedWeaponSprite` (child of `EquippedWeaponHolder`), updated via the `equipped_weapon_changed` signal.
 
@@ -171,7 +177,9 @@ Loot always travels the same path, no matter what dropped it:
 3. Clicking a pickup (`scripts/item_pickup.gd`) calls `LootMenu.request_loot(pickup, player)`. Within `LOOT_RANGE` the pile opens immediately and the click is swallowed. Further off the request is remembered and the click is deliberately left unhandled, so the level's own click-to-move walks the player over; the pile opens the moment they are in reach. Walking over an item without clicking does nothing, and pickups have no physics body at all.
 4. The player takes individual items, presses Take All, or closes the panel and leaves the pile on the ground.
 
-`LootMenu` (`scripts/inventory/loot_menu.gd`) is an autoload singleton — loot exists in every level scene and each of those has its own root script, so the panel can't live in `main.gd`. It builds its UI in code in the same style as the inventory panel and sits on `CanvasLayer` layer 7, above the inventory (layer 6).
+`LootMenu` (`scripts/inventory/loot_menu.gd`) is an autoload singleton — loot exists in every level scene and each of those has its own root script, so the panel can't live in `main.gd`. It builds its UI in code and sits on `CanvasLayer` layer 7, above the inventory (layer 6).
+
+The panel is laid out as a loot container: a title plate, category tabs (ALL / WEAPONS / POTIONS / OTHER), a grid of bordered item slots padded out to `MIN_GRID_SLOTS` so it keeps its shape, a detail column showing the selected item with a Take button, and a footer strip with the pile count, Take All and Close. Selecting a slot shows the item; Take (or a double-click on the slot) moves it to the inventory. Tabs filter on `Item.get_category()`, so a new category only needs an entry in the `TABS` table. All the colours and sizes are constants at the top of the file.
 
 Notable details:
 
@@ -185,6 +193,20 @@ Notable details:
 - Taking is one-way through `ItemPickup.take(inventory)`; `is_available()` guards against double-taking a pickup that is mid-collect-animation.
 
 To add a new loot source, call `LootDropper.drop_items(...)` — the menu comes for free.
+
+### Inventory screen
+
+`InventoryScreen` (`scripts/inventory/inventory_screen.gd`) is the `I` key screen: an autoload for the same reason as `LootMenu`, and it owns the `toggle_inventory` action so the binding lives next to what it opens. It sits on `CanvasLayer` layer 6, below the loot panel.
+
+Layout follows the reference mockup: title plate, category tabs and a scrolling item grid on the left; the character art ringed by equipment slots on the right, with a stat strip beneath; Back to Game along the bottom.
+
+- Select an item (bag slot or worn slot) and the middle column shows it; the action button equips or unequips depending on what is selected. Double-clicking a bag slot does it in one step.
+- The grid re-shapes itself to whatever room it has (`_grid_columns` / `_grid_rows` off the scroll area's size) rather than hardcoding a shape, and pads with empty slots so the bag fills its panel.
+- The character art is the world sprite cropped to its opaque region — the raw sprite is mostly transparent padding and would otherwise scale down to a tiny figure.
+- The stat strip reads live values: level, `get_melee_damage()`, `Inventory.get_total_armor()`, health, and the player's `gold`. **Defence is displayed but not yet applied to incoming damage** — wiring it into `receive_damage` is a balance decision, not a UI one.
+- While the screen is open it swallows the keyboard and its backdrop swallows the mouse, and `main.gd` hides the combat HUD and the player's overhead bars so the screen reads as a modal.
+
+Both screens draw from `UiTheme` (`scripts/ui_theme.gd`) — one palette and one set of panel/slot/button recipes, so they can't drift apart.
 
 For testing, `main.gd::_spawn_test_loot()` drops a sword, a potion and a dagger beside the player on startup, guarded by the `spawn_test_loot` export (on by default). Untick it in the inspector once the level has loot of its own worth testing against.
 

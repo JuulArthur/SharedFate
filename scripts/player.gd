@@ -11,6 +11,11 @@ extends CharacterBody2D
 @export var attack_action_name := "attack"
 @export var counter_action_name := "counter"
 @export var ranged_attack_damage := 16
+# Shown on the inventory screen's character strip.
+@export var character_name := "Sir Arthur"
+# Carried coin. Nothing grants gold yet — the field exists so the inventory
+# screen reads a real value rather than a hardcoded one.
+@export var gold := 0
 
 const XP_BASE_TO_LEVEL_2 := 100.0
 const XP_PER_LEVEL_MULT := 1.5
@@ -931,6 +936,15 @@ func _on_equipped_weapon_changed(weapon: Item) -> void:
 	equipped_weapon_sprite.position = weapon.grip_offset
 	equipped_weapon_sprite.rotation_degrees = weapon.grip_rotation_deg
 	equipped_weapon_sprite.visible = true
+
+
+# Show or hide the bars and level tag floating above the player. Full-screen
+# UI (the inventory screen) hides them so they don't sit on top of the panel.
+func set_overhead_ui_visible(is_visible: bool) -> void:
+	for node_name in ["HealthBarRoot", "XpBarRoot", "LevelLabel"]:
+		var node := get_node_or_null(node_name) as CanvasItem
+		if node != null:
+			node.visible = is_visible
 
 
 func get_equipped_weapon() -> Item:
