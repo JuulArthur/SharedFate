@@ -16,6 +16,14 @@ extends CharacterBody2D
 @export var attack_wind_up_duration := 0.2
 @export var attack_strike_duration := 0.12
 @export var attack_recovery_duration := 0.2
+# Turn mode uses a slower, clearly telegraphed swing: the wind-up is long
+# enough to read and the strike (= the counter window) is wide enough to hit
+# on purpose. Realtime keeps the snappier values above.
+@export var turn_attack_wind_up_duration := 0.55
+@export var turn_attack_strike_duration := 0.18
+
+const HIT_NUDGE_PX := 7.0
+const DEATH_SECONDS := 0.42
 
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
@@ -32,7 +40,10 @@ var turn_active := false
 var turn_remaining_move_meters := 0.0
 var turn_attack_available := false
 var health_bar_fill: Sprite2D
+var health_bar_ghost: Sprite2D
 var hover_outline: Sprite2D
+var counter_prompt: CounterPrompt
+var _dying := false
 
 
 func _ready() -> void:
@@ -52,6 +63,7 @@ func _ready() -> void:
 	sprite.texture = _create_enemy_texture()
 	_sprite_idle_local = sprite.position
 	_setup_hover_outline()
+	_setup_counter_prompt()
 
 
 func _physics_process(delta: float) -> void:
@@ -134,15 +146,87 @@ func try_attack(target: Node2D) -> void:
 func receive_damage(amount: int) -> void:
 	if amount <= 0:
 		return
+	if not is_alive():
+		return
 	current_health = maxi(0, current_health - amount)
 	_update_health_bar()
-	print("Enemy HP: %d/%d" % [current_health, max_health])
+	_play_hit_feedback(amount)
 	if current_health == 0:
-		get_tree().call_group("player", "add_experience", experience_reward)
-		# Drop before freeing: LootDropper reads our position and parent, and
-		# spawns the pickups as siblings so they outlive us.
-		_drop_loot()
-		queue_free()
+		_die()
+
+
+# Alias so the player's radial (spacebar) attack, which calls `take_damage`
+# like crates do, lands on enemies too.
+func take_damage(amount: int) -> void:
+	receive_damage(amount)
+
+
+func _play_hit_feedback(amount: int) -> void:
+	CombatFx.flash(sprite)
+	CombatFx.popup_damage(global_position + Vector2(0, -40), amount, CombatFx.COLOR_DAMAGE_DEALT)
+	CombatFx.shake(3.0, 0.12)
+
+	# Recoil away from whoever we're fighting. Skipped mid-swing so it never
+	# fights the attack tween that owns sprite.position at that moment.
+	if _attack_sequence_active:
+		return
+	var away := Vector2.RIGHT
+	if _target != null and is_instance_valid(_target):
+		away = (global_position - _target.global_position).normalized()
+		if away.length() < 0.01:
+			away = Vector2.RIGHT
+	var nudge := Vector2(away.x * HIT_NUDGE_PX, away.y * HIT_NUDGE_PX * 0.6)
+	var tween := create_tween()
+	tween.tween_property(sprite, "position", _sprite_idle_local + nudge, 0.05) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(sprite, "position", _sprite_idle_local, 0.16) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+# Death is a short beat, not a pop: flash, topple, fade, then loot spills out
+# of the corpse. `is_alive()` is already false from the first frame, so combat
+# logic stops counting us while the animation plays.
+func _die() -> void:
+	if _dying:
+		return
+	_dying = true
+	set_hover_highlighted(false)
+	if counter_prompt != null:
+		counter_prompt.hide_prompt()
+	collision_layer = 0
+	collision_mask = 0
+	navigation_agent.target_position = global_position
+	velocity = Vector2.ZERO
+
+	get_tree().call_group("player", "add_experience", experience_reward)
+	CombatFx.popup_text(global_position + Vector2(0, -58), "+%d XP" % experience_reward, CombatFx.COLOR_XP, 18)
+	CombatFx.shake(5.0, 0.18)
+
+	var bar_root := get_node_or_null("HealthBarRoot") as Node2D
+	if bar_root != null:
+		bar_root.visible = false
+
+	var topple_dir := 1.0
+	if _target != null and is_instance_valid(_target) and _target.global_position.x > global_position.x:
+		topple_dir = -1.0
+
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(sprite, "self_modulate", Color(2.6, 2.6, 2.6, 1.0), 0.05)
+	tween.tween_property(sprite, "rotation", topple_dir * 1.25, DEATH_SECONDS) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_property(sprite, "position", _sprite_idle_local + Vector2(topple_dir * 6.0, 10.0), DEATH_SECONDS) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_property(sprite, "scale", Vector2(1.05, 0.8), DEATH_SECONDS)
+	tween.chain().tween_property(sprite, "modulate:a", 0.0, 0.16)
+	await tween.finished
+
+	if not is_instance_valid(self):
+		return
+	# Drop before freeing: LootDropper reads our position and parent, and
+	# spawns the pickups as siblings so they outlive us.
+	_drop_loot()
+	queue_free()
 
 
 func is_alive() -> bool:
@@ -191,8 +275,13 @@ func _run_attack_sequence_full() -> void:
 		return
 
 	_attack_sequence_active = true
-	if target.has_method("begin_enemy_counter_windup"):
+	var wind_up := turn_attack_wind_up_duration if in_turn_based_combat else attack_wind_up_duration
+	var strike := turn_attack_strike_duration if in_turn_based_combat else attack_strike_duration
+	var can_be_countered := target.has_method("begin_enemy_counter_windup")
+	if can_be_countered:
 		target.call("begin_enemy_counter_windup", self, attack_damage)
+		if counter_prompt != null:
+			counter_prompt.start_windup(wind_up)
 
 	var idle_pos := _sprite_idle_local
 	var idle_scale := Vector2.ONE
@@ -206,17 +295,19 @@ func _run_attack_sequence_full() -> void:
 	# 1) Wind-up — telegraph only, no damage
 	var tween := create_tween()
 	tween.set_parallel(true)
-	tween.tween_property(sprite, "position", idle_pos + Vector2(-6, 4), attack_wind_up_duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tween.tween_property(sprite, "scale", Vector2(0.86, 1.12), attack_wind_up_duration)
-	tween.tween_property(sprite, "modulate", Color(0.52, 0.22, 0.22, 1.0), attack_wind_up_duration)
+	tween.tween_property(sprite, "position", idle_pos + Vector2(-to_target.x * 6.0, -to_target.y * 4.0 + 2.0), wind_up).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(sprite, "scale", Vector2(0.86, 1.12), wind_up)
+	tween.tween_property(sprite, "modulate", Color(0.52, 0.22, 0.22, 1.0), wind_up)
 	await tween.finished
 
 	if not is_instance_valid(self) or not is_alive():
 		_cancel_counter_on_target(target)
+		_hide_counter_prompt()
 		_attack_sequence_active = false
 		return
 	if not is_instance_valid(target) or global_position.distance_to(target.global_position) > attack_range * 1.2:
 		_cancel_counter_on_target(target)
+		_hide_counter_prompt()
 		_reset_attack_sprite_pose(idle_pos, idle_scale)
 		_attack_sequence_active = false
 		if not in_turn_based_combat:
@@ -226,12 +317,14 @@ func _run_attack_sequence_full() -> void:
 	# 2) Strike — counter window; damage resolves after the lunge
 	if target.has_method("begin_enemy_counter_strike"):
 		target.call("begin_enemy_counter_strike")
+	if can_be_countered and counter_prompt != null:
+		counter_prompt.start_strike(strike)
 
 	tween = create_tween()
 	tween.set_parallel(true)
-	tween.tween_property(sprite, "position", idle_pos + lunge, attack_strike_duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	tween.tween_property(sprite, "scale", Vector2(1.14, 0.9), attack_strike_duration)
-	tween.tween_property(sprite, "modulate", Color(1.0, 0.48, 0.48, 1.0), attack_strike_duration * 0.45)
+	tween.tween_property(sprite, "position", idle_pos + lunge, strike).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_property(sprite, "scale", Vector2(1.14, 0.9), strike)
+	tween.tween_property(sprite, "modulate", Color(1.0, 0.48, 0.48, 1.0), strike * 0.45)
 	await tween.finished
 
 	if not is_instance_valid(self):
@@ -241,9 +334,14 @@ func _run_attack_sequence_full() -> void:
 
 	if is_instance_valid(target):
 		if target.has_method("resolve_enemy_attack"):
-			target.call("resolve_enemy_attack", self, attack_damage)
+			var countered: bool = bool(target.call("resolve_enemy_attack", self, attack_damage))
+			if counter_prompt != null:
+				counter_prompt.show_result(countered)
 		elif target.has_method("receive_damage"):
 			target.call("receive_damage", attack_damage)
+			_hide_counter_prompt()
+	else:
+		_hide_counter_prompt()
 
 	# 3) Recovery — after damage, return to neutral
 	tween = create_tween()
@@ -261,6 +359,19 @@ func _run_attack_sequence_full() -> void:
 func _cancel_counter_on_target(counter_target: Node2D) -> void:
 	if counter_target != null and is_instance_valid(counter_target) and counter_target.has_method("cancel_enemy_counter"):
 		counter_target.call("cancel_enemy_counter")
+
+
+func _hide_counter_prompt() -> void:
+	if counter_prompt != null:
+		counter_prompt.hide_prompt()
+
+
+func _setup_counter_prompt() -> void:
+	counter_prompt = CounterPrompt.new()
+	counter_prompt.name = "CounterPrompt"
+	counter_prompt.position = _sprite_idle_local
+	counter_prompt.z_index = sprite.z_index + 3
+	add_child(counter_prompt)
 
 
 func _reset_attack_sprite_pose(idle_pos: Vector2, idle_scale: Vector2) -> void:
@@ -314,6 +425,15 @@ func _setup_health_bar() -> void:
 		root.add_child(bg)
 	bg.texture = _create_solid_texture(Vector2i(28, 4), Color(0.16, 0.16, 0.16, 0.95))
 
+	# Pale bar under the fill that trails on damage so the lost chunk reads.
+	health_bar_ghost = root.get_node_or_null("Ghost") as Sprite2D
+	if health_bar_ghost == null:
+		health_bar_ghost = Sprite2D.new()
+		health_bar_ghost.name = "Ghost"
+		health_bar_ghost.centered = false
+		root.add_child(health_bar_ghost)
+	health_bar_ghost.texture = _create_solid_texture(Vector2i(28, 4), Color(1.0, 0.78, 0.6, 0.9))
+
 	health_bar_fill = root.get_node_or_null("Fill") as Sprite2D
 	if health_bar_fill == null:
 		health_bar_fill = Sprite2D.new()
@@ -330,7 +450,12 @@ func _update_health_bar() -> void:
 	var ratio := 0.0
 	if max_health > 0:
 		ratio = clampf(float(current_health) / float(max_health), 0.0, 1.0)
-	health_bar_fill.scale = Vector2(ratio, 1.0)
+	if not is_inside_tree():
+		health_bar_fill.scale = Vector2(ratio, 1.0)
+		if health_bar_ghost != null:
+			health_bar_ghost.scale = Vector2(ratio, 1.0)
+		return
+	CombatFx.animate_bar(health_bar_fill, health_bar_ghost, ratio)
 
 
 func _create_solid_texture(size: Vector2i, color: Color) -> Texture2D:

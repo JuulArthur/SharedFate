@@ -15,6 +15,9 @@ This page explains how the current prototype is structured, where systems live, 
 - `scripts/inventory/loot_menu.gd`: `LootMenu` autoload — the "what do you want to loot?" panel for a pile on the ground.
 - `scripts/inventory/inventory_screen.gd`: `InventoryScreen` autoload — the full-screen bag + equipment paperdoll (the `I` key).
 - `scripts/ui_theme.gd`: `UiTheme` — shared palette and panel/slot/button recipes for the code-built screens.
+- `scripts/combat_fx.gd`: `CombatFx` autoload — floating damage numbers, turn banners, camera shake, hit-stop, hit flashes and animated health bars. The one place combat "feel" lives.
+- `scripts/counter_prompt.gd`: `CounterPrompt` — the shrinking-ring timing cue an enemy shows over its body while attacking (the counter window).
+- `scripts/range_ring.gd`: `RangeRing` — world-space circle for melee / ranged reach in turn mode.
 - `scripts/item_pickup.gd`: A single dropped item lying in the world; click it to open the loot menu.
 - `scenes/backgroundMap.gd`: Tilemap helper script for obstacle/navigation updates (currently minimal/partial).
 - `scripts/display_setup.gd`: `DisplaySetup` autoload - window sizing on launch and the F11 fullscreen toggle.
@@ -84,9 +87,33 @@ Combat currently has two behavior modes sharing core stats:
   - One attack availability per turn (`turn_attack_available`) plus movement budget.
   - Attack methods (`try_attack`) enforce turn-state checks and range checks.
 - Damage model:
-  - `receive_damage(...)` / `take_damage(...)`.
-  - Player supports blocking (`set_blocking`) reducing incoming damage.
-  - Enemy death grants XP via group call to player.
+  - `receive_damage(...)` / `take_damage(...)` — enemies accept both, so the spacebar sweep (which calls `take_damage` like crates) and click-to-attack (`receive_damage`) both land.
+  - Player supports blocking (`set_blocking`) reducing incoming damage. While blocking a flattened blue ring shows at the player's feet and hits pop up as "BLOCKED".
+  - Enemy death grants XP via group call to player, then plays a short topple/fade before dropping loot and freeing. `is_alive()` is false from the first frame, so combat logic stops counting the enemy immediately.
+- Range: `main.gd` and `player.gd` both test the equipped weapon's range (`get_melee_range()`, via `main._get_player_melee_range()`). Don't reintroduce `attack_range` on the coordinator side - a dagger is shorter than the bare value and the click would silently do nothing.
+
+### Combat feel (`CombatFx`)
+
+Everything that makes a hit *read* is a one-liner into the `CombatFx` autoload rather than bespoke tweens in each actor:
+
+- `popup_text` / `popup_damage` — floating numbers anchored to a world position but drawn on a CanvasLayer, so they stay crisp at any zoom. Colours are `CombatFx.COLOR_*` constants.
+- `announce` — the centred banner for phase changes (`COMBAT!`, `YOUR TURN`, `ENEMY TURN`, `VICTORY`, `DEFEATED`). A new banner replaces the current one so fast transitions never stack.
+- `shake` — camera shake on the current `Camera2D.offset` only, so it composes with `main.gd`'s position lerp.
+- `hit_stop` — a few frames of `Engine.time_scale` dip on impact, released on the wall clock so it can't stick.
+- `flash` — hit flash via `self_modulate`, deliberately *not* `modulate`, because the attack tweens and archetype animations key `modulate` on the same sprites.
+- `animate_bar` — health bars have a pale "ghost" fill that trails the real fill, so the chunk just lost stays readable.
+
+Set `SHAKE_SCALE` / `HIT_STOP_SCALE` to `0.0` to switch those off; every duration and colour is a constant at the top of the file.
+
+**Contact timing.** Melee damage lands `melee_hit_delay` seconds after the swing starts (default 0.10 s, the contact frame of the knight attack strip), not on frame zero. Every melee path — turn attack, click-target, spacebar sweep, counter riposte — goes through `Player._swing_melee(on_contact)`, so the timing is identical everywhere. The player also turns to face the target before swinging. Ranged shots fire a travelling bolt (`_launch_bolt`) and damage on arrival, so a 12 m shot visibly takes longer than a 3 m one.
+
+Because of that, `Player.try_attack` / `try_ranged_attack` are coroutines returning `bool`. `main.gd` awaits them and holds `player_turn_action_running` across the swing so End Turn can't fire mid-animation.
+
+**Enemy telegraph and the counter.** In turn mode an enemy's swing uses `turn_attack_wind_up_duration` (0.55 s) and `turn_attack_strike_duration` (0.18 s); realtime keeps the snappier `attack_wind_up_duration` / `attack_strike_duration`. The strike phase *is* the counter window. While attacking the player, the enemy drives a `CounterPrompt`: a ring shrinks onto a target ring during the wind-up, turns gold for the strike, then flashes green (perfect) or red. Pressing the counter key (`F`) in the wind-up pops "TOO EARLY" immediately and — by the existing rule — the hit then lands doubled; pressing in the strike window negates the hit, pops "COUNTER!" and runs the normal melee swing back at the attacker. `Player.resolve_enemy_attack` returns whether the hit was countered so the enemy can colour the prompt's result.
+
+**Pacing and camera.** `ENEMY_TURN_DELAY_SECONDS`, `ENEMY_ACTION_GAP_SECONDS` and `ENEMY_TURN_HANDBACK_SECONDS` in `main.gd` set the beats before the first enemy acts, between enemies, and before control returns. During the enemy turn the camera focuses between the player and the acting enemy (`CAMERA_ENEMY_FOCUS_BLEND`). Enemies are hover-outlined in exploration too, since they're click-to-attack targets there.
+
+**Range rings and refusals.** On the player's turn a faint ring shows melee reach; picking Ranged swaps it for a dashed 12 m ring. These are the exact circles the attack checks use. When a click can't become an attack the game says so in a popup ("Out of range", "Out of reach", "No attack left") instead of doing nothing. End Turn pulses once movement and attack are both spent.
 
 ## How animations are implemented
 
@@ -94,7 +121,7 @@ Animations are layered across two cooperating systems — see "Weapon animations
 
 - **Weapon motion** is driven by an `AnimationPlayer` (`AttackAnimations`) under the player. It stores one short `Animation` per archetype (`melee_slash`, `melee_thrust`, `melee_chop`, `ranged_bow`, `cast_staff`, `unarmed`) and keys the weapon holder's rotation/position. Built in code by `Player._setup_attack_animations()`.
 - **Body feedback** is still procedural tweens (`player.gd::_flash_attack_feedback()` for melee, `_flash_ranged_feedback()` for ranged). They produce the tint flash, lunge, scale squash, slash VFX, and projectile line. This lets us compose weapon swings on top of a body that isn't sprite-sheeted yet.
-- **Enemy hit feedback** also uses a tween color flash in `enemy.gd::_flash_attack_feedback()`.
+- **Hit reactions** (flash, recoil nudge, damage number, shake) come from `CombatFx` plus `enemy.gd::_play_hit_feedback()` / `player.gd::take_damage()`. Enemy attacks are the wind-up / strike / recovery tween in `enemy.gd::_run_attack_sequence_full()`.
 - **Textures** are generated at runtime by code (`_create_placeholder_texture`, `_create_enemy_texture`, `_create_slash_texture`, `ItemFactory._create_sword_texture`, etc.).
 
 When you introduce a player sprite sheet, migrate the body tweens into the archetype `Animation`s and delete `_flash_attack_feedback` — the AnimationPlayer then becomes the single source of truth for attack motion.
@@ -280,7 +307,7 @@ Rule of thumb: **don't write a per-weapon animation to differentiate a skin — 
 - Player XP/level is in `player.gd`:
   - `add_experience(...)`
   - `xp_required_for_next_level()`
-  - `_on_level_up()` (currently placeholder for future level-up effects/stats)
+  - `_on_level_up()` — only the "LEVEL UP!" popup and flash so far; stat growth is still to be designed.
 
 ## Current limitations and TODO opportunities
 
@@ -288,6 +315,8 @@ Rule of thumb: **don't write a per-weapon animation to differentiate a skin — 
 - `AStarGrid2D` helpers exist but routing currently relies heavily on navmesh + `NavigationServer2D` path extraction.
 - Animation system is procedural and code-driven; no content pipeline yet for authored clips.
 - Combat is functional but still prototype-level (simple AI, no abilities/status effects, no initiative variety).
+- Player death has no state: at 0 HP the fight ends with a `DEFEATED` banner and the player can keep walking. A death/respawn flow is still to be built.
+- The counter's "too early = double damage" rule is the original design; the new prompt only makes it visible. Revisit if it feels punishing now that players can see the window.
 
 ## Where to start when you jump back in
 

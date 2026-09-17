@@ -20,6 +20,7 @@ LevelLoader="*res://scripts/level_loader.gd"
 DisplaySetup="*res://scripts/display_setup.gd"
 LootMenu="*res://scripts/inventory/loot_menu.gd"
 InventoryScreen="*res://scripts/inventory/inventory_screen.gd"
+CombatFx="*res://scripts/combat_fx.gd"
 
 [display]
 

@@ -10,7 +10,15 @@ const TURN_MOVE_METERS := 6.0
 const RANGED_ATTACK_RANGE_METERS := 12.0
 const COMBAT_TRIGGER_DISTANCE_CELLS := 6
 const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
-const ENEMY_TURN_DELAY_SECONDS := 1.0
+# Enemy turn pacing: a short beat before the first enemy acts, a gap between
+# enemies so the camera can settle on each one, and a beat before control
+# comes back so the last hit is readable.
+const ENEMY_TURN_DELAY_SECONDS := 0.6
+const ENEMY_ACTION_GAP_SECONDS := 0.45
+const ENEMY_TURN_HANDBACK_SECONDS := 0.3
+# During the enemy turn the camera sits between the player and the acting
+# enemy, biased toward the enemy, so both stay on screen.
+const CAMERA_ENEMY_FOCUS_BLEND := 0.6
 const TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS := 20.0
 const TEST_LOOT_SPREAD := 26.0
 
@@ -81,6 +89,8 @@ var selected_player_turn_action: PlayerTurnAction = PlayerTurnAction.MOVE
 var path_preview_glow: Line2D
 var path_preview_line: Line2D
 var path_preview_label: Label
+var melee_range_ring: RangeRing
+var ranged_range_ring: RangeRing
 var _turn_meter_world_units_cache: float = -1.0
 var music_exploration: AudioStreamPlayer
 var music_combat: AudioStreamPlayer
@@ -109,15 +119,24 @@ func _ready() -> void:
 		_original_nav_poly = nav_region.navigation_polygon.duplicate()
 
 	_setup_path_preview()
+	_setup_range_rings()
 
 
 func _process(delta: float) -> void:
 	var weight := clampf(delta * CAMERA_FOLLOW_SPEED, 0.0, 1.0)
-	camera_2d.global_position = camera_2d.global_position.lerp(player.global_position, weight)
+	camera_2d.global_position = camera_2d.global_position.lerp(_get_camera_focus_position(), weight)
 	_update_combat_state()
 	_update_enemy_hover_state()
 	_update_turn_ui()
 	_update_path_preview()
+	_update_range_rings()
+
+
+func _get_camera_focus_position() -> Vector2:
+	if combat_state == CombatState.ENEMY_TURN \
+			and active_enemy_turn_actor != null and is_instance_valid(active_enemy_turn_actor):
+		return player.global_position.lerp(active_enemy_turn_actor.global_position, CAMERA_ENEMY_FOCUS_BLEND)
+	return player.global_position
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -339,6 +358,8 @@ func _start_turn_based_combat() -> void:
 			enemy_actor.call("end_turn")
 
 	_crossfade_music(music_combat, music_exploration)
+	CombatFx.announce("COMBAT!", CombatFx.COLOR_COMBAT, 0.7)
+	CombatFx.shake(4.0, 0.2)
 	print("Turn-based combat started")
 	_update_turn_ui()
 
@@ -357,6 +378,14 @@ func _stop_all_combatants_immediately() -> void:
 
 
 func _end_turn_based_combat() -> void:
+	var player_alive := true
+	if player.has_method("is_alive"):
+		player_alive = bool(player.call("is_alive"))
+	if not player_alive:
+		CombatFx.announce("DEFEATED", CombatFx.COLOR_ENEMY_TURN, 1.4)
+	elif _get_all_alive_enemies().is_empty():
+		CombatFx.announce("VICTORY", CombatFx.COLOR_COMBAT, 1.2)
+
 	combat_state = CombatState.EXPLORATION
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	enemy_turn_running = false
@@ -395,6 +424,9 @@ func _request_player_turn_move(target_world_position: Vector2) -> void:
 
 
 
+# Coroutine: resolves when the swing has landed. Callers hold
+# `player_turn_action_running` across the await so End Turn can't fire
+# mid-swing.
 func _request_player_turn_attack(target_enemy: CharacterBody2D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
@@ -406,11 +438,21 @@ func _request_player_turn_attack(target_enemy: CharacterBody2D = null) -> void:
 		target_enemy = _get_closest_enemy_to_player()
 	if target_enemy == null:
 		return
-	if player.global_position.distance_to(target_enemy.global_position) > float(player.get("attack_range")):
+	if player.global_position.distance_to(target_enemy.global_position) > _get_player_melee_range():
 		return
 
-	player.call("try_attack", target_enemy)
+	await player.try_attack(target_enemy)
 	_update_turn_ui()
+
+
+# The melee reach the rules actually use: the equipped weapon's range, falling
+# back to the bare `attack_range`. main.gd used to test `attack_range` while
+# player.gd tested the weapon, so a short dagger could pass here and be refused
+# there with no feedback.
+func _get_player_melee_range() -> float:
+	if player.has_method("get_melee_range"):
+		return float(player.call("get_melee_range"))
+	return float(player.get("attack_range"))
 
 
 func _get_ranged_attack_range_world() -> float:
@@ -420,9 +462,12 @@ func _get_ranged_attack_range_world() -> float:
 func _request_player_turn_ranged_attack(target_enemy: CharacterBody2D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
+	if player_turn_action_running:
+		return
 	if not player.has_method("try_ranged_attack"):
 		return
 	if not player.call("can_turn_attack"):
+		CombatFx.popup_text(player.global_position + Vector2(0, -50), "No attack left", CombatFx.COLOR_WARNING, 16)
 		return
 	if target_enemy == null:
 		target_enemy = _get_closest_enemy_to_player()
@@ -430,8 +475,13 @@ func _request_player_turn_ranged_attack(target_enemy: CharacterBody2D = null) ->
 		return
 	var max_dist := _get_ranged_attack_range_world()
 	if player.global_position.distance_to(target_enemy.global_position) > max_dist:
+		CombatFx.popup_text(target_enemy.global_position + Vector2(0, -50), "Out of range", CombatFx.COLOR_WARNING, 16)
 		return
-	player.call("try_ranged_attack", target_enemy)
+
+	player_turn_action_running = true
+	await player.try_ranged_attack(target_enemy)
+	player_turn_action_running = false
+	_set_player_turn_action(PlayerTurnAction.MOVE)
 	_update_turn_ui()
 
 
@@ -445,11 +495,17 @@ func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> 
 	if target_enemy == null:
 		return
 
+	var can_attack := player.has_method("can_turn_attack") and bool(player.call("can_turn_attack"))
+	if not can_attack:
+		# Still walk up to them - the click is a clear "go there" - but say why
+		# nothing else is going to happen.
+		CombatFx.popup_text(player.global_position + Vector2(0, -50), "No attack left", CombatFx.COLOR_WARNING, 16)
+
 	player_turn_action_running = true
 
 	# If already in range, attack immediately.
-	if _player_can_attack_enemy_now():
-		_request_player_turn_attack(target_enemy)
+	if _player_can_attack_enemy_now(target_enemy):
+		await _request_player_turn_attack(target_enemy)
 		player_turn_action_running = false
 		return
 
@@ -458,6 +514,8 @@ func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> 
 		return
 
 	var remaining_meters := float(player.call("get_turn_remaining_move_meters"))
+	if remaining_meters <= 0.0 and can_attack:
+		CombatFx.popup_text(target_enemy.global_position + Vector2(0, -50), "Out of reach", CombatFx.COLOR_WARNING, 16)
 	if remaining_meters > 0.0:
 		var player_approach_distance := float(player.get("attack_range"))
 		if player.has_method("get_preferred_attack_approach_distance"):
@@ -478,8 +536,10 @@ func _request_player_turn_engage_enemy(target_enemy: CharacterBody2D = null) -> 
 					player_turn_action_running = false
 					return
 
-	if _player_can_attack_enemy_now():
-		_request_player_turn_attack(target_enemy)
+	if _player_can_attack_enemy_now(target_enemy):
+		await _request_player_turn_attack(target_enemy)
+	elif can_attack and is_instance_valid(target_enemy):
+		CombatFx.popup_text(target_enemy.global_position + Vector2(0, -50), "Out of reach", CombatFx.COLOR_WARNING, 16)
 
 	player_turn_action_running = false
 
@@ -502,6 +562,7 @@ func _begin_enemy_turn() -> void:
 		player.call("end_turn")
 	combat_state = CombatState.ENEMY_TURN
 	enemy_turn_running = false
+	CombatFx.announce("ENEMY TURN", CombatFx.COLOR_ENEMY_TURN, 0.6)
 	_update_turn_ui()
 
 
@@ -521,10 +582,21 @@ func _run_enemy_turn() -> void:
 		enemy_turn_running = false
 		return
 
+	var first_actor := true
 	for enemy_actor in _get_all_alive_enemies():
 		active_enemy_turn_actor = enemy_actor
 		if enemy_actor.has_method("start_turn"):
 			enemy_actor.call("start_turn", TURN_MOVE_METERS)
+
+		# Let the camera arrive on this enemy before it does anything.
+		if not first_actor:
+			await get_tree().create_timer(ENEMY_ACTION_GAP_SECONDS).timeout
+			if combat_state != CombatState.ENEMY_TURN:
+				enemy_turn_running = false
+				return
+			if not is_instance_valid(enemy_actor) or (enemy_actor.has_method("is_alive") and not bool(enemy_actor.call("is_alive"))):
+				continue
+		first_actor = false
 
 		var used_meters := _request_enemy_turn_move_by_distance(enemy_actor, TURN_MOVE_METERS)
 		if used_meters > 0.0 and enemy_actor.has_method("consume_turn_movement_meters"):
@@ -544,24 +616,32 @@ func _run_enemy_turn() -> void:
 		if is_instance_valid(enemy_actor) and enemy_actor.has_method("end_turn"):
 			enemy_actor.call("end_turn")
 
+	# A beat so the last hit lands visually before the HUD flips back.
+	await get_tree().create_timer(ENEMY_TURN_HANDBACK_SECONDS).timeout
+	if combat_state != CombatState.ENEMY_TURN:
+		enemy_turn_running = false
+		return
+
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	active_enemy_turn_actor = null
 	combat_state = CombatState.PLAYER_TURN
 	enemy_turn_running = false
+	CombatFx.announce("YOUR TURN", CombatFx.COLOR_PLAYER_TURN, 0.6)
 	_update_turn_ui()
 
 
-func _player_can_attack_enemy_now() -> bool:
+func _player_can_attack_enemy_now(target_enemy: CharacterBody2D = null) -> bool:
 	if not player.has_method("can_turn_attack"):
 		return false
 	if not player.call("can_turn_attack"):
 		return false
-	var target_enemy := _get_closest_enemy_to_player()
+	if target_enemy == null or not is_instance_valid(target_enemy):
+		target_enemy = _get_closest_enemy_to_player()
 	if target_enemy == null:
 		return false
-	return player.global_position.distance_to(target_enemy.global_position) <= float(player.get("attack_range"))
+	return player.global_position.distance_to(target_enemy.global_position) <= _get_player_melee_range()
 
 
 const ENEMY_CLICK_RADIUS := 24.0
@@ -1156,6 +1236,48 @@ func _setup_path_preview() -> void:
 	add_child(path_preview_label)
 
 
+func _setup_range_rings() -> void:
+	# Two rings under the player in turn mode: the melee reach (always, faint)
+	# and the ranged reach (dashed, only while aiming a ranged shot). They are
+	# the same circles the attack checks use, so "inside the ring" means "will
+	# hit".
+	melee_range_ring = RangeRing.new()
+	melee_range_ring.name = "MeleeRangeRing"
+	melee_range_ring.z_index = 8
+	melee_range_ring.visible = false
+	add_child(melee_range_ring)
+
+	ranged_range_ring = RangeRing.new()
+	ranged_range_ring.name = "RangedRangeRing"
+	ranged_range_ring.z_index = 8
+	ranged_range_ring.visible = false
+	add_child(ranged_range_ring)
+
+
+func _update_range_rings() -> void:
+	if melee_range_ring == null or ranged_range_ring == null:
+		return
+	var show := combat_state == CombatState.PLAYER_TURN and not InventoryScreen.is_open()
+	if show and player.has_method("can_turn_attack"):
+		show = bool(player.call("can_turn_attack"))
+	if not show:
+		melee_range_ring.hide_ring()
+		ranged_range_ring.hide_ring()
+		return
+
+	melee_range_ring.global_position = player.global_position
+	ranged_range_ring.global_position = player.global_position
+	if selected_player_turn_action == PlayerTurnAction.RANGED:
+		melee_range_ring.hide_ring()
+		ranged_range_ring.show_ring(_get_ranged_attack_range_world(), Color(0.55, 0.85, 1.0, 0.55), true)
+	else:
+		ranged_range_ring.hide_ring()
+		var melee_color := Color(1.0, 0.9, 0.7, 0.28)
+		if selected_player_turn_action == PlayerTurnAction.ATTACK:
+			melee_color = Color(1.0, 0.85, 0.5, 0.6)
+		melee_range_ring.show_ring(_get_player_melee_range(), melee_color)
+
+
 func _setup_music() -> void:
 	music_exploration = AudioStreamPlayer.new()
 	music_exploration.name = "MusicExploration"
@@ -1568,6 +1690,17 @@ func _update_turn_ui() -> void:
 		turn_ui_wait_button.disabled = not can_player_use_actions
 	if turn_ui_end_turn_button != null:
 		turn_ui_end_turn_button.disabled = not can_player_use_actions
+		# Pulse End Turn once there is nothing left to spend, so the eye goes to
+		# the one button that matters.
+		var remaining_move := 0.0
+		if player != null and player.has_method("get_turn_remaining_move_meters"):
+			remaining_move = float(player.call("get_turn_remaining_move_meters"))
+		var nothing_left := can_player_use_actions and not can_attack and remaining_move <= 0.05
+		if nothing_left:
+			var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.008)
+			turn_ui_end_turn_button.modulate = Color.WHITE.lerp(Color(1.45, 1.3, 0.75, 1.0), pulse)
+		else:
+			turn_ui_end_turn_button.modulate = Color.WHITE
 
 	var player_turn_active := combat_state == CombatState.PLAYER_TURN
 	var player_icon_dim := Color(1.0, 1.0, 1.0, 1.0) if player_turn_active else Color(0.45, 0.45, 0.45, 0.95)
@@ -1622,6 +1755,8 @@ func _update_turn_ui() -> void:
 			can_attack_now = bool(player.call("can_turn_attack"))
 
 		phase_text = "Phase: Your turn (Space = end turn)"
+		if not can_attack_now and remaining_meters <= 0.05:
+			phase_text = "Phase: Nothing left - end turn (Space)"
 		move_text = "Movement: %.1f m left" % remaining_meters
 		var attack_mode_text := "Move"
 		match selected_player_turn_action:
@@ -1772,7 +1907,9 @@ func _rebuild_turn_enemy_icons() -> void:
 
 
 func _update_enemy_hover_state() -> void:
-	if combat_state == CombatState.EXPLORATION:
+	# Outside combat the outline tells you the enemy is a click-to-attack
+	# target; inside it marks what a click will engage.
+	if InventoryScreen.is_open() or LootMenu.is_open():
 		_set_hovered_enemy(null)
 		return
 

@@ -11,6 +11,12 @@ extends CharacterBody2D
 @export var attack_action_name := "attack"
 @export var counter_action_name := "counter"
 @export var ranged_attack_damage := 16
+# Seconds between the swing starting and the blade connecting. Lines damage up
+# with the contact frame of the knight attack strip instead of frame zero, so
+# the enemy reacts when the sword arrives rather than when the arm starts.
+@export var melee_hit_delay := 0.10
+# World units per second for the ranged bolt; the shot lands when it arrives.
+@export var ranged_bolt_speed := 900.0
 # Shown on the inventory screen's character strip.
 @export var character_name := "Sir Arthur"
 # Carried coin. Nothing grants gold yet — the field exists so the inventory
@@ -30,7 +36,9 @@ var player_level := 1
 var experience_points := 0.0
 var attack_cooldown_left := 0.0
 var health_bar_fill: Sprite2D
+var health_bar_ghost: Sprite2D
 var xp_bar_fill: Sprite2D
+var block_aura: Sprite2D
 var level_label: Label
 var attack_target: Node2D
 var target_refresh_left := 0.0
@@ -98,6 +106,7 @@ func _ready() -> void:
 	sprite_idle_position = sprite.position
 	vision_light.texture = _create_vision_light_texture()
 	_setup_attack_vfx()
+	_setup_block_aura()
 	_setup_inventory()
 
 
@@ -203,10 +212,31 @@ func clear_attack_target() -> void:
 
 func take_damage(amount: int) -> void:
 	var final_amount := maxi(amount, 0)
-	if blocking_active and final_amount > 0:
+	var blocked := blocking_active and final_amount > 0
+	if blocked:
 		final_amount = maxi(1, int(ceil(float(final_amount) * 0.5)))
 	current_health = maxi(0, current_health - final_amount)
 	_update_health_bar()
+	if final_amount <= 0:
+		return
+
+	var popup_anchor := global_position + Vector2(0, -44)
+	if blocked:
+		CombatFx.flash(sprite, Color(1.6, 2.0, 2.6, 1.0), 0.2)
+		CombatFx.popup_text(popup_anchor + Vector2(0, -18), "BLOCKED", CombatFx.COLOR_BLOCK, 18)
+		CombatFx.popup_damage(popup_anchor, final_amount, CombatFx.COLOR_BLOCK)
+		CombatFx.shake(2.5, 0.12)
+		_punch_block_aura()
+	else:
+		CombatFx.flash(sprite, Color(2.6, 1.2, 1.2, 1.0), 0.18)
+		CombatFx.popup_damage(popup_anchor, final_amount, CombatFx.COLOR_DAMAGE_TAKEN)
+		CombatFx.shake(6.0, 0.18)
+		# Knock the body back a touch; the swing tween owns sprite.position
+		# too, but taking a hit mid-swing is rare enough to accept the overlap.
+		var tween := create_tween()
+		tween.tween_property(sprite, "position", sprite_idle_position + Vector2(-facing_direction.x * 4.0, 1.0), 0.05)
+		tween.tween_property(sprite, "position", sprite_idle_position, 0.14) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
 func receive_damage(amount: int) -> void:
@@ -230,32 +260,60 @@ func cancel_enemy_counter() -> void:
 	_counter_perfect_pressed = false
 
 
-func resolve_enemy_attack(attacker: Node2D, base_damage: int) -> void:
+# Returns true when the attack was countered (no damage taken, attacker hit).
+func resolve_enemy_attack(attacker: Node2D, base_damage: int) -> bool:
 	if _counter_phase == COUNTER_PHASE_NONE:
 		take_damage(base_damage)
-		return
+		return false
 	var early := _counter_early_pressed
 	var perfect := _counter_perfect_pressed
 	cancel_enemy_counter()
 	if early:
+		# Pressing in the wind-up leaves you open: the "too early" popup fired
+		# on the press itself, so only the doubled hit lands here.
 		take_damage(base_damage * 2)
-	elif perfect:
+		return false
+	if perfect:
+		CombatFx.popup_text(global_position + Vector2(0, -62), "COUNTER!", CombatFx.COLOR_COUNTER, 26)
+		CombatFx.hit_stop(0.08, 0.15)
+		_counter_strike(attacker)
+		return true
+	take_damage(base_damage)
+	return false
+
+
+# The riposte: face the attacker and run the normal melee swing at them.
+func _counter_strike(attacker: Node2D) -> void:
+	if attacker == null or not is_instance_valid(attacker):
+		return
+	_face_toward_world(attacker.global_position)
+	var damage := get_melee_damage()
+	_swing_melee(func() -> void:
 		if is_instance_valid(attacker) and attacker.has_method("receive_damage"):
-			attacker.call("receive_damage", get_melee_damage())
-	else:
-		take_damage(base_damage)
+			attacker.call("receive_damage", damage)
+			CombatFx.hit_stop()
+	)
 
 
 func _register_counter_press() -> void:
 	if _counter_phase == COUNTER_PHASE_WINDUP:
+		if not _counter_early_pressed:
+			CombatFx.popup_text(global_position + Vector2(0, -62), "TOO EARLY", CombatFx.COLOR_WARNING, 16)
+			CombatFx.flash(sprite, Color(1.8, 1.3, 1.0, 1.0), 0.12)
 		_counter_early_pressed = true
 	elif _counter_phase == COUNTER_PHASE_STRIKE:
+		if not _counter_perfect_pressed:
+			CombatFx.flash(sprite, Color(2.6, 2.3, 1.4, 1.0), 0.2)
 		_counter_perfect_pressed = true
 
 
 func heal(amount: int) -> void:
+	var healed := mini(max_health - current_health, maxi(amount, 0))
 	current_health = mini(max_health, current_health + maxi(amount, 0))
 	_update_health_bar()
+	if healed > 0:
+		CombatFx.popup_text(global_position + Vector2(0, -44), "+%d" % healed, CombatFx.COLOR_HEAL)
+		CombatFx.flash(sprite, Color(1.3, 2.2, 1.4, 1.0), 0.2)
 
 
 func _try_attack() -> void:
@@ -263,47 +321,112 @@ func _try_attack() -> void:
 		return
 
 	attack_cooldown_left = attack_cooldown
+	_swing_melee(_apply_attack_damage)
+
+
+# Starts the melee swing now and runs `on_contact` when the blade lands. Every
+# melee path (turn attack, click target, spacebar sweep, counter) funnels
+# through here so contact timing is identical everywhere.
+func _swing_melee(on_contact: Callable) -> void:
 	_flash_attack_feedback()
-	_apply_attack_damage()
+	await get_tree().create_timer(melee_hit_delay).timeout
+	if not is_instance_valid(self):
+		return
+	on_contact.call()
 
 
-func try_attack(_target: Node2D = null) -> void:
+# Turn-mode melee. Coroutine: resolves once the hit has landed (or been
+# refused), so the coordinator can hold the turn until the swing is over.
+# Returns true when a swing actually happened.
+func try_attack(_target: Node2D = null) -> bool:
 	if in_turn_based_combat:
 		if not turn_active:
-			return
+			return false
 		if not turn_attack_available:
-			return
+			return false
 		if _target == null or not is_instance_valid(_target):
-			return
+			return false
 		if not _target.has_method("receive_damage"):
-			return
+			return false
 		if global_position.distance_to(_target.global_position) > get_melee_range():
-			return
+			return false
 
 		turn_attack_available = false
-		_flash_attack_feedback()
-		_target.call("receive_damage", get_melee_damage())
-		return
+		_face_toward_world(_target.global_position)
+		var damage := get_melee_damage()
+		var target := _target
+		await _swing_melee(func() -> void:
+			if is_instance_valid(target) and target.has_method("receive_damage"):
+				target.call("receive_damage", damage)
+				CombatFx.hit_stop()
+		)
+		return true
 
 	_try_attack()
+	return true
 
 
-func try_ranged_attack(_target: Node2D = null) -> void:
+# Turn-mode ranged shot. Coroutine like `try_attack`: the bolt travels and
+# damage lands on arrival, so a 12 m shot visibly takes longer than a 3 m one.
+func try_ranged_attack(_target: Node2D = null) -> bool:
 	if in_turn_based_combat:
 		if not turn_active:
-			return
+			return false
 		if not turn_attack_available:
-			return
+			return false
 		if _target == null or not is_instance_valid(_target):
-			return
+			return false
 		if not _target.has_method("receive_damage"):
-			return
+			return false
 
 		turn_attack_available = false
 		_face_toward_world(_target.global_position)
 		_flash_ranged_feedback(_target)
-		_target.call("receive_damage", ranged_attack_damage)
-		return
+		await _launch_bolt(_target)
+		if is_instance_valid(_target) and _target.has_method("receive_damage"):
+			_target.call("receive_damage", ranged_attack_damage)
+			CombatFx.hit_stop(0.04, 0.3)
+		return true
+	return false
+
+
+# A short glowing streak that flies from the hand to the target. Parented to
+# the level (not the player) so it keeps its own path if the player moves.
+func _launch_bolt(target: Node2D) -> void:
+	var start := global_position + Vector2(facing_direction.x * 8.0, -14.0)
+	var destination := target.global_position + Vector2(0, -12.0)
+	var distance := start.distance_to(destination)
+	var flight_time := clampf(distance / maxf(ranged_bolt_speed, 1.0), 0.08, 0.4)
+
+	var bolt := Line2D.new()
+	bolt.width = 3.0
+	bolt.default_color = Color(0.5, 0.88, 1.0, 0.95)
+	bolt.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	bolt.end_cap_mode = Line2D.LINE_CAP_ROUND
+	bolt.z_index = z_index + 2
+	var gradient := Gradient.new()
+	gradient.set_color(0, Color(0.5, 0.88, 1.0, 0.0))
+	gradient.set_color(1, Color(0.85, 0.97, 1.0, 1.0))
+	bolt.gradient = gradient
+	var direction := (destination - start).normalized()
+	var tail_length := minf(22.0, distance * 0.5)
+	bolt.add_point(-direction * tail_length)
+	bolt.add_point(Vector2.ZERO)
+	bolt.global_position = start
+	var holder := get_parent()
+	if holder == null:
+		holder = self
+	holder.add_child(bolt)
+
+	var tween := bolt.create_tween()
+	tween.tween_property(bolt, "global_position", destination, flight_time) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	await tween.finished
+
+	if is_instance_valid(bolt):
+		var fade := bolt.create_tween()
+		fade.tween_property(bolt, "modulate:a", 0.0, 0.1)
+		fade.tween_callback(bolt.queue_free)
 
 
 func _face_toward_world(world_position: Vector2) -> void:
@@ -331,17 +454,9 @@ func _flash_ranged_feedback(_target: Node2D) -> void:
 	sprite.modulate = Color(0.75, 0.92, 1.0, 1.0)
 	var tween := create_tween()
 	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), t_reset)
-
-	var bolt := Line2D.new()
-	bolt.width = 2.5
-	bolt.default_color = Color(0.4, 0.85, 1.0, 0.95)
-	bolt.z_index = sprite.z_index + 2
-	add_child(bolt)
-	bolt.add_point(Vector2.ZERO)
-	bolt.add_point(to_local(_target.global_position))
-	var bolt_tween := create_tween()
-	bolt_tween.tween_property(bolt, "default_color:a", 0.0, 0.22 * speed_scale)
-	bolt_tween.tween_callback(bolt.queue_free)
+	# Small recoil on release; the projectile itself is `_launch_bolt`.
+	tween.parallel().tween_property(sprite, "position", sprite_idle_position - facing_direction * 2.5, t_col)
+	tween.tween_property(sprite, "position", sprite_idle_position, t_reset)
 
 
 func _try_attack_target(target: Node2D) -> void:
@@ -355,8 +470,13 @@ func _try_attack_target(target: Node2D) -> void:
 		return
 
 	attack_cooldown_left = attack_cooldown
-	_flash_attack_feedback()
-	target.call("receive_damage", get_melee_damage())
+	_face_toward_world(target.global_position)
+	var damage := get_melee_damage()
+	_swing_melee(func() -> void:
+		if is_instance_valid(target) and target.has_method("receive_damage"):
+			target.call("receive_damage", damage)
+			CombatFx.hit_stop()
+	)
 
 
 func _refresh_attack_target_position() -> void:
@@ -390,15 +510,26 @@ func _apply_attack_damage() -> void:
 	var params := PhysicsShapeQueryParameters2D.new()
 	params.shape = shape
 	params.transform = Transform2D(0.0, global_position)
-	params.collision_mask = collision_mask
+	# World (crates) and enemies; the body's own mask is world-only so it can
+	# walk through enemies, which is not what a sword sweep should do.
+	params.collision_mask = 1 | 4
 	params.exclude = [self]
 
 	var damage := get_melee_damage()
 	var hits := get_world_2d().direct_space_state.intersect_shape(params, 16)
+	var landed := false
 	for hit in hits:
 		var collider := hit.get("collider") as Object
-		if collider != null and collider.has_method("take_damage"):
+		if collider == null:
+			continue
+		if collider.has_method("take_damage"):
 			collider.call("take_damage", damage)
+			landed = true
+		elif collider.has_method("receive_damage"):
+			collider.call("receive_damage", damage)
+			landed = true
+	if landed:
+		CombatFx.hit_stop()
 
 
 func _flash_attack_feedback() -> void:
@@ -441,7 +572,7 @@ func _flash_attack_feedback() -> void:
 
 	var tween := create_tween()
 	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), t_reset)
-	tween.parallel().tween_property(sprite, "position", sprite_idle_position + attack_dir * 3.5, t_fast)
+	tween.parallel().tween_property(sprite, "position", sprite_idle_position + attack_dir * 5.5, t_fast)
 	tween.parallel().tween_property(sprite, "scale", Vector2(1.08, 0.94), t_fast)
 
 	var return_tween := create_tween()
@@ -523,6 +654,15 @@ func _setup_health_bar() -> void:
 		root.add_child(bg)
 	bg.texture = _create_solid_texture(Vector2i(28, 4), Color(0.16, 0.16, 0.16, 0.95))
 
+	# Pale bar under the fill that trails on damage so the lost chunk reads.
+	health_bar_ghost = root.get_node_or_null("Ghost") as Sprite2D
+	if health_bar_ghost == null:
+		health_bar_ghost = Sprite2D.new()
+		health_bar_ghost.name = "Ghost"
+		health_bar_ghost.centered = false
+		root.add_child(health_bar_ghost)
+	health_bar_ghost.texture = _create_solid_texture(Vector2i(28, 4), Color(1.0, 0.85, 0.6, 0.9))
+
 	health_bar_fill = root.get_node_or_null("Fill") as Sprite2D
 	if health_bar_fill == null:
 		health_bar_fill = Sprite2D.new()
@@ -579,7 +719,9 @@ func add_experience(amount: int) -> void:
 
 
 func _on_level_up() -> void:
-	pass
+	CombatFx.popup_text(global_position + Vector2(0, -70), "LEVEL UP!", CombatFx.COLOR_COUNTER, 26)
+	CombatFx.flash(sprite, Color(2.4, 2.2, 1.4, 1.0), 0.35)
+	CombatFx.shake(4.0, 0.2)
 
 
 func get_player_level() -> int:
@@ -616,7 +758,12 @@ func _update_health_bar() -> void:
 	var ratio := 0.0
 	if max_health > 0:
 		ratio = clampf(float(current_health) / float(max_health), 0.0, 1.0)
-	health_bar_fill.scale = Vector2(ratio, 1.0)
+	if not is_inside_tree():
+		health_bar_fill.scale = Vector2(ratio, 1.0)
+		if health_bar_ghost != null:
+			health_bar_ghost.scale = Vector2(ratio, 1.0)
+		return
+	CombatFx.animate_bar(health_bar_fill, health_bar_ghost, ratio)
 
 
 func _ensure_attack_input() -> void:
@@ -798,7 +945,7 @@ func stop_movement_immediately() -> void:
 
 func set_turn_based_combat(enabled: bool) -> void:
 	in_turn_based_combat = enabled
-	blocking_active = false
+	set_blocking(false)
 	if enabled:
 		stop_movement_immediately()
 		return
@@ -814,7 +961,7 @@ func start_turn(max_move_meters: float = 6.0) -> void:
 	turn_active = true
 	turn_remaining_move_meters = maxf(0.0, max_move_meters)
 	turn_attack_available = true
-	blocking_active = false
+	set_blocking(false)
 
 
 func end_turn() -> void:
@@ -858,7 +1005,49 @@ func is_alive() -> bool:
 
 
 func set_blocking(enabled: bool) -> void:
+	var was_blocking := blocking_active
 	blocking_active = enabled
+	if block_aura == null:
+		return
+	if enabled and not was_blocking:
+		block_aura.visible = true
+		block_aura.modulate.a = 0.0
+		block_aura.scale = Vector2(0.6, 0.36)
+		var tween := create_tween()
+		tween.set_parallel(true)
+		tween.tween_property(block_aura, "modulate:a", 1.0, 0.16)
+		tween.tween_property(block_aura, "scale", Vector2(1.0, 0.6), 0.22) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		CombatFx.popup_text(global_position + Vector2(0, -44), "BLOCKING", CombatFx.COLOR_BLOCK, 18)
+	elif not enabled and was_blocking:
+		var tween := create_tween()
+		tween.tween_property(block_aura, "modulate:a", 0.0, 0.14)
+		tween.tween_callback(func() -> void:
+			if block_aura != null and not blocking_active:
+				block_aura.visible = false
+		)
+
+
+func _setup_block_aura() -> void:
+	# Flattened ring at the feet while Block is active. It's what tells you the
+	# stance carried over into the enemy turn; damage popups say "BLOCKED".
+	block_aura = Sprite2D.new()
+	block_aura.name = "BlockAura"
+	block_aura.texture = CombatFx.create_ring_texture(48, 17.0, 21.0, Color(0.62, 0.82, 1.0, 0.85))
+	block_aura.position = Vector2(0, 2)
+	block_aura.scale = Vector2(1.0, 0.6)
+	block_aura.z_index = sprite.z_index - 1
+	block_aura.visible = false
+	add_child(block_aura)
+
+
+func _punch_block_aura() -> void:
+	if block_aura == null or not block_aura.visible:
+		return
+	var tween := create_tween()
+	tween.tween_property(block_aura, "scale", Vector2(1.25, 0.75), 0.05)
+	tween.tween_property(block_aura, "scale", Vector2(1.0, 0.6), 0.18) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
 func is_blocking() -> bool:
