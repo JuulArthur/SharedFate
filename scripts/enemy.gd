@@ -24,6 +24,8 @@ extends CharacterBody2D
 
 const HIT_NUDGE_PX := 7.0
 const DEATH_SECONDS := 0.42
+# Frost Snare: the ring at the feet while rooted, and the popups.
+const ROOT_COLOR := Color(0.62, 0.88, 1.0, 0.9)
 
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
@@ -44,6 +46,10 @@ var health_bar_ghost: Sprite2D
 var hover_outline: Sprite2D
 var counter_prompt: CounterPrompt
 var _dying := false
+# Turns of our own this enemy still spends unable to move (the mage's Frost
+# Snare). It keeps its attack; it just goes nowhere.
+var rooted_turns := 0
+var root_ring: Sprite2D
 
 
 func _ready() -> void:
@@ -64,6 +70,7 @@ func _ready() -> void:
 	_sprite_idle_local = sprite.position
 	_setup_hover_outline()
 	_setup_counter_prompt()
+	_setup_root_ring()
 
 
 func _physics_process(delta: float) -> void:
@@ -193,6 +200,8 @@ func _die() -> void:
 	set_hover_highlighted(false)
 	if counter_prompt != null:
 		counter_prompt.hide_prompt()
+	if root_ring != null:
+		root_ring.visible = false
 	collision_layer = 0
 	collision_mask = 0
 	navigation_agent.target_position = global_position
@@ -231,6 +240,53 @@ func _die() -> void:
 
 func is_alive() -> bool:
 	return current_health > 0
+
+
+# --- Root (Frost Snare) --------------------------------------------------------
+
+# Pins the enemy for `turns` of its own turns: it keeps its attack but loses
+# its movement. Rooting an already rooted enemy keeps the longer of the two.
+func apply_root(turns: int) -> void:
+	if turns <= 0 or not is_alive():
+		return
+	rooted_turns = maxi(rooted_turns, turns)
+	_update_root_visual()
+	CombatFx.popup_text(global_position + Vector2(0, -56), "ROOTED", ROOT_COLOR, 16)
+	CombatFx.flash(sprite, Color(0.9, 1.5, 2.2, 1.0), 0.25)
+	CombatFx.ring_burst(self, global_position + Vector2(0, 2), ROOT_COLOR, 6.0, 22.0, 0.3)
+
+
+func is_rooted() -> bool:
+	return rooted_turns > 0
+
+
+func _setup_root_ring() -> void:
+	root_ring = Sprite2D.new()
+	root_ring.name = "RootRing"
+	root_ring.texture = CombatFx.create_ring_texture(40, 11.0, 15.0, ROOT_COLOR)
+	root_ring.position = Vector2(0, 2)
+	root_ring.scale = Vector2(1.0, 0.55)
+	root_ring.z_index = sprite.z_index - 1
+	root_ring.visible = false
+	add_child(root_ring)
+
+
+func _update_root_visual() -> void:
+	if root_ring == null:
+		return
+	var show := rooted_turns > 0
+	if show and not root_ring.visible:
+		root_ring.visible = true
+		root_ring.modulate.a = 0.0
+		var tween := create_tween()
+		tween.tween_property(root_ring, "modulate:a", 1.0, 0.18)
+	elif not show and root_ring.visible:
+		var tween := create_tween()
+		tween.tween_property(root_ring, "modulate:a", 0.0, 0.2)
+		tween.tween_callback(func() -> void:
+			if root_ring != null and rooted_turns <= 0:
+				root_ring.visible = false
+		)
 
 
 func _drop_loot() -> void:
@@ -281,6 +337,10 @@ func _run_attack_sequence_full() -> void:
 	if can_be_countered:
 		target.call("begin_enemy_counter_windup", self, attack_damage)
 		if counter_prompt != null:
+			# Tell the player what the press will do as whoever is in control.
+			if target.has_method("get_reaction_hint"):
+				var hint: Dictionary = target.call("get_reaction_hint")
+				counter_prompt.set_hint(String(hint.get("text", "")), hint.get("color", CounterPrompt.COLOR_TARGET))
 			counter_prompt.start_windup(wind_up)
 
 	var idle_pos := _sprite_idle_local
@@ -538,18 +598,27 @@ func set_turn_based_combat(enabled: bool) -> void:
 		turn_active = false
 		turn_remaining_move_meters = 0.0
 		turn_attack_available = false
+		rooted_turns = 0
+		_update_root_visual()
 
 
 func start_turn(max_move_meters: float = 6.0) -> void:
 	turn_active = true
-	turn_remaining_move_meters = maxf(0.0, max_move_meters)
+	# A rooted enemy keeps its attack but goes nowhere this turn.
+	turn_remaining_move_meters = 0.0 if rooted_turns > 0 else maxf(0.0, max_move_meters)
 	turn_attack_available = true
+	if rooted_turns > 0:
+		CombatFx.popup_text(global_position + Vector2(0, -48), "Rooted", ROOT_COLOR, 14)
 
 
 func end_turn() -> void:
 	turn_active = false
 	turn_remaining_move_meters = 0.0
 	turn_attack_available = false
+	# The root is spent by the turn it cost; the ice melts once that turn ends.
+	if rooted_turns > 0:
+		rooted_turns -= 1
+		_update_root_visual()
 
 
 func consume_turn_movement_meters(used: float) -> void:

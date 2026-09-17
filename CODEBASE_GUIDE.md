@@ -18,7 +18,13 @@ This page explains how the current prototype is structured, where systems live, 
 - `scripts/combat_fx.gd`: `CombatFx` autoload — floating damage numbers, turn banners, camera shake, hit-stop, hit flashes and animated health bars. The one place combat "feel" lives.
 - `scripts/counter_prompt.gd`: `CounterPrompt` — the shrinking-ring timing cue an enemy shows over its body while attacking (the counter window).
 - `scripts/range_ring.gd`: `RangeRing` — world-space circle for melee / ranged reach in turn mode.
+- `scripts/soul.gd`: `Soul` — the three people bound into the player (knight, rogue, mage): stats, reactions, spells and every balance constant for them.
+- `scripts/soul_art.gd`: `SoulArt` — procedural placeholder bodies for the rogue and the mage, plus the three HUD portraits.
 - `scripts/item_pickup.gd`: A single dropped item lying in the world; click it to open the loot menu.
+- `scripts/story/story_book.gd`: `StoryBook` autoload — the full-screen open book that writes chapter text onto its pages and reads it aloud.
+- `scripts/story/story_library.gd`: `StoryLibrary` — every authored chapter, built in code; ask for one by id.
+- `scripts/story/story_chapter.gd`: `StoryChapter` Resource — id, title, pages.
+- `scripts/story/magic_ink_effect.gd`: `MagicInkEffect` RichTextEffect — the "ink appearing" reveal.
 - `scenes/backgroundMap.gd`: Tilemap helper script for obstacle/navigation updates (currently minimal/partial).
 - `scripts/display_setup.gd`: `DisplaySetup` autoload - window sizing on launch and the F11 fullscreen toggle.
 - `project.godot`: Project-level display/window config.
@@ -88,7 +94,7 @@ Combat currently has two behavior modes sharing core stats:
   - Attack methods (`try_attack`) enforce turn-state checks and range checks.
 - Damage model:
   - `receive_damage(...)` / `take_damage(...)` — enemies accept both, so the spacebar sweep (which calls `take_damage` like crates) and click-to-attack (`receive_damage`) both land.
-  - Player supports blocking (`set_blocking`) reducing incoming damage. While blocking a flattened blue ring shows at the player's feet and hits pop up as "BLOCKED".
+  - Incoming damage is scaled by the active soul's `defence_mult` first (see "The Bound Three"), then by the Block stance. The knight's Block (`set_blocking`) halves what remains; while blocking a flattened blue ring shows at the player's feet and hits pop up as "BLOCKED".
   - Enemy death grants XP via group call to player, then plays a short topple/fade before dropping loot and freeing. `is_alive()` is false from the first frame, so combat logic stops counting the enemy immediately.
 - Range: `main.gd` and `player.gd` both test the equipped weapon's range (`get_melee_range()`, via `main._get_player_melee_range()`). Don't reintroduce `attack_range` on the coordinator side - a dagger is shorter than the bare value and the click would silently do nothing.
 
@@ -109,11 +115,39 @@ Set `SHAKE_SCALE` / `HIT_STOP_SCALE` to `0.0` to switch those off; every duratio
 
 Because of that, `Player.try_attack` / `try_ranged_attack` are coroutines returning `bool`. `main.gd` awaits them and holds `player_turn_action_running` across the swing so End Turn can't fire mid-animation.
 
-**Enemy telegraph and the counter.** In turn mode an enemy's swing uses `turn_attack_wind_up_duration` (0.55 s) and `turn_attack_strike_duration` (0.18 s); realtime keeps the snappier `attack_wind_up_duration` / `attack_strike_duration`. The strike phase *is* the counter window. While attacking the player, the enemy drives a `CounterPrompt`: a ring shrinks onto a target ring during the wind-up, turns gold for the strike, then flashes green (perfect) or red. Pressing the counter key (`F`) in the wind-up pops "TOO EARLY" immediately and — by the existing rule — the hit then lands doubled; pressing in the strike window negates the hit, pops "COUNTER!" and runs the normal melee swing back at the attacker. `Player.resolve_enemy_attack` returns whether the hit was countered so the enemy can colour the prompt's result.
+**Enemy telegraph and the reaction.** In turn mode an enemy's swing uses `turn_attack_wind_up_duration` (0.55 s) and `turn_attack_strike_duration` (0.18 s); realtime keeps the snappier `attack_wind_up_duration` / `attack_strike_duration`. The strike phase *is* the reaction window. While attacking the player, the enemy drives a `CounterPrompt`: a ring shrinks onto a target ring during the wind-up, turns gold for the strike, then flashes green (perfect) or red. The target ring and the word under it take the active soul's colour and reaction name (`CounterPrompt.set_hint`, fed from `Player.get_reaction_hint`), so the prompt also says what `F` will do. What a perfect press does depends on who is in control (see "The Bound Three"): the knight blocks, the rogue parries and ripostes, the mage wards. Pressing in the wind-up pops "TOO EARLY" immediately; only the rogue is punished for it (a doubled hit), the others just take the normal hit. `Player.resolve_enemy_attack` returns whether the press landed on the beat so the enemy can colour the prompt's result.
 
 **Pacing and camera.** `ENEMY_TURN_DELAY_SECONDS`, `ENEMY_ACTION_GAP_SECONDS` and `ENEMY_TURN_HANDBACK_SECONDS` in `main.gd` set the beats before the first enemy acts, between enemies, and before control returns. During the enemy turn the camera focuses between the player and the acting enemy (`CAMERA_ENEMY_FOCUS_BLEND`). Enemies are hover-outlined in exploration too, since they're click-to-attack targets there.
 
-**Range rings and refusals.** On the player's turn a faint ring shows melee reach; picking Ranged swaps it for a dashed 12 m ring. These are the exact circles the attack checks use. When a click can't become an attack the game says so in a popup ("Out of range", "Out of reach", "No attack left") instead of doing nothing. End Turn pulses once movement and attack are both spent.
+**Range rings and refusals.** On the player's turn a faint ring shows melee reach; picking the rogue's Throw swaps it for a dashed 12 m ring, and picking a mage spell for a dashed ring in the spell's colour at its 10 m range (plus, for Arcane Burst, a blast-radius preview around the enemy under the cursor). These are the exact circles the attack checks use. When a click can't become an attack the game says so in a popup ("Out of range", "Out of reach", "No attack left", "Recharging (n)", "No shift left") instead of doing nothing. End Turn pulses once movement and attack are both spent.
+
+### The Bound Three (souls)
+
+The player is one body with three people in it - the knight, the rogue and the mage - and only one of them is in control at a time. Health, position, inventory and XP belong to the body; the soul in control changes how the body fights. The rules and every balance number live in `scripts/soul.gd`; `player.gd` applies them and `main.gd` shows them.
+
+| Soul | Damage taken | Melee damage | Own action | Reaction on `F` | Early press |
+|---|---|---|---|---|---|
+| Knight (`1`) | x0.70 | x1.00 | **Block** stance: spend the turn, halve every hit until your next turn | **Block**: hit negated | normal hit |
+| Rogue (`2`) | x1.00 | x1.35 | **Throw**: 16 damage at 12 m | **Parry**: hit negated, riposte with rogue melee | doubled hit |
+| Mage (`3`) | x1.30 | x0.60 | **Arcane Burst**: 14 damage to every enemy within 2.5 m of the target, 10 m, no cooldown. **Frost Snare**: 6 damage and the target loses its movement on its next turn, 10 m, 2-turn cooldown | **Ward**: hit halved, then x1.30 | normal hit |
+
+The multipliers sit on top of the equipped weapon, so gear still matters for every soul: an iron sword is 20 / 27 / 12 damage as knight / rogue / mage, and an enemy's 12-damage swing lands as 9 / 12 / 16.
+
+**Shifting.** `1` / `2` / `3` pick a soul, `Q` cycles, and the portraits in the top-left strip are buttons. While exploring, shifting is free and unlimited. In turn combat it is **one shift per turn** (`Player.SHIFTS_PER_TURN`), refreshed when the player's turn starts, and it costs neither movement nor the attack. That one rule is the whole tactic: whoever you end the turn as is who takes the hits. Attack as the rogue and you stay the rogue through the enemy turn with only the parry between you and the damage; attack as the rogue and shift to the knight, and next turn you can't shift back to hit hard without spending that turn's shift. Combos follow from the same rule - snare an enemy as the mage, shift to the knight, end the turn tanky; or open as the knight, shift to the rogue and throw before the enemy closes.
+
+**Resonance.** A perfect reaction (block, parry or ward pressed on the beat) makes the souls align: the next player turn grants one extra shift (`Player.PERFECT_REACTION_GRANTS_EXTRA_SHIFT`), once per enemy turn. It ties the timing skill to the shifting tactic - the reward for reading the enemy is more freedom next turn.
+
+**Where things live.**
+
+- `Soul` (`soul.gd`): `Kind`, `Reaction`, the per-soul fields (`defence_mult`, `melee_mult`, `ranged_*`, `can_block_stance`, `spells`) and the inner `Soul.Spell` (damage, range, radius, root turns, cooldown, colour). `Soul.all()` builds the three. Names and colours are constants; the rogue's and mage's names are placeholders.
+- `player.gd`: `active_soul`, `shift_to(kind)`, `shift_kind_from_event(event)` (shared with `main.gd` so both input paths read one set of bindings), `get_shifts_left()`, `try_cast_spell(id, target)`, `get_spell_cooldown(id)`, `get_reaction_hint()`. `take_damage` applies `defence_mult`, `get_melee_damage` applies `melee_mult`, `resolve_enemy_attack` branches on `Soul.Reaction`. Spell cooldowns tick in `start_turn` and clear when combat ends. Shift keys in exploration are handled here; in turn combat `main.gd` routes the same keys through `_request_shift`, because it owns the turn state (mid-action, moving).
+- `main.gd`: `_setup_soul_ui` / `_update_soul_ui` (the strip), the `SPELL` turn action with `selected_spell_id`, `_request_player_turn_spell`, and per-soul button visibility in `_update_turn_ui`. The turn-order card wears the active soul's portrait. `_run_enemy_turn` takes the move budget from the enemy so a rooted one stays put.
+- `enemy.gd`: `apply_root(turns)` / `is_rooted()`. A rooted enemy keeps its attack but `start_turn` gives it no movement, and `end_turn` melts the ice. Before a swing the enemy asks the player for `get_reaction_hint()` and hands it to the prompt.
+- `soul_art.gd`: bodies for the rogue and mage drawn on the knight's 68x68 canvas and footprint, so the bars, hand point and collision line up; 16x16 portraits for all three. The knight keeps its authored art. `Player._setup_body_visuals` holds one `SpriteFrames` per soul - swap authored frames in there.
+- `CombatFx.ring_burst` is the shared world-space burst (shift, block, ward, spell impact, root landing).
+- Meter scale: `main.gd` tells the player how many world units one turn meter is (`set_turn_meter_world_units`) at combat start, so spell radii are authored in meters like every other range.
+
+**Adding a spell.** Build a `Soul.Spell` in `Soul.mage()`; `try_cast_spell` already handles damage, area and root from its fields, and `_setup_turn_ui` builds a button per spell. A new *kind* of effect (a heal, a push) is a new field on `Spell` plus a branch in `try_cast_spell`.
 
 ## How animations are implemented
 
@@ -166,8 +200,10 @@ Movement and pathing are split between coordinator and actor scripts:
 - Includes:
   - phase/move/attack labels
   - level/XP display
-  - turn order icons
-  - action buttons (`Attack`, `Block`, `Wait`)
+  - turn order icons (the player's card shows the active soul)
+  - the soul label: who is in control, what `F` does, shifts left
+  - action buttons: `Melee`, `Wait`, `End Turn` always; `Block` for the knight, `Throw` for the rogue, one button per spell for the mage
+- The soul strip (`_setup_soul_ui`, top-left) is always visible, in exploration too: three portrait buttons with their hotkeys and a status line.
 
 ### Path preview UX
 
@@ -192,7 +228,7 @@ Movement and pathing are split between coordinator and actor scripts:
 - The main hand *is* the weapon slot, so the older weapon-only API (`equip_weapon`, `get_equipped_weapon`, `equipped_weapon_changed`) still works and stays in sync — that's what keeps `player.gd`'s melee stats and the held-weapon sprite working untouched.
 - Equipped items stay in `items`; being worn is a property of the item, not a different place it lives. That is what lets the inventory screen show a worn item in both the grid (green edge) and its slot.
 - Rings fit either hand: `Item.get_compatible_slots()` reports the pair, and `equip` prefers a free one before replacing.
-- The player auto-equips an Iron Sword (`ItemFactory.create_sword()`) in `_setup_inventory()`. Melee combat reads `get_melee_damage()` / `get_melee_range()` which prefer the equipped melee weapon's stats and fall back to `attack_damage` / `attack_range` when nothing is equipped. Ranged attacks still use `ranged_attack_damage` until a ranged weapon is introduced.
+- The player auto-equips an Iron Sword (`ItemFactory.create_sword()`) in `_setup_inventory()`. Melee combat reads `get_melee_damage()` / `get_melee_range()` which prefer the equipped melee weapon's stats and fall back to `attack_damage` / `attack_range` when nothing is equipped. The active soul's `melee_mult` is applied on top, so the inventory screen's DMG follows the soul. Ranged damage is the rogue's `Soul.ROGUE_RANGED_DAMAGE` until a ranged weapon is introduced.
 - The equipped weapon's `icon` is rendered beside the player via `EquippedWeaponSprite` (child of `EquippedWeaponHolder`), updated via the `equipped_weapon_changed` signal.
 
 ### Looting
@@ -302,6 +338,16 @@ Dispatch goes through `_resolve_attack_archetype()` (reads `animation_override` 
 
 Rule of thumb: **don't write a per-weapon animation to differentiate a skin — tune `grip_offset`, rotation, and maybe particle children instead. Write a new archetype only when the body posture / timing / contact arc is genuinely different.**
 
+### Story book (narration between chapters)
+
+`StoryBook` is an autoload (like `InventoryScreen`) so chapters can be opened from any level and the "already read" memory survives scene changes.
+
+- **Showing a chapter:** each level root script has `@export var story_chapter_id` and calls `StoryBook.show_chapter_once(StoryLibrary.chapter(story_chapter_id))` at the end of `_ready()`. `show_chapter_once` skips chapters already read this session, so walking back to the hub map does not replay the prologue. Set the id to empty in the inspector for a level with no narration.
+- **Authoring:** chapters live in `StoryLibrary` as `_build_<name>()` functions returning a `StoryChapter` (id, title, `pages: Array[String]`). Register the id in `StoryLibrary.chapter()`. Pages fill the left leaf, then the right, then the book turns to a new spread; keep pages to roughly 40-70 words.
+- **Presentation:** the book is built in code in `StoryBook._build_ui()` (leather cover, two parchment leaves, spine). Body text is a `RichTextLabel` wrapped in `[magic_ink]`; `MagicInkEffect` hides characters ahead of `reveal_head` and makes the ones just behind it glow and settle, and `StoryBook._process` advances the head at `REVEAL_CHARS_PER_SECOND`.
+- **Input and pausing:** while a chapter is open the scene tree is paused (`StoryBook` runs with `PROCESS_MODE_ALWAYS`), so gameplay input, enemy AI and the other screens stand still. Click/Space hurries the ink, then turns the page; Esc skips the chapter. `chapter_finished(id)` is emitted on close.
+- **Voice:** narration uses the operating system's speech voices through `DisplayServer.tts_speak`, enabled by `audio/general/text_to_speech=true` in `project.godot`. The first voice whose language starts with `VOICE_LANGUAGE_PREFIX` ("en") is used; with no matching voice the book is silent. Turn it off with `VOICE_ENABLED`.
+
 ### Progression system (current)
 
 - Player XP/level is in `player.gd`:
@@ -314,13 +360,16 @@ Rule of thumb: **don't write a per-weapon animation to differentiate a skin — 
 - `backgroundMap.gd` obstacle/nav update logic is mostly placeholder comments.
 - `AStarGrid2D` helpers exist but routing currently relies heavily on navmesh + `NavigationServer2D` path extraction.
 - Animation system is procedural and code-driven; no content pipeline yet for authored clips.
-- Combat is functional but still prototype-level (simple AI, no abilities/status effects, no initiative variety).
+- Combat is functional but still prototype-level (simple AI, the root is the only status effect, no initiative variety).
 - Player death has no state: at 0 HP the fight ends with a `DEFEATED` banner and the player can keep walking. A death/respawn flow is still to be built.
-- The counter's "too early = double damage" rule is the original design; the new prompt only makes it visible. Revisit if it feels punishing now that players can see the window.
+- The "too early = double damage" rule now applies to the rogue's parry only; the knight and the mage just take the normal hit. Revisit if the rogue feels punishing now that players can see the window.
+- The rogue and mage bodies are procedural placeholders (`SoulArt`); only the knight has authored art and an attack strip.
+- Soul balance (the constants in `soul.gd`) is a first pass, chosen so a 12-damage enemy swing reads clearly different per soul (9 / 12 / 16) and an iron sword kills a 60 HP enemy in 3 / 3 / 5 hits.
 
 ## Where to start when you jump back in
 
 - If you want to change rules/flow: start in `scripts/main.gd`.
 - If you want to change player feel: start in `scripts/player.gd`.
+- If you want to change what the three souls do: numbers in `scripts/soul.gd`, behaviour in `player.gd` (`resolve_enemy_attack`, `try_cast_spell`, `shift_to`).
 - If you want to tune enemy behavior: start in `scripts/enemy.gd`.
 - If you want to adjust map/nav setup: inspect `scenes/main.tscn` and `scripts/main.gd` navigation helpers together.

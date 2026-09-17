@@ -7,7 +7,6 @@ const CAMERA_FOLLOW_SPEED := 6.0
 const CAMERA_ZOOM := Vector2(3.35, 3.35)
 const ASSET_DIR := "res://assets/kenney_isometric-miniature-dungeon 2/Isometric/"
 const TURN_MOVE_METERS := 6.0
-const RANGED_ATTACK_RANGE_METERS := 12.0
 const COMBAT_TRIGGER_DISTANCE_CELLS := 6
 const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
 # Enemy turn pacing: a short beat before the first enemy acts, a gap between
@@ -31,7 +30,8 @@ enum CombatState {
 enum PlayerTurnAction {
 	MOVE,
 	ATTACK,
-	RANGED
+	RANGED,
+	SPELL
 }
 
 @onready var custom_layout: TileMapLayer = get_node_or_null("MyCustomLayout")
@@ -48,6 +48,9 @@ enum PlayerTurnAction {
 # the level has its own loot worth testing against.
 @export var spawn_test_loot: bool = true
 @export var runtime_canvas_modulate_color: Color = Color(0.06, 0.06, 0.08, 1.0)
+# Chapter read in the story book when this level opens (once per session).
+# Authored in StoryLibrary; leave empty for no narration.
+@export var story_chapter_id: StringName = StoryLibrary.PROLOGUE
 
 var grass_source_id: int = -1
 var grass_alt_source_id: int = -1
@@ -85,12 +88,22 @@ var turn_ui_ranged_button: Button
 var turn_ui_block_button: Button
 var turn_ui_wait_button: Button
 var turn_ui_end_turn_button: Button
+# Mage spell buttons keyed by spell id. Built once; only shown for the mage.
+var turn_ui_spell_buttons: Dictionary = {}
+var turn_ui_soul_label: Label
 var selected_player_turn_action: PlayerTurnAction = PlayerTurnAction.MOVE
+var selected_spell_id: StringName = &""
+# The Bound Three: the always-visible soul portraits and the shift status line.
+var soul_ui_panel: PanelContainer
+var soul_ui_buttons: Array[Button] = []
+var soul_ui_status_label: Label
+var _soul_ui_styled_kind := -1
 var path_preview_glow: Line2D
 var path_preview_line: Line2D
 var path_preview_label: Label
 var melee_range_ring: RangeRing
 var ranged_range_ring: RangeRing
+var spell_area_ring: RangeRing
 var _turn_meter_world_units_cache: float = -1.0
 var music_exploration: AudioStreamPlayer
 var music_combat: AudioStreamPlayer
@@ -103,6 +116,7 @@ const MUSIC_VOLUME_DB := -6.0
 func _ready() -> void:
 	canvas_modulate.color = runtime_canvas_modulate_color
 	_setup_turn_ui()
+	_setup_soul_ui()
 	_setup_music()
 
 	active_nav_layer = custom_background
@@ -120,6 +134,9 @@ func _ready() -> void:
 
 	_setup_path_preview()
 	_setup_range_rings()
+
+	# Last, so the world is fully placed under the book before it opens.
+	StoryBook.show_chapter_once(StoryLibrary.chapter(story_chapter_id))
 
 
 func _process(delta: float) -> void:
@@ -296,6 +313,8 @@ func _handle_turn_input(event: InputEvent) -> void:
 		if clicked_enemy != null:
 			if selected_player_turn_action == PlayerTurnAction.RANGED:
 				_request_player_turn_ranged_attack(clicked_enemy as CharacterBody2D)
+			elif selected_player_turn_action == PlayerTurnAction.SPELL:
+				_request_player_turn_spell(clicked_enemy as CharacterBody2D)
 			else:
 				_request_player_turn_engage_enemy(clicked_enemy as CharacterBody2D)
 		else:
@@ -304,6 +323,13 @@ func _handle_turn_input(event: InputEvent) -> void:
 	elif event.is_action_pressed("ui_accept"):
 		_request_end_player_turn()
 		get_viewport().set_input_as_handled()
+	elif player.has_method("shift_kind_from_event"):
+		# 1 / 2 / 3 / Q: hand the body to another soul. Same bindings as the
+		# free shifting in exploration, gated by the turn rules above.
+		var wanted_kind := int(player.call("shift_kind_from_event", event))
+		if wanted_kind >= 0:
+			_request_shift(wanted_kind)
+			get_viewport().set_input_as_handled()
 
 
 func _update_combat_state() -> void:
@@ -347,6 +373,9 @@ func _start_turn_based_combat() -> void:
 
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", true)
+	# Spell radii are authored in meters; the player needs this map's scale.
+	if player.has_method("set_turn_meter_world_units"):
+		player.call("set_turn_meter_world_units", _get_turn_meter_world_units())
 	for enemy_actor in _get_all_alive_enemies():
 		if enemy_actor.has_method("set_turn_based_combat"):
 			enemy_actor.call("set_turn_based_combat", true)
@@ -455,8 +484,31 @@ func _get_player_melee_range() -> float:
 	return float(player.get("attack_range"))
 
 
+# Ranged reach is the active soul's (the rogue's throw). A soul without a
+# ranged attack has zero reach; its button is hidden anyway.
 func _get_ranged_attack_range_world() -> float:
-	return RANGED_ATTACK_RANGE_METERS * _get_turn_meter_world_units()
+	if player.has_method("get_ranged_range_meters"):
+		return float(player.call("get_ranged_range_meters")) * _get_turn_meter_world_units()
+	return 0.0
+
+
+func _get_active_soul() -> Soul:
+	if player != null and player.has_method("get_active_soul"):
+		return player.call("get_active_soul") as Soul
+	return null
+
+
+func _get_selected_spell() -> Soul.Spell:
+	var soul := _get_active_soul()
+	if soul == null or selected_spell_id == &"":
+		return null
+	return soul.get_spell(selected_spell_id)
+
+
+func _get_spell_range_world(spell: Soul.Spell) -> float:
+	if spell == null:
+		return 0.0
+	return spell.range_meters * _get_turn_meter_world_units()
 
 
 func _request_player_turn_ranged_attack(target_enemy: CharacterBody2D = null) -> void:
@@ -480,6 +532,43 @@ func _request_player_turn_ranged_attack(target_enemy: CharacterBody2D = null) ->
 
 	player_turn_action_running = true
 	await player.try_ranged_attack(target_enemy)
+	player_turn_action_running = false
+	_set_player_turn_action(PlayerTurnAction.MOVE)
+	_update_turn_ui()
+
+
+# The mage's spells. Same shape as the ranged attack: refuse with a popup when
+# the spell is recharging or the target is out of range, otherwise hold the
+# turn while the bolt flies and the spell resolves.
+func _request_player_turn_spell(target_enemy: CharacterBody2D = null) -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if player_turn_action_running:
+		return
+	if not player.has_method("try_cast_spell"):
+		return
+	var spell := _get_selected_spell()
+	if spell == null:
+		return
+	if not player.call("can_turn_attack"):
+		CombatFx.popup_text(player.global_position + Vector2(0, -50), "No attack left", CombatFx.COLOR_WARNING, 16)
+		return
+	var cooldown := 0
+	if player.has_method("get_spell_cooldown"):
+		cooldown = int(player.call("get_spell_cooldown", spell.id))
+	if cooldown > 0:
+		CombatFx.popup_text(player.global_position + Vector2(0, -50), "Recharging (%d)" % cooldown, CombatFx.COLOR_WARNING, 16)
+		return
+	if target_enemy == null:
+		target_enemy = _get_closest_enemy_to_player()
+	if target_enemy == null:
+		return
+	if player.global_position.distance_to(target_enemy.global_position) > _get_spell_range_world(spell):
+		CombatFx.popup_text(target_enemy.global_position + Vector2(0, -50), "Out of range", CombatFx.COLOR_WARNING, 16)
+		return
+
+	player_turn_action_running = true
+	await player.try_cast_spell(spell.id, target_enemy)
 	player_turn_action_running = false
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	_update_turn_ui()
@@ -598,7 +687,12 @@ func _run_enemy_turn() -> void:
 				continue
 		first_actor = false
 
-		var used_meters := _request_enemy_turn_move_by_distance(enemy_actor, TURN_MOVE_METERS)
+		# The budget comes from the enemy itself, so one rooted by Frost Snare
+		# (zero movement this turn) stays where it is and just swings if it can.
+		var move_budget := TURN_MOVE_METERS
+		if enemy_actor.has_method("get_turn_remaining_move_meters"):
+			move_budget = float(enemy_actor.call("get_turn_remaining_move_meters"))
+		var used_meters := _request_enemy_turn_move_by_distance(enemy_actor, move_budget)
 		if used_meters > 0.0 and enemy_actor.has_method("consume_turn_movement_meters"):
 			enemy_actor.call("consume_turn_movement_meters", used_meters)
 
@@ -1253,9 +1347,16 @@ func _setup_range_rings() -> void:
 	ranged_range_ring.visible = false
 	add_child(ranged_range_ring)
 
+	# Blast preview for area spells, drawn around the enemy under the cursor.
+	spell_area_ring = RangeRing.new()
+	spell_area_ring.name = "SpellAreaRing"
+	spell_area_ring.z_index = 8
+	spell_area_ring.visible = false
+	add_child(spell_area_ring)
+
 
 func _update_range_rings() -> void:
-	if melee_range_ring == null or ranged_range_ring == null:
+	if melee_range_ring == null or ranged_range_ring == null or spell_area_ring == null:
 		return
 	var show := combat_state == CombatState.PLAYER_TURN and not InventoryScreen.is_open()
 	if show and player.has_method("can_turn_attack"):
@@ -1263,13 +1364,26 @@ func _update_range_rings() -> void:
 	if not show:
 		melee_range_ring.hide_ring()
 		ranged_range_ring.hide_ring()
+		spell_area_ring.hide_ring()
 		return
 
 	melee_range_ring.global_position = player.global_position
 	ranged_range_ring.global_position = player.global_position
+	spell_area_ring.hide_ring()
 	if selected_player_turn_action == PlayerTurnAction.RANGED:
 		melee_range_ring.hide_ring()
 		ranged_range_ring.show_ring(_get_ranged_attack_range_world(), Color(0.55, 0.85, 1.0, 0.55), true)
+	elif selected_player_turn_action == PlayerTurnAction.SPELL:
+		melee_range_ring.hide_ring()
+		var spell := _get_selected_spell()
+		if spell == null:
+			ranged_range_ring.hide_ring()
+		else:
+			ranged_range_ring.show_ring(_get_spell_range_world(spell), Color(spell.color.r, spell.color.g, spell.color.b, 0.6), true)
+			if spell.is_area() and hovered_enemy != null and is_instance_valid(hovered_enemy):
+				spell_area_ring.global_position = hovered_enemy.global_position
+				spell_area_ring.show_ring(spell.radius_meters * _get_turn_meter_world_units(),
+					Color(spell.color.r, spell.color.g, spell.color.b, 0.45))
 	else:
 		ranged_range_ring.hide_ring()
 		var melee_color := Color(1.0, 0.9, 0.7, 0.28)
@@ -1513,7 +1627,9 @@ func _setup_turn_ui() -> void:
 	turn_ui_panel.name = "TurnUI"
 	turn_ui_panel.visible = false
 	turn_ui_panel.offset_left = 32.0
-	turn_ui_panel.offset_top = -150.0
+	# Seven rows of text plus the rule; the PanelContainer grows downward from
+	# this edge, so it has to start high enough to keep the last row on screen.
+	turn_ui_panel.offset_top = -216.0
 	turn_ui_panel.offset_right = 404.0
 	turn_ui_panel.offset_bottom = -30.0
 	turn_ui_panel.anchor_left = 0.0
@@ -1566,6 +1682,11 @@ func _setup_turn_ui() -> void:
 	turn_ui_move_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
 	vbox.add_child(turn_ui_move_label)
 
+	turn_ui_soul_label = Label.new()
+	turn_ui_soul_label.text = "Soul: -"
+	turn_ui_soul_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
+	vbox.add_child(turn_ui_soul_label)
+
 	turn_ui_attack_label = Label.new()
 	turn_ui_attack_label.text = "Attack: -"
 	turn_ui_attack_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
@@ -1609,8 +1730,11 @@ func _setup_turn_ui() -> void:
 	turn_ui_attack_button.pressed.connect(_on_turn_attack_button_pressed)
 	actions_hbox.add_child(turn_ui_attack_button)
 
+	# Soul-specific actions share the row: the rogue's throw, the knight's
+	# Block stance, the mage's spells. `_update_turn_ui` shows the ones the
+	# active soul can use and hides the rest.
 	turn_ui_ranged_button = Button.new()
-	turn_ui_ranged_button.text = "Ranged 12m"
+	turn_ui_ranged_button.text = "Throw"
 	turn_ui_ranged_button.toggle_mode = true
 	turn_ui_ranged_button.custom_minimum_size = Vector2(128, 36)
 	turn_ui_ranged_button.pressed.connect(_on_turn_ranged_button_pressed)
@@ -1621,6 +1745,17 @@ func _setup_turn_ui() -> void:
 	turn_ui_block_button.custom_minimum_size = Vector2(128, 36)
 	turn_ui_block_button.pressed.connect(_on_turn_block_button_pressed)
 	actions_hbox.add_child(turn_ui_block_button)
+
+	turn_ui_spell_buttons.clear()
+	for spell in Soul.mage().spells:
+		var spell_button := Button.new()
+		spell_button.text = spell.display_name
+		spell_button.toggle_mode = true
+		spell_button.custom_minimum_size = Vector2(150, 36)
+		spell_button.tooltip_text = spell.description
+		spell_button.pressed.connect(_on_turn_spell_button_pressed.bind(spell.id))
+		actions_hbox.add_child(spell_button)
+		turn_ui_spell_buttons[spell.id] = spell_button
 
 	turn_ui_wait_button = Button.new()
 	turn_ui_wait_button.text = "Wait"
@@ -1645,6 +1780,9 @@ func _update_turn_ui() -> void:
 		turn_ui_layer.visible = hud_visible
 	if player != null and player.has_method("set_overhead_ui_visible"):
 		player.call("set_overhead_ui_visible", hud_visible)
+
+	# The soul strip is part of the character, so it shows in exploration too.
+	_update_soul_ui()
 
 	if turn_ui_panel == null:
 		return
@@ -1672,20 +1810,53 @@ func _update_turn_ui() -> void:
 	var can_player_use_actions := combat_state == CombatState.PLAYER_TURN and not player_turn_action_running
 	if can_player_use_actions and player != null and player.has_method("is_moving"):
 		can_player_use_actions = not bool(player.call("is_moving"))
-	if not can_attack and (selected_player_turn_action == PlayerTurnAction.ATTACK or selected_player_turn_action == PlayerTurnAction.RANGED):
+	# An aim that can no longer be carried out - attack spent, or a shift to a
+	# soul without that action - falls back to plain movement.
+	var soul := _get_active_soul()
+	if not can_attack and selected_player_turn_action != PlayerTurnAction.MOVE:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
+	if soul != null:
+		if selected_player_turn_action == PlayerTurnAction.RANGED and not soul.has_ranged():
+			_set_player_turn_action(PlayerTurnAction.MOVE)
+		if selected_player_turn_action == PlayerTurnAction.SPELL and not soul.has_spells():
+			_set_player_turn_action(PlayerTurnAction.MOVE)
 
 	if turn_ui_attack_button != null:
 		turn_ui_attack_button.disabled = not can_player_use_actions or not can_attack
 		turn_ui_attack_button.button_pressed = selected_player_turn_action == PlayerTurnAction.ATTACK
 		turn_ui_attack_button.text = "Melee (Select Target)" if selected_player_turn_action == PlayerTurnAction.ATTACK else "Melee"
 	if turn_ui_ranged_button != null:
+		var has_ranged := soul != null and soul.has_ranged()
+		turn_ui_ranged_button.visible = has_ranged
 		turn_ui_ranged_button.disabled = not can_player_use_actions or not can_attack
 		turn_ui_ranged_button.button_pressed = selected_player_turn_action == PlayerTurnAction.RANGED
-		turn_ui_ranged_button.text = "Ranged 12m (Select)" if selected_player_turn_action == PlayerTurnAction.RANGED else "Ranged 12m"
+		if has_ranged:
+			var ranged_label := "%s %dm" % [soul.ranged_name, int(round(soul.ranged_range_meters))]
+			if selected_player_turn_action == PlayerTurnAction.RANGED:
+				ranged_label += " (Select)"
+			turn_ui_ranged_button.text = ranged_label
 	if turn_ui_block_button != null:
+		turn_ui_block_button.visible = soul == null or soul.can_block_stance
 		turn_ui_block_button.disabled = not can_player_use_actions
 		turn_ui_block_button.text = "Block (Active)" if is_blocking else "Block"
+	for spell_id in turn_ui_spell_buttons:
+		var spell_button := turn_ui_spell_buttons[spell_id] as Button
+		var spell: Soul.Spell = soul.get_spell(spell_id) if soul != null else null
+		spell_button.visible = spell != null
+		if spell == null:
+			continue
+		var cooldown := 0
+		if player != null and player.has_method("get_spell_cooldown"):
+			cooldown = int(player.call("get_spell_cooldown", spell_id))
+		spell_button.disabled = not can_player_use_actions or not can_attack or cooldown > 0
+		var aiming: bool = selected_player_turn_action == PlayerTurnAction.SPELL and selected_spell_id == spell_id
+		spell_button.button_pressed = aiming
+		var spell_label := "%s %dm" % [spell.display_name, int(round(spell.range_meters))]
+		if cooldown > 0:
+			spell_label = "%s (%d)" % [spell.display_name, cooldown]
+		elif aiming:
+			spell_label += " (Select)"
+		spell_button.text = spell_label
 	if turn_ui_wait_button != null:
 		turn_ui_wait_button.disabled = not can_player_use_actions
 	if turn_ui_end_turn_button != null:
@@ -1763,7 +1934,10 @@ func _update_turn_ui() -> void:
 			PlayerTurnAction.ATTACK:
 				attack_mode_text = "Melee aim"
 			PlayerTurnAction.RANGED:
-				attack_mode_text = "Ranged 12m aim"
+				attack_mode_text = "%s aim" % (soul.ranged_name if soul != null else "Ranged")
+			PlayerTurnAction.SPELL:
+				var aimed_spell := _get_selected_spell()
+				attack_mode_text = "%s aim" % (aimed_spell.display_name if aimed_spell != null else "Spell")
 			_:
 				attack_mode_text = "Move"
 		attack_text = "Actions: %s | Mode: %s" % [("Ready" if can_attack_now else "Used"), attack_mode_text]
@@ -1782,6 +1956,19 @@ func _update_turn_ui() -> void:
 	turn_ui_move_label.text = move_text
 	turn_ui_attack_label.text = attack_text
 
+	if turn_ui_soul_label != null:
+		if soul == null:
+			turn_ui_soul_label.text = "Soul: -"
+		else:
+			var shifts_left := 0
+			if player != null and player.has_method("get_shifts_left"):
+				shifts_left = int(player.call("get_shifts_left"))
+			if combat_state == CombatState.PLAYER_TURN:
+				turn_ui_soul_label.text = "Soul: %s (F = %s) | Shifts left: %d" % [soul.title, soul.reaction_name(), shifts_left]
+			else:
+				turn_ui_soul_label.text = "Soul: %s (F = %s)" % [soul.title, soul.reaction_name()]
+			turn_ui_soul_label.add_theme_color_override("font_color", soul.color)
+
 	if turn_ui_level_xp_label != null and player != null:
 		if player.has_method("get_player_level"):
 			var plv := int(player.call("get_player_level"))
@@ -1796,6 +1983,8 @@ func _update_turn_ui() -> void:
 
 func _set_player_turn_action(action: PlayerTurnAction) -> void:
 	selected_player_turn_action = action
+	if action != PlayerTurnAction.SPELL:
+		selected_spell_id = &""
 
 
 func _on_turn_attack_button_pressed() -> void:
@@ -1830,10 +2019,30 @@ func _on_turn_ranged_button_pressed() -> void:
 	_update_turn_ui()
 
 
+func _on_turn_spell_button_pressed(spell_id: StringName) -> void:
+	if combat_state != CombatState.PLAYER_TURN:
+		return
+	if player_turn_action_running:
+		return
+	if selected_player_turn_action == PlayerTurnAction.SPELL and selected_spell_id == spell_id:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+		_update_turn_ui()
+		return
+	if player != null and player.has_method("can_turn_attack"):
+		if not bool(player.call("can_turn_attack")):
+			return
+	selected_spell_id = spell_id
+	_set_player_turn_action(PlayerTurnAction.SPELL)
+	_update_turn_ui()
+
+
 func _on_turn_block_button_pressed() -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
 	if player_turn_action_running:
+		return
+	var soul := _get_active_soul()
+	if soul != null and not soul.can_block_stance:
 		return
 	if player != null and player.has_method("set_blocking"):
 		player.call("set_blocking", true)
@@ -1850,6 +2059,151 @@ func _on_turn_wait_button_pressed() -> void:
 
 func _on_turn_end_turn_button_pressed() -> void:
 	_request_end_player_turn()
+
+
+# --- The Bound Three ---------------------------------------------------------
+# The soul strip (top left) is always on screen: three portraits with their
+# hotkeys and a status line. Shifting is free in exploration; in combat the
+# player enforces the one-shift-per-turn rule and this side only gates on the
+# turn state it owns (whose turn it is, whether an action is mid-flight).
+
+func _request_shift(kind: int) -> void:
+	if player == null or not player.has_method("shift_to"):
+		return
+	if combat_state == CombatState.ENEMY_TURN:
+		CombatFx.popup_text(player.global_position + Vector2(0, -50), "Locked in", CombatFx.COLOR_WARNING, 16)
+		return
+	if combat_state == CombatState.PLAYER_TURN:
+		if player_turn_action_running:
+			return
+		if player.has_method("is_moving") and bool(player.call("is_moving")):
+			return
+	var shifted := bool(player.call("shift_to", kind))
+	if shifted:
+		# An aim the new soul can't perform falls back to plain movement.
+		var soul := _get_active_soul()
+		if soul != null:
+			if selected_player_turn_action == PlayerTurnAction.RANGED and not soul.has_ranged():
+				_set_player_turn_action(PlayerTurnAction.MOVE)
+			if selected_player_turn_action == PlayerTurnAction.SPELL and not soul.has_spells():
+				_set_player_turn_action(PlayerTurnAction.MOVE)
+	_update_turn_ui()
+
+
+func _on_soul_button_pressed(kind: int) -> void:
+	_request_shift(kind)
+
+
+func _on_player_soul_changed(soul: Soul) -> void:
+	# The turn-order card is the body's card; it wears whoever is in control.
+	if turn_ui_player_icon != null:
+		turn_ui_player_icon.texture = SoulArt.create_portrait(soul.kind)
+		turn_ui_player_icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	if turn_ui_player_label != null:
+		turn_ui_player_label.text = soul.title
+	_update_soul_ui()
+
+
+func _setup_soul_ui() -> void:
+	soul_ui_panel = PanelContainer.new()
+	soul_ui_panel.name = "SoulUI"
+	soul_ui_panel.anchor_left = 0.0
+	soul_ui_panel.anchor_top = 0.0
+	soul_ui_panel.anchor_right = 0.0
+	soul_ui_panel.anchor_bottom = 0.0
+	soul_ui_panel.offset_left = 18.0
+	soul_ui_panel.offset_top = 18.0
+	soul_ui_panel.offset_right = 18.0 + 330.0
+	soul_ui_panel.offset_bottom = 18.0 + 124.0
+	soul_ui_panel.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.PANEL_BG, UiTheme.PANEL_BORDER, 2, 10, 8))
+	turn_ui_layer.add_child(soul_ui_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 6)
+	soul_ui_panel.add_child(vbox)
+
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 8)
+	vbox.add_child(row)
+
+	soul_ui_buttons.clear()
+	var souls: Array = []
+	if player != null and player.has_method("get_souls"):
+		souls = player.call("get_souls")
+	for soul: Soul in souls:
+		var button := Button.new()
+		button.name = "Soul_%s" % soul.id
+		button.icon = SoulArt.create_portrait(soul.kind)
+		button.text = "%s  %s" % [soul.hotkey_label, soul.title]
+		button.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		button.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
+		button.expand_icon = true
+		button.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		button.custom_minimum_size = Vector2(96, 74)
+		button.tooltip_text = "%s, the %s\n%s" % [soul.display_name, soul.title, soul.description]
+		button.set_meta("soul_kind", int(soul.kind))
+		UiTheme.style_button(button, 13)
+		button.pressed.connect(_on_soul_button_pressed.bind(int(soul.kind)))
+		row.add_child(button)
+		soul_ui_buttons.append(button)
+
+	soul_ui_status_label = UiTheme.label("", UiTheme.MUTED, 12)
+	soul_ui_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(soul_ui_status_label)
+
+	if player != null and player.has_signal("soul_changed"):
+		player.connect("soul_changed", _on_player_soul_changed)
+	var active := _get_active_soul()
+	if active != null:
+		_on_player_soul_changed(active)
+
+
+func _update_soul_ui() -> void:
+	if soul_ui_panel == null or soul_ui_status_label == null:
+		return
+	var soul := _get_active_soul()
+	if soul == null:
+		return
+
+	# Restyle only when the soul changes: a fresh StyleBox per frame is waste.
+	if _soul_ui_styled_kind != int(soul.kind):
+		_soul_ui_styled_kind = int(soul.kind)
+		for button in soul_ui_buttons:
+			var is_active := int(button.get_meta("soul_kind", -1)) == int(soul.kind)
+			if is_active:
+				var lit := UiTheme.box(UiTheme.SLOT_SELECTED, soul.color, 2, 12, 6)
+				button.add_theme_stylebox_override("normal", lit)
+				button.add_theme_stylebox_override("hover", lit)
+				button.add_theme_stylebox_override("pressed", lit)
+				button.add_theme_color_override("font_color", soul.color)
+				button.add_theme_color_override("font_hover_color", soul.color)
+			else:
+				UiTheme.style_button(button, 13)
+
+	var can_press := combat_state != CombatState.ENEMY_TURN and not player_turn_action_running
+	for button in soul_ui_buttons:
+		button.disabled = not can_press
+
+	var status := ""
+	var status_color := UiTheme.MUTED
+	match combat_state:
+		CombatState.EXPLORATION:
+			status = "%s in control  |  1 / 2 / 3 or Q to shift" % soul.display_name
+		CombatState.PLAYER_TURN:
+			var shifts_left := 0
+			if player.has_method("get_shifts_left"):
+				shifts_left = int(player.call("get_shifts_left"))
+			if shifts_left > 0:
+				status = "%s  |  Shift ready (%d)" % [soul.display_name, shifts_left]
+				status_color = CombatFx.COLOR_PLAYER_TURN
+			else:
+				status = "%s  |  Shift used this turn" % soul.display_name
+		CombatState.ENEMY_TURN:
+			status = "%s holds the body  |  F to %s" % [soul.display_name, soul.reaction_name().to_lower()]
+			status_color = CombatFx.COLOR_ENEMY_TURN
+	soul_ui_status_label.text = status
+	soul_ui_status_label.add_theme_color_override("font_color", status_color)
 
 
 func _create_placeholder_icon(base_color: Color) -> Texture2D:

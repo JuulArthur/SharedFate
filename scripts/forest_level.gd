@@ -10,6 +10,9 @@ const FOREST_HEIGHT := 1600.0
 const NAVMESH_SOURCE_GROUP: StringName = &"navmesh_source"
 
 @export var camera_follow_speed: float = 6.0
+# Chapter read in the story book when this level opens (once per session).
+# Authored in StoryLibrary; leave empty for no narration.
+@export var story_chapter_id: StringName = StoryLibrary.FOREST
 
 @onready var player: CharacterBody2D = $Player
 @onready var camera: Camera2D = $Camera2D
@@ -30,6 +33,7 @@ func _ready() -> void:
 	if camera != null and player != null:
 		camera.global_position = player.global_position
 		camera.make_current()
+	StoryBook.show_chapter_once(StoryLibrary.chapter(story_chapter_id))
 
 
 func _process(delta: float) -> void:

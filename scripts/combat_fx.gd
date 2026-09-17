@@ -301,3 +301,47 @@ static func create_ring_texture(size: int, inner_radius: float, outer_radius: fl
 			if a > 0.0:
 				image.set_pixel(x, y, Color(color.r, color.g, color.b, color.a * a))
 	return ImageTexture.create_from_image(image)
+
+
+# --- World-space bursts -------------------------------------------------------
+
+# One shared white ring; bursts tint it through `modulate`, so a new burst
+# colour costs nothing.
+const BURST_RING_SIZE := 64
+const BURST_RING_INNER := 25.0
+const BURST_RING_OUTER := 30.0
+var _burst_ring_texture: Texture2D
+
+
+# A ring that expands and fades at a world position: soul shifts, spell
+# impacts, a root landing. It lives under `parent` (the actor or the level),
+# not on the FX CanvasLayer, so it sits in the world and flattens like the
+# other floor rings. `flatten` is the y scale relative to x; 1.0 is a true
+# circle for effects drawn on the body rather than the floor.
+func ring_burst(parent: Node, world_position: Vector2, color: Color,
+		start_radius: float = 8.0, end_radius: float = 30.0,
+		duration: float = 0.35, flatten: float = 0.6) -> void:
+	if parent == null or not is_instance_valid(parent):
+		return
+	if _burst_ring_texture == null:
+		_burst_ring_texture = create_ring_texture(BURST_RING_SIZE, BURST_RING_INNER, BURST_RING_OUTER, Color.WHITE)
+
+	var ring := Sprite2D.new()
+	ring.texture = _burst_ring_texture
+	ring.modulate = color
+	ring.z_index = 20
+	parent.add_child(ring)
+	ring.global_position = world_position
+
+	var texture_radius := (BURST_RING_INNER + BURST_RING_OUTER) * 0.5
+	var start_scale := start_radius / texture_radius
+	var end_scale := end_radius / texture_radius
+	ring.scale = Vector2(start_scale, start_scale * flatten)
+
+	var tween := ring.create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(ring, "scale", Vector2(end_scale, end_scale * flatten), duration) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(ring, "modulate:a", 0.0, duration) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.chain().tween_callback(ring.queue_free)

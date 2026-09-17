@@ -10,14 +10,13 @@ extends CharacterBody2D
 @export var target_refresh_interval := 0.2
 @export var attack_action_name := "attack"
 @export var counter_action_name := "counter"
-@export var ranged_attack_damage := 16
 # Seconds between the swing starting and the blade connecting. Lines damage up
 # with the contact frame of the knight attack strip instead of frame zero, so
 # the enemy reacts when the sword arrives rather than when the arm starts.
 @export var melee_hit_delay := 0.10
 # World units per second for the ranged bolt; the shot lands when it arrives.
 @export var ranged_bolt_speed := 900.0
-# Shown on the inventory screen's character strip.
+# Shown on the inventory screen's character strip. Follows the active soul.
 @export var character_name := "Sir Arthur"
 # Carried coin. Nothing grants gold yet — the field exists so the inventory
 # screen reads a real value rather than a hardcoded one.
@@ -25,6 +24,23 @@ extends CharacterBody2D
 
 const XP_BASE_TO_LEVEL_2 := 100.0
 const XP_PER_LEVEL_MULT := 1.5
+
+# --- The Bound Three ---------------------------------------------------------
+# Three souls share this one body (see soul.gd). Shifting between them is free
+# while exploring; in turn combat it is one shift per turn, refreshed when the
+# player's turn starts. A perfect reaction - block, parry or ward pressed on the
+# beat - builds Resonance: one extra shift on the next turn.
+signal soul_changed(soul: Soul)
+
+const SHIFT_ACTIONS: Array[String] = ["shift_soul_1", "shift_soul_2", "shift_soul_3"]
+const SHIFT_CYCLE_ACTION := "shift_soul_cycle"
+const SHIFT_KEYS: Array[int] = [KEY_1, KEY_2, KEY_3]
+const SHIFT_CYCLE_KEY := KEY_Q
+const SHIFTS_PER_TURN := 1
+const PERFECT_REACTION_GRANTS_EXTRA_SHIFT := true
+const SHIFT_LIGHT_BLEND_SECONDS := 0.35
+# Used for spell radii until the coordinator reports the map's meter scale.
+const DEFAULT_METER_WORLD_UNITS := 64.0
 
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 @onready var navigation_agent: NavigationAgent2D = $NavigationAgent2D
@@ -55,6 +71,15 @@ var weapon_flip_root: Node2D
 var equipped_weapon_holder: Node2D
 var equipped_weapon_sprite: Sprite2D
 var attack_animation_player: AnimationPlayer
+var souls: Array[Soul] = []
+var active_soul: Soul
+var shifts_left_this_turn := 0
+var _resonance_pending := false
+# Spell id -> player turns until that spell is ready again.
+var spell_cooldowns: Dictionary = {}
+# Soul.Kind -> SpriteFrames for that soul's body.
+var _soul_sprite_frames: Dictionary = {}
+var _meter_world_units := DEFAULT_METER_WORLD_UNITS
 
 # Constant hand point on the player sprite. The holder sits here; weapon-
 # specific tuning (grip_offset / grip_rotation_deg on Item) is applied to the
@@ -95,6 +120,8 @@ func _ready() -> void:
 
 	_ensure_attack_input()
 	_ensure_counter_input()
+	_ensure_shift_inputs()
+	_setup_souls()
 	_setup_health_bar()
 	_setup_level_and_xp_ui()
 	current_health = max_health
@@ -102,7 +129,7 @@ func _ready() -> void:
 	_update_xp_bar()
 	_update_level_label()
 
-	_setup_knight_visual()
+	_setup_body_visuals()
 	sprite_idle_position = sprite.position
 	vision_light.texture = _create_vision_light_texture()
 	_setup_attack_vfx()
@@ -116,6 +143,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	if in_turn_based_combat:
+		return
+	# Shifting is free while exploring. In turn combat the same keys go through
+	# main.gd, which knows whether an action is mid-flight.
+	var wanted_kind := shift_kind_from_event(event)
+	if wanted_kind >= 0:
+		shift_to(wanted_kind)
+		get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed(attack_action_name):
 		_try_attack()
@@ -212,6 +246,9 @@ func clear_attack_target() -> void:
 
 func take_damage(amount: int) -> void:
 	var final_amount := maxi(amount, 0)
+	# The soul in control decides how much of a hit the shared body feels.
+	if final_amount > 0 and active_soul != null:
+		final_amount = maxi(1, int(ceil(float(final_amount) * active_soul.defence_mult)))
 	var blocked := blocking_active and final_amount > 0
 	if blocked:
 		final_amount = maxi(1, int(ceil(float(final_amount) * 0.5)))
@@ -260,7 +297,9 @@ func cancel_enemy_counter() -> void:
 	_counter_perfect_pressed = false
 
 
-# Returns true when the attack was countered (no damage taken, attacker hit).
+# Resolves an enemy hit against the active soul's reaction. Returns true when
+# the press landed on the beat (the prompt shows green), whether that negated
+# the hit outright or, for the mage, only softened it.
 func resolve_enemy_attack(attacker: Node2D, base_damage: int) -> bool:
 	if _counter_phase == COUNTER_PHASE_NONE:
 		take_damage(base_damage)
@@ -268,18 +307,64 @@ func resolve_enemy_attack(attacker: Node2D, base_damage: int) -> bool:
 	var early := _counter_early_pressed
 	var perfect := _counter_perfect_pressed
 	cancel_enemy_counter()
+	var reaction := active_soul.reaction if active_soul != null else Soul.Reaction.BLOCK
+
 	if early:
-		# Pressing in the wind-up leaves you open: the "too early" popup fired
-		# on the press itself, so only the doubled hit lands here.
-		take_damage(base_damage * 2)
+		# Pressing in the wind-up. The rogue overcommits and eats a doubled hit
+		# (the "TOO EARLY" popup fired on the press itself); the knight's shield
+		# and the mage's ward simply aren't up yet, so the hit lands as normal.
+		if reaction == Soul.Reaction.PARRY:
+			take_damage(int(round(float(base_damage) * Soul.ROGUE_EARLY_PARRY_MULT)))
+		else:
+			take_damage(base_damage)
 		return false
-	if perfect:
-		CombatFx.popup_text(global_position + Vector2(0, -62), "COUNTER!", CombatFx.COLOR_COUNTER, 26)
-		CombatFx.hit_stop(0.08, 0.15)
-		_counter_strike(attacker)
-		return true
-	take_damage(base_damage)
-	return false
+
+	if not perfect:
+		take_damage(base_damage)
+		return false
+
+	_on_perfect_reaction()
+	var anchor := global_position + Vector2(0, -62)
+	match reaction:
+		Soul.Reaction.BLOCK:
+			# The knight turns the blow aside. No riposte: the knight's edge is
+			# that Block also works without timing, through the stance.
+			CombatFx.popup_text(anchor, "BLOCKED!", CombatFx.COLOR_BLOCK, 26)
+			CombatFx.flash(sprite, Color(1.6, 2.0, 2.6, 1.0), 0.22)
+			CombatFx.ring_burst(self, global_position + Vector2(0, 2), CombatFx.COLOR_BLOCK, 10.0, 28.0, 0.3)
+			CombatFx.hit_stop(0.06, 0.2)
+			CombatFx.shake(2.0, 0.1)
+		Soul.Reaction.PARRY:
+			CombatFx.popup_text(anchor, "PARRY!", CombatFx.COLOR_COUNTER, 26)
+			CombatFx.hit_stop(0.08, 0.15)
+			_counter_strike(attacker)
+		Soul.Reaction.WARD:
+			# The ward takes the edge off; the mage's poor defence still applies
+			# to what gets through (inside take_damage).
+			CombatFx.popup_text(anchor, "WARDED", Soul.COLOR_MAGE, 24)
+			CombatFx.ring_burst(self, global_position + Vector2(0, -14), Soul.COLOR_MAGE, 6.0, 26.0, 0.32, 1.0)
+			CombatFx.hit_stop(0.05, 0.25)
+			take_damage(maxi(1, int(ceil(float(base_damage) * Soul.MAGE_WARD_MULT))))
+	return true
+
+
+# A perfect reaction builds Resonance: the souls align and grant one extra
+# shift on the next turn. Once per enemy turn, so a crowd can't stack it.
+func _on_perfect_reaction() -> void:
+	if not PERFECT_REACTION_GRANTS_EXTRA_SHIFT:
+		return
+	if _resonance_pending:
+		return
+	_resonance_pending = true
+	CombatFx.popup_text(global_position + Vector2(0, -84), "RESONANCE  +1 shift", CombatFx.COLOR_COUNTER, 16)
+
+
+# What the counter prompt writes under its ring: the reaction this soul will
+# perform if the key is pressed on the beat.
+func get_reaction_hint() -> Dictionary:
+	if active_soul == null:
+		return {"text": "Counter", "color": Color.WHITE}
+	return {"text": active_soul.reaction_name(), "color": active_soul.color}
 
 
 # The riposte: face the attacker and run the normal melee swing at them.
@@ -303,7 +388,8 @@ func _register_counter_press() -> void:
 		_counter_early_pressed = true
 	elif _counter_phase == COUNTER_PHASE_STRIKE:
 		if not _counter_perfect_pressed:
-			CombatFx.flash(sprite, Color(2.6, 2.3, 1.4, 1.0), 0.2)
+			var accent := active_soul.color if active_soul != null else CombatFx.COLOR_COUNTER
+			CombatFx.flash(sprite, Color(accent.r * 2.2, accent.g * 2.2, accent.b * 2.2, 1.0), 0.2)
 		_counter_perfect_pressed = true
 
 
@@ -366,10 +452,13 @@ func try_attack(_target: Node2D = null) -> bool:
 	return true
 
 
-# Turn-mode ranged shot. Coroutine like `try_attack`: the bolt travels and
-# damage lands on arrival, so a 12 m shot visibly takes longer than a 3 m one.
+# Turn-mode ranged attack (the rogue's throw). Coroutine like `try_attack`: the
+# bolt travels and damage lands on arrival, so a 12 m shot visibly takes longer
+# than a 3 m one. Refused for souls with no ranged attack.
 func try_ranged_attack(_target: Node2D = null) -> bool:
 	if in_turn_based_combat:
+		if active_soul == null or not active_soul.has_ranged():
+			return false
 		if not turn_active:
 			return false
 		if not turn_attack_available:
@@ -382,17 +471,98 @@ func try_ranged_attack(_target: Node2D = null) -> bool:
 		turn_attack_available = false
 		_face_toward_world(_target.global_position)
 		_flash_ranged_feedback(_target)
+		var damage := active_soul.ranged_damage
 		await _launch_bolt(_target)
 		if is_instance_valid(_target) and _target.has_method("receive_damage"):
-			_target.call("receive_damage", ranged_attack_damage)
+			_target.call("receive_damage", damage)
 			CombatFx.hit_stop(0.04, 0.3)
 		return true
 	return false
 
 
+func get_ranged_range_meters() -> float:
+	if active_soul == null:
+		return 0.0
+	return active_soul.ranged_range_meters
+
+
+# Turn-mode spell (the mage). Spends the turn's attack like a throw does, then
+# recharges over the player's own turns. Coroutine: the bolt flies, and on
+# impact the spell hits the one target or, for an area spell, everyone near
+# the impact point. Frost Snare also roots its primary target.
+func try_cast_spell(spell_id: StringName, _target: Node2D = null) -> bool:
+	if not in_turn_based_combat or active_soul == null:
+		return false
+	var spell := active_soul.get_spell(spell_id)
+	if spell == null:
+		return false
+	if not turn_active or not turn_attack_available:
+		return false
+	if get_spell_cooldown(spell_id) > 0:
+		return false
+	if _target == null or not is_instance_valid(_target):
+		return false
+	if not _target.has_method("receive_damage"):
+		return false
+
+	turn_attack_available = false
+	if spell.cooldown_turns > 0:
+		spell_cooldowns[spell_id] = spell.cooldown_turns
+	_face_toward_world(_target.global_position)
+	_flash_ranged_feedback(_target, true)
+	var target := _target
+	await _launch_bolt(target, spell.color)
+	if not is_instance_valid(self):
+		return true
+
+	var impact := target.global_position if is_instance_valid(target) else global_position
+	var victims: Array[Node2D] = []
+	if spell.is_area():
+		var radius_world := spell.radius_meters * _meter_world_units
+		victims = _enemies_within(impact, radius_world)
+		CombatFx.ring_burst(get_parent(), impact, spell.color, 6.0, radius_world, 0.4)
+		CombatFx.shake(4.0, 0.16)
+	elif is_instance_valid(target):
+		victims.append(target)
+
+	for victim in victims:
+		if is_instance_valid(victim) and victim.has_method("receive_damage"):
+			victim.call("receive_damage", spell.damage)
+	if spell.root_turns > 0 and is_instance_valid(target) and target.has_method("apply_root"):
+		target.call("apply_root", spell.root_turns)
+	if not victims.is_empty():
+		CombatFx.hit_stop(0.05, 0.25)
+	return true
+
+
+func get_spell_cooldown(spell_id: StringName) -> int:
+	return int(spell_cooldowns.get(spell_id, 0))
+
+
+# The coordinator tells us how many world units one turn-mode meter is, so
+# spell radii can be authored in meters like every other range.
+func set_turn_meter_world_units(units: float) -> void:
+	_meter_world_units = maxf(1.0, units)
+
+
+func _enemies_within(world_point: Vector2, radius_world: float) -> Array[Node2D]:
+	var found: Array[Node2D] = []
+	for node in get_tree().get_nodes_in_group("enemies"):
+		var actor := node as Node2D
+		if actor == null or not is_instance_valid(actor):
+			continue
+		if actor.has_method("is_alive") and not bool(actor.call("is_alive")):
+			continue
+		if not actor.has_method("receive_damage"):
+			continue
+		if actor.global_position.distance_to(world_point) <= radius_world:
+			found.append(actor)
+	return found
+
+
 # A short glowing streak that flies from the hand to the target. Parented to
 # the level (not the player) so it keeps its own path if the player moves.
-func _launch_bolt(target: Node2D) -> void:
+func _launch_bolt(target: Node2D, color: Color = Color(0.5, 0.88, 1.0, 0.95)) -> void:
 	var start := global_position + Vector2(facing_direction.x * 8.0, -14.0)
 	var destination := target.global_position + Vector2(0, -12.0)
 	var distance := start.distance_to(destination)
@@ -400,13 +570,13 @@ func _launch_bolt(target: Node2D) -> void:
 
 	var bolt := Line2D.new()
 	bolt.width = 3.0
-	bolt.default_color = Color(0.5, 0.88, 1.0, 0.95)
+	bolt.default_color = color
 	bolt.begin_cap_mode = Line2D.LINE_CAP_ROUND
 	bolt.end_cap_mode = Line2D.LINE_CAP_ROUND
 	bolt.z_index = z_index + 2
 	var gradient := Gradient.new()
-	gradient.set_color(0, Color(0.5, 0.88, 1.0, 0.0))
-	gradient.set_color(1, Color(0.85, 0.97, 1.0, 1.0))
+	gradient.set_color(0, Color(color.r, color.g, color.b, 0.0))
+	gradient.set_color(1, color.lightened(0.45))
 	bolt.gradient = gradient
 	var direction := (destination - start).normalized()
 	var tail_length := minf(22.0, distance * 0.5)
@@ -437,13 +607,16 @@ func _face_toward_world(world_position: Vector2) -> void:
 		_update_weapon_facing()
 
 
-func _flash_ranged_feedback(_target: Node2D) -> void:
+func _flash_ranged_feedback(_target: Node2D, cast: bool = false) -> void:
 	# Weapon motion comes from the archetype stub — bow pull + release for
-	# bows, raised staff with cast tint for magic. The body tint and
-	# projectile line below stay here as ranged-specific VFX that are common
-	# to both archetypes.
+	# throws, raised staff with cast tint for spells (the mage casts with
+	# whatever is in the hand). The recoil below is the ranged-specific VFX
+	# common to both; the cast stub keys the body tint itself, so only the
+	# throw tints here.
 	var ranged_archetype := _resolve_attack_archetype()
-	if ranged_archetype != Item.ARCHETYPE_CAST_STAFF:
+	if cast or ranged_archetype == Item.ARCHETYPE_CAST_STAFF:
+		ranged_archetype = Item.ARCHETYPE_CAST_STAFF
+	else:
 		ranged_archetype = Item.ARCHETYPE_RANGED_BOW
 	_play_attack_animation(ranged_archetype)
 
@@ -451,9 +624,10 @@ func _flash_ranged_feedback(_target: Node2D) -> void:
 	var t_col := 0.1 * speed_scale
 	var t_reset := 0.18 * speed_scale
 
-	sprite.modulate = Color(0.75, 0.92, 1.0, 1.0)
 	var tween := create_tween()
-	tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), t_reset)
+	if ranged_archetype != Item.ARCHETYPE_CAST_STAFF:
+		sprite.modulate = Color(0.75, 0.92, 1.0, 1.0)
+		tween.tween_property(sprite, "modulate", Color(1, 1, 1, 1), t_reset)
 	# Small recoil on release; the projectile itself is `_launch_bolt`.
 	tween.parallel().tween_property(sprite, "position", sprite_idle_position - facing_direction * 2.5, t_col)
 	tween.tween_property(sprite, "position", sprite_idle_position, t_reset)
@@ -545,7 +719,7 @@ func _flash_attack_feedback() -> void:
 			and archetype != Item.ARCHETYPE_UNARMED:
 		return
 
-	_play_knight_melee_attack_visual()
+	_play_body_attack_visual()
 
 	var speed_scale := maxf(attack_animation_speed_scale, 0.1)
 	var t_fast := 0.06 * speed_scale
@@ -814,7 +988,23 @@ func _create_solid_texture(size: Vector2i, color: Color) -> Texture2D:
 	return ImageTexture.create_from_image(image)
 
 
-func _setup_knight_visual() -> void:
+# --- Body visuals (one SpriteFrames per soul) ---------------------------------
+# The knight has authored art (idle plus a six-frame attack strip); the rogue
+# and the mage are procedural placeholders from SoulArt drawn in the same
+# footprint. Shifting swaps `sprite.sprite_frames` and nothing else on the body
+# (facing, bars, hand point) moves. Replace a placeholder by returning authored
+# SpriteFrames from `_setup_body_visuals` for that kind.
+
+func _setup_body_visuals() -> void:
+	_soul_sprite_frames[Soul.Kind.KNIGHT] = _build_knight_frames()
+	_soul_sprite_frames[Soul.Kind.ROGUE] = _build_single_frame_body(SoulArt.create_rogue_body())
+	_soul_sprite_frames[Soul.Kind.MAGE] = _build_single_frame_body(SoulArt.create_mage_body())
+	if not sprite.animation_finished.is_connected(_on_body_attack_visual_finished):
+		sprite.animation_finished.connect(_on_body_attack_visual_finished)
+	_apply_soul_visual(active_soul, false)
+
+
+func _build_knight_frames() -> SpriteFrames:
 	const idle_path := "res://assets/player/knight_south.png"
 	var sf := SpriteFrames.new()
 	sf.add_animation("idle")
@@ -823,9 +1013,7 @@ func _setup_knight_visual() -> void:
 	if not ResourceLoader.exists(idle_path):
 		push_warning("Player knight art not found at %s — using placeholder." % idle_path)
 		sf.add_frame("idle", _create_placeholder_texture(), 1.0)
-		sprite.sprite_frames = sf
-		sprite.play("idle")
-		return
+		return sf
 
 	sf.add_frame("idle", load(idle_path) as Texture2D, 0.4)
 
@@ -846,14 +1034,36 @@ func _setup_knight_visual() -> void:
 		sf.set_animation_loop("attack", false)
 		for t in attack_textures:
 			sf.add_frame("attack", t, frame_dur)
-
-	sprite.sprite_frames = sf
-	sprite.play("idle")
-	if attack_textures.size() == 6 and not sprite.animation_finished.is_connected(_on_knight_attack_visual_finished):
-		sprite.animation_finished.connect(_on_knight_attack_visual_finished)
+	return sf
 
 
-func _play_knight_melee_attack_visual() -> void:
+func _build_single_frame_body(texture: Texture2D) -> SpriteFrames:
+	var sf := SpriteFrames.new()
+	sf.add_animation("idle")
+	sf.set_animation_loop("idle", true)
+	sf.add_frame("idle", texture, 1.0)
+	return sf
+
+
+func _apply_soul_visual(soul: Soul, animate: bool = true) -> void:
+	if soul == null:
+		return
+	var frames: SpriteFrames = _soul_sprite_frames.get(soul.kind)
+	if frames != null and sprite.sprite_frames != frames:
+		sprite.sprite_frames = frames
+		sprite.play("idle")
+	if vision_light == null:
+		return
+	if animate:
+		var tween := create_tween()
+		tween.tween_property(vision_light, "color", soul.light_color, SHIFT_LIGHT_BLEND_SECONDS)
+	else:
+		vision_light.color = soul.light_color
+
+
+# Plays the body's attack strip if the current soul has one; the procedural
+# bodies rely on the lunge/tint tween and the weapon swing alone.
+func _play_body_attack_visual() -> void:
 	if sprite.sprite_frames == null:
 		return
 	if not sprite.sprite_frames.has_animation("attack"):
@@ -863,7 +1073,7 @@ func _play_knight_melee_attack_visual() -> void:
 	sprite.play("attack")
 
 
-func _on_knight_attack_visual_finished() -> void:
+func _on_body_attack_visual_finished() -> void:
 	if sprite.sprite_frames == null:
 		return
 	if str(sprite.animation) != "attack":
@@ -946,6 +1156,10 @@ func stop_movement_immediately() -> void:
 func set_turn_based_combat(enabled: bool) -> void:
 	in_turn_based_combat = enabled
 	set_blocking(false)
+	shifts_left_this_turn = 0
+	_resonance_pending = false
+	# Spells start every fight fresh.
+	spell_cooldowns.clear()
 	if enabled:
 		stop_movement_immediately()
 		return
@@ -962,12 +1176,17 @@ func start_turn(max_move_meters: float = 6.0) -> void:
 	turn_remaining_move_meters = maxf(0.0, max_move_meters)
 	turn_attack_available = true
 	set_blocking(false)
+	# One shift a turn, plus the one Resonance earned during the enemy turn.
+	shifts_left_this_turn = SHIFTS_PER_TURN + (1 if _resonance_pending else 0)
+	_resonance_pending = false
+	_tick_spell_cooldowns()
 
 
 func end_turn() -> void:
 	turn_active = false
 	turn_remaining_move_meters = 0.0
 	turn_attack_available = false
+	shifts_left_this_turn = 0
 
 
 func consume_turn_movement_meters(used_meters: float) -> void:
@@ -1005,6 +1224,10 @@ func is_alive() -> bool:
 
 
 func set_blocking(enabled: bool) -> void:
+	# The stance is the knight's; the button is hidden for the others, this is
+	# the belt to that pair of braces.
+	if enabled and active_soul != null and not active_soul.can_block_stance:
+		return
 	var was_blocking := blocking_active
 	blocking_active = enabled
 	if block_aura == null:
@@ -1052,6 +1275,117 @@ func _punch_block_aura() -> void:
 
 func is_blocking() -> bool:
 	return blocking_active
+
+
+# --- The Bound Three ---------------------------------------------------------
+
+func _setup_souls() -> void:
+	souls = Soul.all()
+	active_soul = souls[0]
+	character_name = active_soul.display_name
+
+
+func _ensure_shift_inputs() -> void:
+	for i in range(SHIFT_ACTIONS.size()):
+		_ensure_key_action(SHIFT_ACTIONS[i], SHIFT_KEYS[i])
+	_ensure_key_action(SHIFT_CYCLE_ACTION, SHIFT_CYCLE_KEY)
+
+
+func _ensure_key_action(action_name: String, keycode: int) -> void:
+	if not InputMap.has_action(action_name):
+		InputMap.add_action(action_name)
+	for e in InputMap.action_get_events(action_name):
+		if e is InputEventKey and e.physical_keycode == keycode:
+			return
+	var key_event := InputEventKey.new()
+	key_event.physical_keycode = keycode as Key
+	InputMap.action_add_event(action_name, key_event)
+
+
+func get_active_soul() -> Soul:
+	return active_soul
+
+
+func get_souls() -> Array[Soul]:
+	return souls
+
+
+func get_shifts_left() -> int:
+	if not in_turn_based_combat:
+		return 1
+	return shifts_left_this_turn
+
+
+func can_shift() -> bool:
+	if not in_turn_based_combat:
+		return true
+	return turn_active and shifts_left_this_turn > 0
+
+
+# The soul a shift key selects, or -1 when `event` isn't one. Shared with
+# main.gd so both input paths read the same bindings.
+func shift_kind_from_event(event: InputEvent) -> int:
+	for i in range(SHIFT_ACTIONS.size()):
+		if event.is_action_pressed(SHIFT_ACTIONS[i]):
+			return i
+	if event.is_action_pressed(SHIFT_CYCLE_ACTION):
+		if active_soul == null or souls.is_empty():
+			return -1
+		return (souls.find(active_soul) + 1) % souls.size()
+	return -1
+
+
+# Hands the body to another soul. Returns false when nothing changed. In turn
+# combat this spends one of the turn's shifts and says so when there are none.
+func shift_to(kind: int) -> bool:
+	var soul := _soul_of_kind(kind)
+	if soul == null or soul == active_soul:
+		return false
+	if in_turn_based_combat:
+		if not turn_active:
+			return false
+		if shifts_left_this_turn <= 0:
+			CombatFx.popup_text(global_position + Vector2(0, -50), "No shift left", CombatFx.COLOR_WARNING, 16)
+			return false
+		shifts_left_this_turn -= 1
+		# The shield is the knight's; whoever takes over drops the stance.
+		set_blocking(false)
+
+	var previous := active_soul
+	active_soul = soul
+	character_name = soul.display_name
+	_apply_soul_visual(soul)
+	_play_shift_fx(previous, soul)
+	soul_changed.emit(soul)
+	return true
+
+
+func _soul_of_kind(kind: int) -> Soul:
+	for soul in souls:
+		if int(soul.kind) == kind:
+			return soul
+	return null
+
+
+# The shift reads as one body changing hands: a burst in the new soul's colour
+# at the feet, a flash, a squash-and-stretch on the body, and the name.
+func _play_shift_fx(_previous: Soul, soul: Soul) -> void:
+	CombatFx.ring_burst(self, global_position + Vector2(0, 2), soul.color, 6.0, 30.0, 0.38)
+	CombatFx.flash(sprite, Color(soul.color.r * 2.2, soul.color.g * 2.2, soul.color.b * 2.2, 1.0), 0.3)
+	CombatFx.popup_text(global_position + Vector2(0, -66), soul.title.to_upper(), soul.color, 20)
+	sprite.scale = Vector2(0.82, 1.16)
+	var tween := create_tween()
+	tween.tween_property(sprite, "scale", Vector2.ONE, 0.26) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func _tick_spell_cooldowns() -> void:
+	for spell_id in spell_cooldowns.keys():
+		var left := int(spell_cooldowns[spell_id]) - 1
+		if left <= 0:
+			spell_cooldowns.erase(spell_id)
+		else:
+			spell_cooldowns[spell_id] = left
 
 
 func _process_manual_path_movement() -> bool:
@@ -1150,9 +1484,13 @@ func get_inventory_items() -> Array[Item]:
 
 func get_melee_damage() -> int:
 	var weapon := get_equipped_weapon()
+	var base := attack_damage
 	if weapon != null and weapon.weapon_type == Item.WeaponType.MELEE:
-		return weapon.damage
-	return attack_damage
+		base = weapon.damage
+	# The soul in control decides how hard the shared body swings what it holds.
+	if active_soul != null:
+		return maxi(1, int(round(float(base) * active_soul.melee_mult)))
+	return base
 
 
 func get_melee_range() -> float:

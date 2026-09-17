@@ -7,6 +7,10 @@ extends Node2D
 # counter key then. The ring turns gold for the window, then flashes green
 # (perfect) or red (early / missed) before hiding.
 #
+# The target ring and the word under it take the active soul's colour and
+# reaction name (`set_hint`), so the prompt also says what a press will do:
+# Block, Parry or Ward.
+#
 # Purely visual: enemy.gd drives the phases, player.gd owns the input.
 
 const TARGET_RADIUS := 13.0
@@ -26,7 +30,9 @@ var _phase: int = Phase.HIDDEN
 var _phase_duration := 0.0
 var _phase_time := 0.0
 var _result_color := COLOR_FAIL
+var _accent := COLOR_TARGET
 var _key_label: Label
+var _hint_label: Label
 
 
 func _ready() -> void:
@@ -41,6 +47,29 @@ func _ready() -> void:
 	_key_label.add_theme_constant_override("shadow_offset_y", 1)
 	_key_label.position = Vector2(-5.0, -TARGET_RADIUS - 16.0)
 	add_child(_key_label)
+
+	# The reaction the press will perform, written under the ring.
+	_hint_label = Label.new()
+	_hint_label.text = ""
+	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hint_label.custom_minimum_size = Vector2(40.0, 0.0)
+	_hint_label.add_theme_font_size_override("font_size", 8)
+	_hint_label.add_theme_color_override("font_color", _accent)
+	_hint_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	_hint_label.add_theme_constant_override("shadow_offset_x", 1)
+	_hint_label.add_theme_constant_override("shadow_offset_y", 1)
+	_hint_label.position = Vector2(-20.0, TARGET_RADIUS + 3.0)
+	add_child(_hint_label)
+
+
+# Names the reaction the active soul will perform and tints the target ring to
+# match. Call before `start_windup`.
+func set_hint(text: String, color: Color) -> void:
+	_accent = Color(color.r, color.g, color.b, 0.8)
+	if _hint_label != null:
+		_hint_label.text = text
+		_hint_label.add_theme_color_override("font_color", Color(color.r, color.g, color.b, 1.0))
+	queue_redraw()
 
 
 func _process(delta: float) -> void:
@@ -59,6 +88,7 @@ func start_windup(duration: float) -> void:
 	_phase_time = 0.0
 	visible = true
 	_key_label.visible = true
+	_hint_label.visible = true
 	queue_redraw()
 
 
@@ -76,6 +106,7 @@ func show_result(perfect: bool) -> void:
 	_phase_time = 0.0
 	_result_color = COLOR_PERFECT if perfect else COLOR_FAIL
 	_key_label.visible = false
+	_hint_label.visible = false
 	visible = true
 	queue_redraw()
 
@@ -91,7 +122,7 @@ func _draw() -> void:
 		Phase.WINDUP:
 			var t := clampf(_phase_time / _phase_duration, 0.0, 1.0)
 			var radius := lerpf(START_RADIUS, TARGET_RADIUS, t)
-			draw_arc(Vector2.ZERO, TARGET_RADIUS, 0.0, TAU, 32, COLOR_TARGET, RING_WIDTH, true)
+			draw_arc(Vector2.ZERO, TARGET_RADIUS, 0.0, TAU, 32, _accent, RING_WIDTH, true)
 			draw_arc(Vector2.ZERO, radius, 0.0, TAU, 40, COLOR_WINDUP, RING_WIDTH, true)
 		Phase.STRIKE:
 			var pulse := 1.0 + 0.12 * sin(_phase_time * 40.0)
