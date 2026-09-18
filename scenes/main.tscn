@@ -560,6 +560,14 @@ position = Vector2(-376, 0)
 target_scene_path = "res://scenes/forest_level.tscn"
 target_spawn_name = &"from_main"
 
+[node name="EnterBlackWoods" parent="." instance=ExtResource("7_o6xl0")]
+position = Vector2(-376, 100)
+target_scene_path = "res://scenes/black_woods.tscn"
+target_spawn_name = &"from_main"
+
+[node name="Spawn_from_woods" type="Node2D" parent="."]
+position = Vector2(-330, 100)
+
 [node name="Spawn_from_castle" type="Node2D" parent="." unique_id=109748626]
 position = Vector2(-369, 193)
 

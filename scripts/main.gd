@@ -8,6 +8,12 @@ const CAMERA_ZOOM := Vector2(3.35, 3.35)
 const ASSET_DIR := "res://assets/kenney_isometric-miniature-dungeon 2/Isometric/"
 const TURN_MOVE_METERS := 6.0
 const COMBAT_TRIGGER_DISTANCE_CELLS := 6
+# How far (in turn meters) from the player an enemy can be and still be part of
+# a fight. On a big map this is what keeps one pack's fight from also taking
+# turns for every other pack in the woods; newcomers join as they close in.
+# One meter is a cell step (32 px on the current tilesets), so this is ~290 px:
+# wide enough for a spread-out pack and a wolf mid-charge, short of the next one.
+const ENGAGE_RADIUS_METERS := 9.0
 const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
 # Enemy turn pacing: a short beat before the first enemy acts, a gap between
 # enemies so the camera can settle on each one, and a beat before control
@@ -65,6 +71,8 @@ var astar_grid: AStarGrid2D = AStarGrid2D.new()
 var active_nav_layer: TileMapLayer
 var enemy: CharacterBody2D
 var extra_enemies: Array[CharacterBody2D] = []
+# Instance ids of the enemies taking part in the current fight.
+var engaged_enemies: Dictionary = {}
 var combat_state: CombatState = CombatState.EXPLORATION
 var enemy_turn_running := false
 var active_enemy_turn_actor: CharacterBody2D
@@ -365,6 +373,9 @@ func _is_close_enough_for_combat_start() -> bool:
 
 
 func _start_turn_based_combat() -> void:
+	# Decide who is in this fight while we can still see every enemy.
+	engaged_enemies.clear()
+	_refresh_engaged_enemies()
 	_stop_all_combatants_immediately()
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	combat_state = CombatState.PLAYER_TURN
@@ -376,7 +387,10 @@ func _start_turn_based_combat() -> void:
 	# Spell radii are authored in meters; the player needs this map's scale.
 	if player.has_method("set_turn_meter_world_units"):
 		player.call("set_turn_meter_world_units", _get_turn_meter_world_units())
-	for enemy_actor in _get_all_alive_enemies():
+	# Every enemy on the map freezes into turn mode, engaged or not, so a pack
+	# that hasn't noticed yet can't keep running at us in realtime. Only the
+	# engaged ones are given turns.
+	for enemy_actor in _get_all_alive_enemies_unfiltered():
 		if enemy_actor.has_method("set_turn_based_combat"):
 			enemy_actor.call("set_turn_based_combat", true)
 
@@ -399,7 +413,7 @@ func _stop_all_combatants_immediately() -> void:
 	elif player != null and player.has_method("set_navigation_target"):
 		player.call("set_navigation_target", player.global_position)
 
-	for enemy_actor in _get_all_alive_enemies():
+	for enemy_actor in _get_all_alive_enemies_unfiltered():
 		if enemy_actor.has_method("stop_movement_immediately"):
 			enemy_actor.call("stop_movement_immediately")
 		elif enemy_actor.has_method("set_navigation_target"):
@@ -424,9 +438,10 @@ func _end_turn_based_combat() -> void:
 
 	if player.has_method("set_turn_based_combat"):
 		player.call("set_turn_based_combat", false)
-	for enemy_actor in _get_all_alive_enemies():
+	for enemy_actor in _get_all_alive_enemies_unfiltered():
 		if enemy_actor.has_method("set_turn_based_combat"):
 			enemy_actor.call("set_turn_based_combat", false)
+	engaged_enemies.clear()
 
 	_crossfade_music(music_exploration, music_combat)
 	print("Turn-based combat ended")
@@ -660,6 +675,8 @@ func _run_enemy_turn() -> void:
 		return
 	if enemy_turn_running:
 		return
+	# Anyone who has closed in since last turn joins the fight now.
+	_refresh_engaged_enemies()
 	var alive_enemies := _get_all_alive_enemies()
 	if alive_enemies.is_empty():
 		_end_turn_based_combat()
@@ -1046,7 +1063,33 @@ func _request_enemy_turn_move_by_distance(enemy_actor: CharacterBody2D, max_mete
 	return used_world_distance / meter_units
 
 
+# The enemies that matter right now. Out of combat that is every living enemy
+# on the map; in a fight it is only the ones engaged in it (see
+# ENGAGE_RADIUS_METERS), so far-off packs neither take turns nor count toward
+# victory. Code that must reach everyone regardless — freezing and releasing
+# turn mode — uses the unfiltered version.
 func _get_all_alive_enemies() -> Array[CharacterBody2D]:
+	var alive := _get_all_alive_enemies_unfiltered()
+	if combat_state == CombatState.EXPLORATION:
+		return alive
+
+	var engaged: Array[CharacterBody2D] = []
+	for enemy_actor in alive:
+		if engaged_enemies.has(enemy_actor.get_instance_id()):
+			engaged.append(enemy_actor)
+	return engaged
+
+
+func _refresh_engaged_enemies() -> void:
+	var radius := ENGAGE_RADIUS_METERS * _get_turn_meter_world_units()
+	for enemy_actor in _get_all_alive_enemies_unfiltered():
+		if engaged_enemies.has(enemy_actor.get_instance_id()):
+			continue
+		if player.global_position.distance_to(enemy_actor.global_position) <= radius:
+			engaged_enemies[enemy_actor.get_instance_id()] = true
+
+
+func _get_all_alive_enemies_unfiltered() -> Array[CharacterBody2D]:
 	var seen: Dictionary = {}
 	var result: Array[CharacterBody2D] = []
 

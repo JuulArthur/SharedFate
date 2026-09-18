@@ -13,6 +13,20 @@ extends CharacterBody2D
 @export var loot_items: Array[Item] = []
 @export var loot_drop_chance := 0.6
 @export var loot_drop_spread := 20.0
+# How close the player must come before this enemy gives chase. 0 keeps the
+# old behaviour (chase from anywhere); wolves in the big woods use a short
+# range so each pack is its own fight. Taking a hit always provokes.
+@export var aggro_range := 0.0
+# Optional sprite sheets for a drawn body (see `scenes/wolf.tscn`). Both are
+# grids of equal frames: `body_sheet_rows` facing rows (0 = away-right,
+# 1 = away-left, 2 = toward-left, 3 = toward-right) and one column per frame.
+# Leave `body_sheet_idle` empty to keep the procedural placeholder body.
+@export var body_sheet_idle: Texture2D
+@export var body_sheet_run: Texture2D
+@export var body_sheet_columns_idle := 4
+@export var body_sheet_columns_run := 8
+@export var body_sheet_rows := 4
+@export var body_animation_fps := 8.0
 @export var attack_wind_up_duration := 0.2
 @export var attack_strike_duration := 0.12
 @export var attack_recovery_duration := 0.2
@@ -50,6 +64,12 @@ var _dying := false
 # Snare). It keeps its attack; it just goes nowhere.
 var rooted_turns := 0
 var root_ring: Sprite2D
+var _aggroed := false
+# Sheet animation state; only used when `body_sheet_idle` is set.
+var _body_frame := 0
+var _body_frame_time := 0.0
+var _body_row := 2  # toward-left: facing the camera at rest
+var _body_running := false
 
 
 func _ready() -> void:
@@ -66,7 +86,7 @@ func _ready() -> void:
 	navigation_agent.avoidance_enabled = false
 	_setup_health_bar()
 	_update_health_bar()
-	sprite.texture = _create_enemy_texture()
+	_setup_body_sprite()
 	_sprite_idle_local = sprite.position
 	_setup_hover_outline()
 	_setup_counter_prompt()
@@ -101,6 +121,14 @@ func _physics_process(delta: float) -> void:
 		velocity = Vector2.ZERO
 		move_and_slide()
 		return
+
+	# Ambushers hold still until the player wanders close enough.
+	if aggro_range > 0.0 and not _aggroed:
+		if global_position.distance_to(_target.global_position) > aggro_range:
+			velocity = Vector2.ZERO
+			move_and_slide()
+			return
+		_aggroed = true
 
 	if _target_refresh_left <= 0.0:
 		_refresh_target_position()
@@ -155,6 +183,7 @@ func receive_damage(amount: int) -> void:
 		return
 	if not is_alive():
 		return
+	_aggroed = true
 	current_health = maxi(0, current_health - amount)
 	_update_health_bar()
 	_play_hit_feedback(amount)
@@ -553,6 +582,63 @@ func _create_outline_texture(size: Vector2i, color: Color, border: int) -> Textu
 				image.set_pixel(x, y, color)
 
 	return ImageTexture.create_from_image(image)
+
+
+# --- Body sprite -----------------------------------------------------------
+
+func _setup_body_sprite() -> void:
+	if body_sheet_idle == null:
+		sprite.texture = _create_enemy_texture()
+		return
+	_apply_body_sheet(body_sheet_idle, body_sheet_columns_idle)
+
+
+func _process(delta: float) -> void:
+	if body_sheet_idle == null or _dying:
+		return
+	_update_body_animation(delta)
+
+
+func _update_body_animation(delta: float) -> void:
+	var moving := velocity.length_squared() > 25.0
+	if moving:
+		_body_row = _body_row_for_direction(velocity)
+	elif _target != null and is_instance_valid(_target) and (_aggroed or in_turn_based_combat):
+		# Standing still mid-fight: keep eyes on the player.
+		_body_row = _body_row_for_direction(_target.global_position - global_position)
+
+	var wants_run := moving and body_sheet_run != null
+	if wants_run != _body_running:
+		_body_running = wants_run
+		_body_frame = 0
+		_body_frame_time = 0.0
+
+	_body_frame_time += delta
+	var frame_seconds := 1.0 / maxf(body_animation_fps, 0.1)
+	while _body_frame_time >= frame_seconds:
+		_body_frame_time -= frame_seconds
+		_body_frame += 1
+
+	if _body_running:
+		_apply_body_sheet(body_sheet_run, body_sheet_columns_run)
+	else:
+		_apply_body_sheet(body_sheet_idle, body_sheet_columns_idle)
+
+
+func _apply_body_sheet(sheet: Texture2D, columns: int) -> void:
+	sprite.texture = sheet
+	sprite.hframes = maxi(1, columns)
+	sprite.vframes = maxi(1, body_sheet_rows)
+	var row := clampi(_body_row, 0, sprite.vframes - 1)
+	sprite.frame = row * sprite.hframes + (_body_frame % sprite.hframes)
+
+
+func _body_row_for_direction(direction: Vector2) -> int:
+	# Screen-up is away from the camera. Rows: 0 away-right, 1 away-left,
+	# 2 toward-left, 3 toward-right — the order the critter sheets use.
+	if direction.y < 0.0:
+		return 0 if direction.x >= 0.0 else 1
+	return 3 if direction.x >= 0.0 else 2
 
 
 func _create_enemy_texture() -> Texture2D:

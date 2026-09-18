@@ -15,6 +15,7 @@ extends RefCounted
 const PROLOGUE: StringName = &"prologue"
 const CASTLE: StringName = &"castle"
 const FOREST: StringName = &"forest"
+const BLACK_WOODS: StringName = &"black_woods"
 
 
 static func chapter(id: StringName) -> StoryChapter:
@@ -25,6 +26,8 @@ static func chapter(id: StringName) -> StoryChapter:
 			return _build_castle()
 		FOREST:
 			return _build_forest()
+		BLACK_WOODS:
+			return _build_black_woods()
 	return null
 
 
@@ -88,6 +91,23 @@ static func _build_castle() -> StoryChapter:
 		+ "Heartstone's colour, and %s goes very quiet whenever they pass one.\n\n" % Soul.MAGE_NAME
 		+ "Something else has been moving in the castle since the night the stone broke. "
 		+ "%s, for once, votes against going in." % Soul.ROGUE_NAME,
+	])
+
+
+# The Black Woods: the first hunt for a shard. Read when `scenes/black_woods.tscn`
+# opens. The wolf packs and the pool it mentions are real features of that map
+# (see tools/build_black_woods.gd), so keep them in step if the map changes.
+static func _build_black_woods() -> StoryChapter:
+	return StoryChapter.make(BLACK_WOODS, "The Black Woods", [
+		"The trees close behind them before the ruin is out of sight, and the glow of "
+		+ "the mage's ward thins to a candle-flame in the wet dark.\n\n"
+		+ "The wolves have been waiting. Not hunting - waiting. %s counts eyes between " % Soul.ROGUE_NAME
+		+ "the trunks, and stops counting at nine.",
+
+		"Somewhere ahead lies a pool that should be black and is not. Something beneath "
+		+ "the water hums the way the Heartstone used to hum, and all three of them "
+		+ "hear it at once.\n\n"
+		+ "\"The first shard,\" says %s. \"Do try not to bleed on it.\"" % Soul.MAGE_NAME,
 	])
 
 

@@ -25,6 +25,8 @@ This page explains how the current prototype is structured, where systems live, 
 - `scripts/story/story_library.gd`: `StoryLibrary` — every authored chapter, built in code; ask for one by id.
 - `scripts/story/story_chapter.gd`: `StoryChapter` Resource — id, title, pages.
 - `scripts/story/magic_ink_effect.gd`: `MagicInkEffect` RichTextEffect — the "ink appearing" reveal.
+- `scenes/black_woods.tscn`: the Black Woods — a large forest map with wolf packs, running on `main.gd`. **Generated**, not hand-painted: see `tools/build_black_woods.gd`.
+- `scenes/wolf.tscn`: wolf enemy — `enemy.tscn` with wolf stats, a short aggro range and the critter sprite sheets.
 - `scenes/backgroundMap.gd`: Tilemap helper script for obstacle/navigation updates (currently minimal/partial).
 - `scripts/display_setup.gd`: `DisplaySetup` autoload - window sizing on launch and the F11 fullscreen toggle.
 - `project.godot`: Project-level display/window config.
@@ -337,6 +339,24 @@ Dispatch goes through `_resolve_attack_archetype()` (reads `animation_override` 
 4. **Only for bespoke hero/boss weapons:** per-weapon unique animation via `animation_override`. Avoid this for common loot.
 
 Rule of thumb: **don't write a per-weapon animation to differentiate a skin — tune `grip_offset`, rotation, and maybe particle children instead. Write a new archetype only when the body posture / timing / contact arc is genuinely different.**
+
+### Maps that fight: the Black Woods
+
+Turn combat, souls, reactions and loot are all orchestrated by `main.gd`, and `main.gd` expects a particular node contract: a `TileMapLayer` named `MyCustomBackground` (navigation grid, turn meter, camera framing, default spawn), a `NavigationRegion2D` with a baked polygon, `CanvasModulate`, `Camera2D`, `Player`, and enemies in the `enemies` group. `castle_level.gd` / `forest_level.gd` only do click-to-move, so wolves placed there cannot be fought. Any new map that needs fights should therefore run `main.gd` and meet that contract.
+
+The Black Woods (`scenes/black_woods.tscn`) is built that way by a generator, `tools/build_black_woods.gd`:
+
+```
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . --script tools/build_black_woods.gd
+```
+
+- **Layout** is data at the top of the script: `CLEARINGS` (cells + tree-free radius), `PATHS` between them, `WOLF_PACKS` (offsets per clearing), pool, chest and exit positions, tree spacings, decor density and the noise `SEED`. Change, re-run, done — the file is overwritten.
+- **Ground** is an organic blob of grass/dirt tiles from `assets/isometric tileset/spritesheet.png` on `MyCustomBackground`; objects (stumps, rocks, plants) go on a `Decor` layer that nothing treats as blocking. The same isometric tileset shape as the hub (32x16 stacked cells drawn from 32x32 regions), but built in code with **no tile navigation layer** — walkability comes solely from the baked `NavigationRegion2D` polygon.
+- **Blocking**: trees are `forest_tree.tscn` instances under `NavigationRegion2D/Trees`; the pool is a `Water` layer whose tile carries a physics diamond; an invisible `Void` layer covers every non-floor cell so neither player nor navmesh can leave the blob even through a gap in the tree wall. All three are in the `navmesh_source` group and the polygon is baked at generation time (`PARSED_GEOMETRY_STATIC_COLLIDERS`, agent radius 12), so nothing rebakes at runtime.
+- **Engagement**: `main.gd` scopes a fight to the enemies within `ENGAGE_RADIUS_METERS` of the player (`engaged_enemies`, `_refresh_engaged_enemies`). `_get_all_alive_enemies()` returns only those while in combat; `_get_all_alive_enemies_unfiltered()` is for freezing/releasing turn mode on everyone. Newcomers join at the start of each enemy turn. Without this a large map's first fight would take turns for every pack on it.
+- **Aggro**: `enemy.gd` has `aggro_range` (0 = chase from anywhere, the hub's behaviour). Wolves use 260 px so each pack waits for you; a hit always provokes.
+- **Wolf body**: `enemy.gd`'s `body_sheet_idle` / `body_sheet_run` exports drive a frame-grid sprite (4 facing rows: away-right, away-left, toward-left, toward-right). Direction follows velocity, or the target when standing still in a fight. Leave `body_sheet_idle` empty for the procedural placeholder body.
+- **Hub link**: `EnterBlackWoods` on the hub's west edge (below the castle and forest doors) and `Spawn_from_woods` beside it; the woods' `ExitToHub` returns there. The `black_woods` story chapter plays on first entry.
 
 ### Story book (narration between chapters)
 
