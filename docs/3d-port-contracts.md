@@ -150,13 +150,18 @@ Additive contract on the `CombatFx` autoload: `set_world_projector(projector: Ca
 | `RangeRing3D` (`scripts/3d/range_ring_3d.gd`) | `show_ring(radius_m: float, color: Color, use_dashes := false)`, `hide_ring()`; a flat ring mesh at y = 0.02 |
 | `CounterPrompt3D` (`scripts/3d/counter_prompt_3d.gd`) | `set_hint(text, color)`, `start_windup(duration)`, `start_strike(duration)`, `show_result(perfect)`, `hide_prompt()`; drawn as a Control projected from the enemy's `OverheadAnchor` |
 | `PathPreview3D` (`scripts/3d/path_preview_3d.gd`) | `show_path(points: Array[Vector3], used_m: float, remaining_m: float)`, `hide_path()` |
-| `OverheadBars3D` (`scripts/3d/overhead_bars_3d.gd`) | `set_ratio(health_ratio: float)`, `set_visible_bars(v: bool)`; projected Control anchored to `OverheadAnchor` |
+| `OverheadBars3D` (`scripts/3d/overhead_bars_3d.gd`) | `set_ratio(health_ratio: float)`, `set_visible_bars(v: bool)`; projected Control anchored to `OverheadAnchor`; `fill_color` / `ghost_color` exports (player green by default, enemies set red) |
+| `HitFlash3D` (`scripts/3d/hit_flash_3d.gd`) | `flash(color := Color(2.6, 2.6, 2.6, 1.0), duration := 0.16)` as a child of the body, or static `HitFlash3D.flash_node(body, color, duration)`; tints every `MeshInstance3D` through `material_overlay` and restores the previous overlay |
+
+Implemented in WP5. Screen-space overlays multiply their 2D pixel sizes by `SCREEN_SCALE` = 3.35 (the 2D `CAMERA_ZOOM`) so they read at their 2D size; the prompt uses CanvasLayer 5, bars and the path label CanvasLayer 3, popups stay on 4. `ring_burst` with a `Vector3` draws on the FX CanvasLayer at the projected point taken once at spawn. `PathPreview3D` has no glow strip; `used_m` only feeds the label. Parenting: `RangeRing3D` under the body it measures from; `CounterPrompt3D` and `OverheadBars3D` under each actor's `OverheadAnchor`; `PathPreview3D` under the level root with global points; `HitFlash3D` as a child of each body, called from `flash_hit()`. The coordinator installs `CombatFx.set_world_projector(...)` and `CombatFx.set_shake_target(rig.set_shake_offset)` once the camera exists and clears both in `_exit_tree` (`set_world_projector(Callable())`, `set_shake_target(null)`), because the autoload outlives the scene. `scripts/3d/tests/overlays_test.gd` is the worked example.
 
 ## 8. World items (WP6)
 
 `ItemPickup3D` (`scripts/3d/item_pickup_3d.gd`, scene `scenes/3d/item_pickup_3d.tscn`): `Node3D` with a `Sprite3D` billboard of `item.icon` and an `Area3D` on layer 3. API as 2D: `setup(item: Item)`, `is_available() -> bool`, `take(inventory: Inventory) -> bool`, `gather_pile() -> Array` of nearby pickups within 1.0 m. Clicking goes through `WorldPicker.pick_pickup` in the coordinator, which calls `LootMenu.request_loot(pickup, player)`.
 
 Additive edits: `LootDropper.drop_items(source: Node, items, spread)` branches on `source is Node3D` and instances the 3D pickup scene in a ring on the ground plane; `LootMenu.request_loot(pickup: Node, looter: Node)` widens the type and measures distance with `GroundMath.ground_distance` when both are `Node3D`. `LOOT_RANGE` gains a metre-based twin `LOOT_RANGE_M` = 1.5.
+
+Implemented in WP6. The widening in `loot_menu.gd` had to cascade into the internal pile storage and helpers (`_pile`, `_shown`, `_selected`, `_pending_pickup`, `_take`, `_neighbour_of`, `_filtered_pile`, `_prune_pile`, `_build_slot`, slot callbacks), all `Node2D` to `Node`, because `open_for`'s `as Node2D` cast silently dropped 3D pickups; only `_in_loot_range` gained a real branch. `ItemPickup3D` (`scenes/3d/item_pickup_3d.tscn`) also has `get_item()`, `set_hover_highlighted(enabled)` and the 2D collect animation (0.18 s) before freeing. Coordinator on click: `WorldPicker.pick_pickup(camera, screen_pos)` then `LootMenu.request_loot(pickup, player)`; call `pickup.set_hover_highlighted(bool)` on hover changes, since 3D pickups never hit-test themselves.
 
 ## 9. Level node contract (WP7, consumed by WP4)
 
@@ -198,6 +203,8 @@ $godot = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Mi
 
 The last line runs a scene for 120 frames and exits; a script error prints to the terminal. Open the project in the editor for anything visual.
 
+`--check-only --script` does not register autoloads, so a script that names `CombatFx`, `LootMenu`, `StoryBook` or another autoload directly fails the check with "Identifier not found" (the 2D `enemy.gd` fails the same way). Verify such scripts by running their scene instead; do not replace the direct autoload access with `get_node("/root/...")`.
+
 Headless Godot 4.7.2 reports a square 1600x1600 viewport, not the project's 1600x900. Projection and unprojection stay consistent, but a headless test must read `get_viewport().get_visible_rect().size` instead of assuming 900 px of height.
 
 Two GDScript rules this project enforces as errors, seen on the first WP0 check: a variable inferred from a `Variant` value must be typed explicitly (`var hit: Variant = ...`), and an overriding method must match the base signature exactly, including the return type.
@@ -220,3 +227,5 @@ Each package writes its own `docs/deviations/wp<N>.md` (date, deviation, reason)
 | 2026-09-20 | WP0 | Enemy `try_attack` returns `bool` instead of the 2D `void`, because GDScript overrides must match the base signature | yes (5.3) |
 | 2026-09-20 | WP0 | Branch is `feat/3d-test`, not `3d-test`, to follow the `type/description` branch convention; package branches are `feat/3d-wp<N>` in worktrees under `.claude/worktrees/` | yes (1) |
 | 2026-09-20 | WP2 | Rig adds `set_shake_offset`, `snap_to_target`, default blend 0.6, look-at height 1.0 m; headless viewport is 1600x1600; picking test asserts ground tolerance at the ray/plane point (full text in `docs/deviations/wp2.md`) | yes (6, 11) |
+| 2026-09-20 | WP5 | `HitFlash3D` added; overlays scale 2D pixel sizes by 3.35; bars colours are exports; `ring_burst` in 3D draws on the FX layer at a fixed screen point; `PathPreview3D` drops the glow strip; `--check-only` cannot see autoloads (full text in `docs/deviations/wp5.md`) | yes (7, 11) |
+| 2026-09-20 | WP6 | One inline `as Node2D` cast in the 2D `drop_items` branch (GDScript's `Node` has no `global_position`); `LootMenu` widening cascaded into internal storage; `gather_pile()` returns untyped `Array`; the lead replaced the load-time `preload` of the 3D pickup scene with a lazy `load` so the 2D game does not depend on 3D files (full text in `docs/deviations/wp6.md`) | yes (8) |
