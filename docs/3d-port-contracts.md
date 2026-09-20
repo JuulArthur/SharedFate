@@ -1,0 +1,212 @@
+# 3D port: conventions and contracts
+
+Status: WP0 deliverable, written 2026-09-20 on branch `feat/3d-test`. Every 3D work package quotes the parts of this file it needs. Deviations found while implementing go in the "Deviations log" at the end, and the lead folds them back into the text before the next package reads it.
+
+Plan and package table: `docs/3d-test-plan.md`. 2D architecture: `CODEBASE_GUIDE.md`.
+
+## 1. Ground rules for the branch
+
+- The 2D game must not change. `scripts/*.gd` (except the files listed as additive below), `scenes/*.tscn`, `assets/**` and `tools/build_black_woods.gd` are read-only on this branch.
+- All new code lives under `scripts/3d/`, `scenes/3d/`, `assets/3d/`, `tools/blender/` and `docs/`.
+- Shared files that may receive **additive** edits, and by whom: `scripts/combat_fx.gd` (WP5), `scripts/inventory/loot_dropper.gd` and `scripts/inventory/loot_menu.gd` (WP6), `scripts/level_loader.gd` (WP8 if needed), `project.godot` autoload list (WP8 if needed). Additive means: new optional parameters with defaults, widened parameter types (`Node2D` to `Node`, `Vector2` to `Variant`), new methods, new branches guarded by a 3D check. Never a changed default, a renamed method or a removed branch.
+- Port by copying: `scripts/3d/main_3d.gd`, `player_3d.gd`, `enemy_3d.gd` start as copies of the 2D scripts. Duplication is accepted for the test.
+- Verify with `git diff --stat 2d-baseline -- scenes scripts`: only `3d` paths plus the additive files above may appear.
+
+## 2. Coordinate and unit conventions
+
+| Item | Convention |
+| --- | --- |
+| Unit | 1 Godot unit = 1 metre. `GroundMath.METER_WORLD_UNITS` = 1.0. The player receives `set_turn_meter_world_units(1.0)`. |
+| Up axis | +Y. The ground plane is y = 0 (`GroundMath.GROUND_Y`). |
+| Forward | A character faces its local -Z. Use `GroundMath.yaw_facing(direction)` for `rotation.y`. |
+| 2D to 3D mapping | 2D `Vector2(x, y)` ground coordinates become `Vector3(x, 0, y)`: 2D y is 3D z. Use `GroundMath.to_ground` / `from_ground`; never write the conversion inline. |
+| Turn grid | 1 m cells, `GroundMath.to_cell` and `cell_center`. `AStarGrid2D` stays as the grid data structure; it is dimension-neutral. |
+| Turn constants | `TURN_MOVE_METERS` = 6.0, `ENGAGE_RADIUS_METERS` = 9.0, `COMBAT_TRIGGER_DISTANCE_CELLS` = 6 keep their 2D values. |
+| Character scale | Humanoids about 1.9 m tall, origin at the feet (the knight model is 1.93 m). |
+| Camera | Orthographic, fixed angle, no player rotation. Default size 14 m vertical, yaw 45 degrees, pitch -35 degrees, looking at the player. Decided 2026-09-19. |
+
+## 3. Collision layers and groups
+
+| Layer | Bit value | Used for | Who collides / rays here |
+| --- | --- | --- | --- |
+| 1 Ground | 1 | Walkable static geometry; receives click rays | Actors stand on it; `WorldPicker.pick_ground` |
+| 2 Actors | 2 | Player and enemy `CharacterBody3D` | Click-to-attack rays; actor-actor blocking |
+| 3 Pickups | 4 | `Area3D` on dropped items | `WorldPicker.pick_pickup` |
+| 4 Props | 8 | Obstacles, trees, crates; navmesh sources | Actors collide; blocks movement |
+
+Actor bodies: `collision_layer` = 2, `collision_mask` = 1 + 8 = 9. Ground: layer 1, mask 0. Props: layer 8, mask 0. Pickup areas: layer 4, mask 0, `monitoring` off.
+
+Groups keep their 2D names: `player`, `enemies`, `navmesh_source`.
+
+## 4. GroundMath (`scripts/3d/ground_math.gd`, `class_name GroundMath`)
+
+All static. Owned by WP0; extend only by appending functions.
+
+| Function | Meaning |
+| --- | --- |
+| `to_ground(p: Vector3) -> Vector2` | (x, z) |
+| `from_ground(g: Vector2, y := 0.0) -> Vector3` | (g.x, y, g.y) |
+| `flatten(p: Vector3, y := 0.0) -> Vector3` | same x and z, given y |
+| `ground_distance(a, b: Vector3) -> float` | distance ignoring y |
+| `ground_direction(from, to: Vector3) -> Vector3` | unit vector on the plane, `Vector3.ZERO` when coincident |
+| `path_length(points: Array[Vector3]) -> float` | sum of ground distances |
+| `trim_path(points: Array[Vector3], max_length: float) -> Array[Vector3]` | prefix of the path up to the budget, last point interpolated |
+| `to_cell(p: Vector3) -> Vector2i` | floor of x and z over `CELL_SIZE` |
+| `cell_center(c: Vector2i, y := 0.0) -> Vector3` | centre of the cell |
+| `manhattan(a, b: Vector2i) -> int` | cell distance used for combat start |
+| `yaw_facing(direction: Vector3) -> float` | `rotation.y` that points local -Z along `direction` |
+| `meters_to_units(m) / units_to_meters(u)` | identity today, kept so ranges stay authored in metres |
+
+## 5. Actor contract
+
+The coordinator calls actors through `has_method` / `call`, so the contract is the method list below. Every `world_position` and `target` is 3D: `Vector3` and `Node3D`. Methods marked (await) are coroutines that return `bool` and the coordinator awaits them.
+
+### 5.1 Shared by player and enemy (WP3a base, `scripts/3d/actor_3d_base.gd`)
+
+| Method | Notes |
+| --- | --- |
+| `snap_to(world_position: Vector3) -> void` | teleport, also used by `LevelLoader` |
+| `set_navigation_target(world_position: Vector3) -> void` | snaps to the closest navmesh point via `NavigationServer3D.map_get_closest_point` |
+| `stop_movement_immediately() -> void` | |
+| `is_moving() -> bool` | |
+| `is_alive() -> bool` | false from the first frame of death |
+| `receive_damage(amount: int) -> void` and `take_damage(amount: int) -> void` | both must land (see guide) |
+| `set_turn_based_combat(enabled: bool) -> void` | |
+| `start_turn(max_move_meters: float = 6.0) -> void` | |
+| `end_turn() -> void` | |
+| `consume_turn_movement_meters(used: float) -> void` | |
+| `get_turn_remaining_move_meters() -> float` | |
+| `get_turn_remaining_move_cells() -> int` | |
+| `can_turn_attack() -> bool` | |
+| `try_attack(target: Node3D) -> bool` (await on the player) | |
+
+Base class also owns: `NavigationAgent3D` child named `NavigationAgent3D`, `CollisionShape3D` child named `CollisionShape3D`, facing via `yaw_facing`, the hit flash hook `flash_hit()` (material tint, WP5 provides the effect), and an overhead anchor `Node3D` named `OverheadAnchor` at head height for bars and prompts.
+
+### 5.2 Player only (WP3b, `scripts/3d/player_3d.gd`)
+
+Signal: `soul_changed(soul: Soul)`. Exports keep their 2D names (`move_speed`, `max_health`, `attack_damage`, `attack_range`, `melee_hit_delay`, `character_name`, `gold`); speeds and ranges are now in metres, so `move_speed` about 3.5 m/s, `attack_range` 1.2 m, `attack_approach_buffer` 0.4 m.
+
+| Method | Notes |
+| --- | --- |
+| `set_attack_target(target: Node3D)`, `clear_attack_target()` | exploration click-to-attack |
+| `set_turn_meter_world_units(units: float)` | receives 1.0 |
+| `get_melee_range() -> float`, `get_melee_damage() -> int` | weapon-aware, in metres |
+| `get_ranged_range_meters() -> float`, `try_ranged_attack(target: Node3D) -> bool` (await) | |
+| `try_cast_spell(spell_id: StringName, target: Node3D) -> bool` (await), `get_spell_cooldown(spell_id) -> int` | |
+| `get_preferred_attack_approach_distance() -> float` | |
+| `set_blocking(enabled: bool)`, `is_blocking() -> bool` | knight stance |
+| `get_active_soul() -> Soul`, `get_souls() -> Array[Soul]`, `get_shifts_left() -> int`, `can_shift() -> bool`, `shift_to(kind: int) -> bool`, `shift_kind_from_event(event: InputEvent) -> int` | |
+| `get_reaction_hint() -> Dictionary`, `begin_enemy_counter_windup(attacker: Node3D, base_damage: int)`, `begin_enemy_counter_strike()`, `cancel_enemy_counter()`, `resolve_enemy_attack(attacker: Node3D, base_damage: int) -> bool` | counter window, driven by the enemy |
+| `heal(amount: int)`, `add_experience(amount: int)`, `get_player_level() -> int`, `get_experience_toward_next() -> float`, `get_xp_required_for_next_level() -> float` | |
+| `set_overhead_ui_visible(is_visible: bool)` | |
+| `get_equipped_weapon() -> Item`, `get_inventory_items() -> Array[Item]` | `Inventory` child named `Inventory`, unchanged class |
+
+Weapon holder: a `Node3D` named `EquippedWeaponHolder` under a `Node3D` named `HandPoint` (right hand, from the model's `HandPoint` empty). Archetype animations key `EquippedWeaponHolder:rotation` and `:position`; the per-item fit goes on the child `EquippedWeaponMesh`. No flip root: facing is `rotation.y`.
+
+### 5.3 Enemy only (WP3c, `scripts/3d/enemy_3d.gd`)
+
+| Method | Notes |
+| --- | --- |
+| `set_target(target: Node3D)` | |
+| `set_hover_highlighted(enabled: bool)` | outline or tint |
+| `apply_root(turns: int)`, `is_rooted() -> bool` | |
+| `try_attack(target: Node3D) -> bool` | drives the `CounterPrompt3D` and calls the player's counter methods, same timing as 2D. Returns bool (the 2D enemy returned void): GDScript requires an override to match the base class signature, and the base declares bool |
+
+Exports keep their names; `aggro_range` and `loot_drop_spread` are in metres (wolves: 4.0 m aggro, 0.3 m spread).
+
+## 6. Camera and picking (WP2)
+
+`scripts/3d/camera_rig_3d.gd` on a `Node3D` named `CameraRig` with a `Camera3D` child named `Camera3D`.
+
+| Member | Meaning |
+| --- | --- |
+| `set_follow_target(node: Node3D)` | smooth follow, `CAMERA_FOLLOW_SPEED` 6.0 |
+| `focus_between(a: Node3D, b: Node3D, blend: float)` and `clear_focus()` | enemy-turn framing, blend 0.6 |
+| `shake_offset: Vector2` | screen-space offset in metres, written by the CombatFx shake adapter |
+| `set_zoom_size(size_m: float)` | orthographic size |
+| `get_camera() -> Camera3D` | |
+
+`scripts/3d/world_picker.gd`, `class_name WorldPicker`, all static, takes the camera:
+
+| Function | Meaning |
+| --- | --- |
+| `pick_ground(camera: Camera3D, screen_pos: Vector2) -> Variant` | `Vector3` on layer 1 or `null` |
+| `pick_enemy(camera, screen_pos) -> Node3D` | nearest body on layer 2 in group `enemies`, else `null` |
+| `pick_pickup(camera, screen_pos) -> Node3D` | area on layer 3, else `null` |
+| `world_to_screen(camera, world: Vector3) -> Vector2` | `unproject_position` |
+
+## 7. Combat feel and overlays (WP5)
+
+Additive contract on the `CombatFx` autoload: `set_world_projector(projector: Callable)`; when set, `_world_to_screen` calls it with the world position (`Variant`, `Vector3` in 3D) and expects a `Vector2` screen point. `popup_text` / `popup_damage` / `ring_burst` accept `Variant` world positions. `shake` gets an optional adapter: `set_shake_target(callable_or_null)` that receives the offset per frame; when unset it keeps writing `Camera2D.offset`. `flash(item)` accepts a `Node` and, for a `Node3D`, calls `item.flash_hit()` if present.
+
+3D overlay nodes mirror the 2D APIs one to one:
+
+| Node | API |
+| --- | --- |
+| `RangeRing3D` (`scripts/3d/range_ring_3d.gd`) | `show_ring(radius_m: float, color: Color, use_dashes := false)`, `hide_ring()`; a flat ring mesh at y = 0.02 |
+| `CounterPrompt3D` (`scripts/3d/counter_prompt_3d.gd`) | `set_hint(text, color)`, `start_windup(duration)`, `start_strike(duration)`, `show_result(perfect)`, `hide_prompt()`; drawn as a Control projected from the enemy's `OverheadAnchor` |
+| `PathPreview3D` (`scripts/3d/path_preview_3d.gd`) | `show_path(points: Array[Vector3], used_m: float, remaining_m: float)`, `hide_path()` |
+| `OverheadBars3D` (`scripts/3d/overhead_bars_3d.gd`) | `set_ratio(health_ratio: float)`, `set_visible_bars(v: bool)`; projected Control anchored to `OverheadAnchor` |
+
+## 8. World items (WP6)
+
+`ItemPickup3D` (`scripts/3d/item_pickup_3d.gd`, scene `scenes/3d/item_pickup_3d.tscn`): `Node3D` with a `Sprite3D` billboard of `item.icon` and an `Area3D` on layer 3. API as 2D: `setup(item: Item)`, `is_available() -> bool`, `take(inventory: Inventory) -> bool`, `gather_pile() -> Array` of nearby pickups within 1.0 m. Clicking goes through `WorldPicker.pick_pickup` in the coordinator, which calls `LootMenu.request_loot(pickup, player)`.
+
+Additive edits: `LootDropper.drop_items(source: Node, items, spread)` branches on `source is Node3D` and instances the 3D pickup scene in a ring on the ground plane; `LootMenu.request_loot(pickup: Node, looter: Node)` widens the type and measures distance with `GroundMath.ground_distance` when both are `Node3D`. `LOOT_RANGE` gains a metre-based twin `LOOT_RANGE_M` = 1.5.
+
+## 9. Level node contract (WP7, consumed by WP4)
+
+A 3D level that runs `main_3d.gd` is a `Node3D` root with:
+
+| Node | Type | Purpose |
+| --- | --- | --- |
+| `WorldEnvironment` | WorldEnvironment | ambient light and background |
+| `Sun` | DirectionalLight3D | key light with shadows |
+| `NavigationRegion3D` | NavigationRegion3D | baked `NavigationMesh` from its children on layers 1 and 4 (`geometry_parsed_geometry_type` = static colliders); `Ground` and props are its children |
+| `NavigationRegion3D/Ground` | StaticBody3D | layer 1, the walkable floor |
+| `CameraRig` | Node3D (camera_rig_3d.gd) | with `Camera3D` child |
+| `Player` | CharacterBody3D (player_3d.gd) | group `player` |
+| enemies | CharacterBody3D (enemy_3d.gd) | group `enemies`, anywhere in the tree |
+| `Spawn_<name>` | Node3D | spawn points for `LevelLoader` |
+
+The 2D tilemap nodes (`MyCustomBackground` and friends) have no 3D equivalent; `main_3d.gd` takes its grid from `GroundMath` and the map bounds from the `Ground` collision box.
+
+## 10. Models and assets (WP1)
+
+- Format `.glb`, exported from Blender with +Y up; verify after import that the character faces -Z and stands on y = 0. Files under `assets/3d/models/<name>.glb`, generator scripts under `tools/blender/`.
+- Knight, rogue and mage: about 1.9 m tall, origin at the feet, materials named `<Character>_<Part>`, low-poly flat shading, under 1,500 triangles each without the cape.
+- The sword is a separate object `Sword` with its origin at the grip; the character carries an empty named `HandPoint` at the right hand, and one named `OverheadAnchor` 0.25 m above the helm.
+- Wolf about 1.1 m long, tree 4 to 6 m, crate 0.8 m, chest 0.9 m wide; each prop with a simple collision box authored as a child named `<Name>_col` so Godot imports it as a collider (`-col` suffix convention), or added in the scene.
+- A preview sheet `assets/3d/previews/<name>.png` per model, rendered from the front three-quarter view.
+
+## 11. Verification on this machine
+
+Godot 4.7.2 is installed via winget at
+`%LOCALAPPDATA%\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_win64_console.exe`
+(the console build prints to the terminal). From the repository root:
+
+```powershell
+$godot = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_win64_console.exe"
+& $godot --headless --path . --import          # import assets once; writes .godot/ (ignored)
+& $godot --headless --path . --check-only --script res://scripts/3d/ground_math.gd
+& $godot --headless --path . res://scenes/3d/arena_skeleton.tscn --quit-after 120
+```
+
+The last line runs a scene for 120 frames and exits; a script error prints to the terminal. Open the project in the editor for anything visual.
+
+Two GDScript rules this project enforces as errors, seen on the first WP0 check: a variable inferred from a `Variant` value must be typed explicitly (`var hit: Variant = ...`), and an overriding method must match the base signature exactly, including the return type.
+
+## 12. Definition of done (every package)
+
+- No script errors on `--import` and on `--check-only` for every new script.
+- The package's test scene runs headless for 120 frames without errors.
+- Every method in its contract table exists, or is stubbed with a `# TODO(3d):` comment.
+- `git diff --stat 2d-baseline -- scenes scripts` shows only allowed paths.
+- `scenes/main.tscn` still opens and plays.
+- Deviations from this document are listed in the pull request and appended below.
+
+## Deviations log
+
+| Date | Package | Deviation | Folded into text? |
+| --- | --- | --- | --- |
+| | | | |
