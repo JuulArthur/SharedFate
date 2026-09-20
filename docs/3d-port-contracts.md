@@ -125,6 +125,10 @@ Exports keep their names; `aggro_range` and `loot_drop_spread` are in metres (wo
 | `shake_offset: Vector2` | screen-space offset in metres, written by the CombatFx shake adapter |
 | `set_zoom_size(size_m: float)` | orthographic size |
 | `get_camera() -> Camera3D` | |
+| `set_shake_offset(offset: Vector2)` | method form of `shake_offset`, for `CombatFx.set_shake_target(Callable(rig, "set_shake_offset"))` |
+| `snap_to_target()` | drop the camera on its target this frame (level load, teleport); the 3D twin of `_center_camera` |
+
+Implemented in WP2 (`scenes/3d/camera_rig_3d.tscn`, `class_name CameraRig3D`): `focus_between` defaults `blend` to 0.6; the look-at point rides 1.0 m above the ground so framing matches the 2D sprite centre; boom 30 m, near 0.05, far 200; the rig yields if another `Camera3D` is already current. Wiring for the coordinator: instance the rig as `CameraRig` under the level root with no other `Camera3D`, `set_follow_target(player)` then `snap_to_target()` after load or teleport, `focus_between(player, enemy)` during the enemy turn and `clear_focus()` after, pass `get_camera()` to every `WorldPicker` call, and pick in the 2D order: enemy, then pickup, then ground. Hover highlight is a `pick_enemy` call from the coordinator's `_process`. `WorldPicker.pick_enemy` falls back to the nearest alive enemy within 0.6 m of the ground hit, the metric twin of `ENEMY_CLICK_RADIUS`.
 
 `scripts/3d/world_picker.gd`, `class_name WorldPicker`, all static, takes the camera:
 
@@ -194,6 +198,8 @@ $godot = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Mi
 
 The last line runs a scene for 120 frames and exits; a script error prints to the terminal. Open the project in the editor for anything visual.
 
+Headless Godot 4.7.2 reports a square 1600x1600 viewport, not the project's 1600x900. Projection and unprojection stay consistent, but a headless test must read `get_viewport().get_visible_rect().size` instead of assuming 900 px of height.
+
 Two GDScript rules this project enforces as errors, seen on the first WP0 check: a variable inferred from a `Variant` value must be typed explicitly (`var hit: Variant = ...`), and an overriding method must match the base signature exactly, including the return type.
 
 ## 12. Definition of done (every package)
@@ -213,3 +219,4 @@ Each package writes its own `docs/deviations/wp<N>.md` (date, deviation, reason)
 | --- | --- | --- | --- |
 | 2026-09-20 | WP0 | Enemy `try_attack` returns `bool` instead of the 2D `void`, because GDScript overrides must match the base signature | yes (5.3) |
 | 2026-09-20 | WP0 | Branch is `feat/3d-test`, not `3d-test`, to follow the `type/description` branch convention; package branches are `feat/3d-wp<N>` in worktrees under `.claude/worktrees/` | yes (1) |
+| 2026-09-20 | WP2 | Rig adds `set_shake_offset`, `snap_to_target`, default blend 0.6, look-at height 1.0 m; headless viewport is 1600x1600; picking test asserts ground tolerance at the ray/plane point (full text in `docs/deviations/wp2.md`) | yes (6, 11) |
