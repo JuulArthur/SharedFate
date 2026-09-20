@@ -24,6 +24,9 @@ extends Node
 # How close the player must be to loot. Comfortably beyond melee reach (an
 # iron sword swings at 40) so arriving at an item always counts as arriving.
 const LOOT_RANGE := 56.0
+# Metre-based twin of LOOT_RANGE, used when both pickup and looter are
+# Node3D (the 3D port; see docs/3d-port-contracts.md, section 8).
+const LOOT_RANGE_M := 1.5
 # An approach that stalls this long without getting in reach is abandoned —
 # the path was blocked, or a turn's movement budget ran out short of the item.
 const APPROACH_GIVE_UP_SECONDS := 1.2
@@ -63,16 +66,17 @@ var _take_all_button: Button
 var _status_label: Label
 
 # Pickups currently listed in the panel, and who is doing the looting.
-var _pile: Array[Node2D] = []
+# Node rather than Node2D so a 3D ItemPickup3D pile can be stored too.
+var _pile: Array[Node] = []
 var _looter: Node = null
 
 # Pickups matching the active tab, in grid order, and which one is selected.
-var _shown: Array[Node2D] = []
-var _selected: Node2D = null
+var _shown: Array[Node] = []
+var _selected: Node = null
 var _active_filter: StringName = TAB_ALL
 
 # A pickup the player clicked from too far away and is now walking towards.
-var _pending_pickup: Node2D = null
+var _pending_pickup: Node = null
 var _pending_looter: Node = null
 var _pending_idle_time := 0.0
 
@@ -90,7 +94,7 @@ func is_open() -> bool:
 # Entry point for a click on a pickup. Returns true when the click was spent
 # looting (the panel opened), false when the player is too far away — the
 # caller must then leave the click unhandled so the level moves the player.
-func request_loot(pickup: Node2D, looter: Node) -> bool:
+func request_loot(pickup: Node, looter: Node) -> bool:
 	if pickup == null or looter == null:
 		return false
 
@@ -115,9 +119,10 @@ func open_for(pickups: Array, looter: Node) -> void:
 
 	_looter = looter
 	# Merge rather than replace: a second pile can be clicked while the panel
-	# is already up.
+	# is already up. Node rather than Node2D so a 3D ItemPickup3D pile merges
+	# in too.
 	for pickup in pickups:
-		var node := pickup as Node2D
+		var node := pickup as Node
 		if node == null or _pile.has(node):
 			continue
 		_pile.append(node)
@@ -171,11 +176,22 @@ func _process(delta: float) -> void:
 		_clear_pending()
 
 
-func _in_loot_range(looter: Node, pickup: Node2D) -> bool:
-	var looter_2d := looter as Node2D
-	if looter_2d == null or pickup == null or not is_instance_valid(pickup):
+func _in_loot_range(looter: Node, pickup: Node) -> bool:
+	if looter == null or pickup == null or not is_instance_valid(pickup):
 		return false
-	return looter_2d.global_position.distance_to(pickup.global_position) <= LOOT_RANGE
+
+	# 3D branch: both sides are Node3D, so measure on the ground plane like
+	# every other range in the 3D port (docs/3d-port-contracts.md, section 8).
+	if looter is Node3D and pickup is Node3D:
+		var looter_3d := looter as Node3D
+		var pickup_3d := pickup as Node3D
+		return GroundMath.ground_distance(looter_3d.global_position, pickup_3d.global_position) <= LOOT_RANGE_M
+
+	var looter_2d := looter as Node2D
+	var pickup_2d := pickup as Node2D
+	if looter_2d == null or pickup_2d == null:
+		return false
+	return looter_2d.global_position.distance_to(pickup_2d.global_position) <= LOOT_RANGE
 
 
 func _pending_is_live() -> bool:
@@ -221,7 +237,7 @@ func _input(event: InputEvent) -> void:
 
 # --- Looting ---------------------------------------------------------------
 
-func _take(pickup: Node2D) -> void:
+func _take(pickup: Node) -> void:
 	var inventory := _resolve_inventory()
 	if inventory == null:
 		return
@@ -265,7 +281,7 @@ func _resolve_inventory() -> Inventory:
 
 
 func _prune_pile() -> void:
-	var live: Array[Node2D] = []
+	var live: Array[Node] = []
 	for pickup in _pile:
 		if not is_instance_valid(pickup) or not pickup.is_inside_tree():
 			continue
@@ -276,7 +292,7 @@ func _prune_pile() -> void:
 
 
 # The item that should take over the selection when `pickup` is removed.
-func _neighbour_of(pickup: Node2D) -> Node2D:
+func _neighbour_of(pickup: Node) -> Node:
 	var index := _shown.find(pickup)
 	if index == -1:
 		return null
@@ -464,12 +480,12 @@ func _refresh() -> void:
 	_take_all_button.disabled = _pile.is_empty()
 
 
-func _filtered_pile() -> Array[Node2D]:
+func _filtered_pile() -> Array[Node]:
 	if _active_filter == TAB_ALL:
 		return _pile.duplicate()
 
 	var known := [Item.CATEGORY_WEAPON, Item.CATEGORY_ARMOR, Item.CATEGORY_CONSUMABLE]
-	var matching: Array[Node2D] = []
+	var matching: Array[Node] = []
 	for pickup in _pile:
 		var item := pickup.get("item") as Item
 		if item == null:
@@ -512,7 +528,7 @@ func _ceil_to_row(count: int) -> int:
 	return int(ceil(float(count) / float(GRID_COLUMNS))) * GRID_COLUMNS
 
 
-func _build_slot(item: Item, pickup: Node2D) -> Control:
+func _build_slot(item: Item, pickup: Node) -> Control:
 	var slot := Button.new()
 	slot.custom_minimum_size = SLOT_SIZE
 	slot.tooltip_text = "%s\n%s" % [item.display_name, _item_detail_text(item)]
@@ -588,12 +604,12 @@ func _on_tab_pressed(filter: StringName) -> void:
 	_refresh()
 
 
-func _on_slot_pressed(pickup: Node2D) -> void:
+func _on_slot_pressed(pickup: Node) -> void:
 	_selected = pickup
 	_refresh()
 
 
-func _on_slot_gui_input(event: InputEvent, pickup: Node2D) -> void:
+func _on_slot_gui_input(event: InputEvent, pickup: Node) -> void:
 	if event is InputEventMouseButton \
 			and event.button_index == MOUSE_BUTTON_LEFT \
 			and event.double_click:
