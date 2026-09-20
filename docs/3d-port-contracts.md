@@ -207,6 +207,9 @@ Two GDScript rules this project enforces as errors, seen on the first WP0 check:
 
 ## Deviations log
 
+Each package writes its own `docs/deviations/wp<N>.md` (date, deviation, reason) so parallel branches never conflict on this file. The lead folds accepted deviations into the sections above at merge time and records them here.
+
 | Date | Package | Deviation | Folded into text? |
 | --- | --- | --- | --- |
-| | | | |
+| 2026-09-20 | WP0 | Enemy `try_attack` returns `bool` instead of the 2D `void`, because GDScript overrides must match the base signature | yes (5.3) |
+| 2026-09-20 | WP0 | Branch is `feat/3d-test`, not `3d-test`, to follow the `type/description` branch convention; package branches are `feat/3d-wp<N>` in worktrees under `.claude/worktrees/` | yes (1) |
