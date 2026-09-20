@@ -1,0 +1,172 @@
+[gd_scene load_steps=23 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/tests/overlays_test.gd" id="1_test"]
+[ext_resource type="Script" path="res://scripts/3d/stubs/stub_player_3d.gd" id="2_player"]
+[ext_resource type="Script" path="res://scripts/3d/stubs/stub_enemy_3d.gd" id="3_enemy"]
+[ext_resource type="Script" path="res://scripts/3d/range_ring_3d.gd" id="4_range_ring"]
+[ext_resource type="Script" path="res://scripts/3d/overhead_bars_3d.gd" id="5_bars"]
+[ext_resource type="Script" path="res://scripts/3d/counter_prompt_3d.gd" id="6_prompt"]
+[ext_resource type="Script" path="res://scripts/3d/path_preview_3d.gd" id="7_path"]
+[ext_resource type="Script" path="res://scripts/3d/hit_flash_3d.gd" id="8_flash"]
+
+[sub_resource type="Environment" id="Environment_arena"]
+background_mode = 1
+background_color = Color(0.16, 0.18, 0.2, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.58, 0.62, 1)
+ambient_light_energy = 0.8
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(40, 0.2, 40)
+
+[sub_resource type="StandardMaterial3D" id="Mat_ground"]
+albedo_color = Color(0.36, 0.44, 0.34, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ground"]
+material = SubResource("Mat_ground")
+size = Vector3(40, 0.2, 40)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_obstacle"]
+size = Vector3(2, 2, 2)
+
+[sub_resource type="StandardMaterial3D" id="Mat_obstacle"]
+albedo_color = Color(0.45, 0.4, 0.35, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_obstacle"]
+material = SubResource("Mat_obstacle")
+size = Vector3(2, 2, 2)
+
+[sub_resource type="NavigationMesh" id="NavigationMesh_arena"]
+geometry_parsed_geometry_type = 1
+geometry_collision_mask = 9
+cell_size = 0.25
+agent_height = 2.0
+agent_radius = 0.5
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
+radius = 0.35
+height = 1.8
+
+[sub_resource type="StandardMaterial3D" id="Mat_player"]
+albedo_color = Color(0.29, 0.31, 0.38, 1)
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_player"]
+material = SubResource("Mat_player")
+radius = 0.35
+height = 1.8
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_enemy"]
+size = Vector3(0.9, 1.0, 1.3)
+
+[sub_resource type="StandardMaterial3D" id="Mat_enemy"]
+albedo_color = Color(0.55, 0.2, 0.18, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_enemy"]
+material = SubResource("Mat_enemy")
+size = Vector3(0.9, 1.0, 1.3)
+
+[node name="OverlaysTest" type="Node3D"]
+script = ExtResource("1_test")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_arena")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+light_energy = 1.4
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 20, 20)
+
+[node name="NavigationRegion3D" type="NavigationRegion3D" parent="."]
+navigation_mesh = SubResource("NavigationMesh_arena")
+
+[node name="Ground" type="StaticBody3D" parent="NavigationRegion3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="NavigationRegion3D/Ground"]
+shape = SubResource("BoxShape3D_ground")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="NavigationRegion3D/Ground"]
+mesh = SubResource("BoxMesh_ground")
+
+[node name="Obstacle" type="StaticBody3D" parent="NavigationRegion3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 1, -3)
+collision_layer = 8
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="NavigationRegion3D/Obstacle"]
+shape = SubResource("BoxShape3D_obstacle")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="NavigationRegion3D/Obstacle"]
+mesh = SubResource("BoxMesh_obstacle")
+
+[node name="Player" type="CharacterBody3D" parent="." groups=["player"]]
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("2_player")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Player"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_player")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Player"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+mesh = SubResource("CapsuleMesh_player")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="Player"]
+path_desired_distance = 0.3
+target_desired_distance = 0.4
+avoidance_enabled = true
+radius = 0.4
+
+[node name="RangeRing3D" type="Node3D" parent="Player"]
+script = ExtResource("4_range_ring")
+
+[node name="OverheadAnchor" type="Node3D" parent="Player"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.15, 0)
+
+[node name="OverheadBars3D" type="Node3D" parent="Player/OverheadAnchor"]
+script = ExtResource("5_bars")
+
+[node name="Enemy" type="CharacterBody3D" parent="." groups=["enemies"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 0, 2)
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("3_enemy")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Enemy"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+shape = SubResource("BoxShape3D_enemy")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Enemy"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+mesh = SubResource("BoxMesh_enemy")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="Enemy"]
+path_desired_distance = 0.3
+target_desired_distance = 0.4
+avoidance_enabled = true
+radius = 0.5
+
+[node name="HitFlash3D" type="Node" parent="Enemy"]
+script = ExtResource("8_flash")
+
+[node name="OverheadAnchor" type="Node3D" parent="Enemy"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.3, 0)
+
+[node name="OverheadBars3D" type="Node3D" parent="Enemy/OverheadAnchor"]
+script = ExtResource("5_bars")
+fill_color = Color(0.88, 0.2, 0.2, 1)
+ghost_color = Color(1, 0.78, 0.6, 0.9)
+
+[node name="CounterPrompt3D" type="Node3D" parent="Enemy/OverheadAnchor"]
+script = ExtResource("6_prompt")
+
+[node name="PathPreview3D" type="Node3D" parent="."]
+script = ExtResource("7_path")
+
+[node name="Spawn_default" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, 2)
