@@ -82,6 +82,15 @@ The coordinator calls actors through `has_method` / `call`, so the contract is t
 
 Base class also owns: `NavigationAgent3D` child named `NavigationAgent3D`, `CollisionShape3D` child named `CollisionShape3D`, facing via `yaw_facing`, the hit flash hook `flash_hit()` (material tint, WP5 provides the effect), and an overhead anchor `Node3D` named `OverheadAnchor` at head height for bars and prompts.
 
+Implemented in WP3a as `class_name ActorBase3D` (`scripts/3d/actor_3d_base.gd`). Facts subclasses and levels must know:
+
+- Recast bakes the navmesh about one `cell_height` above the floor (y = 0.3 with the arena settings) and `NavigationAgent3D` measures `path_desired_distance` / `target_desired_distance` in 3D, so an agent aimed at raw navmesh points never reaches its first waypoint. `set_navigation_target` sets `path_height_offset` from the measured navmesh height and aims `target_position` at y = 0. Do not undo this in subclasses.
+- `NavigationServer3D.map_get_closest_point` returns (0, 0, 0) until the first map sync after a runtime bake; two physics frames after `bake_finished` were not enough. Levels that bake at runtime (WP4, WP7) must wait for the map before routing anyone (`scripts/3d/tests/actor_base_test.gd` shows `_wait_for_navigation_map`).
+- Damage: subclasses scale incoming hits in the virtual `_apply_damage(amount: int) -> int` (return what lands), never by overriding `take_damage`. Outgoing melee damage comes from the virtual `_outgoing_damage() -> int`.
+- Death: `_die()` makes `is_alive()` false at once, clears the collision layer deferred and calls the virtual `_on_died()`, whose default hides the body. A death animation overrides `_on_died()` without `super` and hides or frees the body when done.
+- `try_attack(target: Node3D = null) -> bool`: overrides must repeat the default and the return type. `is_turn_active()` is true only during this actor's own turn; `is_in_turn_based_combat()` answers whether the fight is in turn mode. `end_turn()` and `set_turn_based_combat(false)` do not stop movement, as in `player.gd`.
+- Subclasses that define `_ready`, `_physics_process` or `_on_died` call `super` unless they replace the behaviour. `flash_hit()` emits `hit_flashed`. Stuck detection: 1.0 s without 0.03 m of progress stops the actor.
+
 ### 5.2 Player only (WP3b, `scripts/3d/player_3d.gd`)
 
 Signal: `soul_changed(soul: Soul)`. Exports keep their 2D names (`move_speed`, `max_health`, `attack_damage`, `attack_range`, `melee_hit_delay`, `character_name`, `gold`); speeds and ranges are now in metres, so `move_speed` about 3.5 m/s, `attack_range` 1.2 m, `attack_approach_buffer` 0.4 m.
@@ -203,6 +212,8 @@ $godot = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Mi
 
 The last line runs a scene for 120 frames and exits; a script error prints to the terminal. Open the project in the editor for anything visual.
 
+Headless Godot runs the main loop as fast as it can, so a `--quit-after N` frame budget can pass before N physics frames; a test that waits on physics or navigation should set `Engine.max_fps = 60` in `_ready`.
+
 `--check-only --script` does not register autoloads, so a script that names `CombatFx`, `LootMenu`, `StoryBook` or another autoload directly fails the check with "Identifier not found" (the 2D `enemy.gd` fails the same way). Verify such scripts by running their scene instead; do not replace the direct autoload access with `get_node("/root/...")`.
 
 Headless Godot 4.7.2 reports a square 1600x1600 viewport, not the project's 1600x900. Projection and unprojection stay consistent, but a headless test must read `get_viewport().get_visible_rect().size` instead of assuming 900 px of height.
@@ -227,5 +238,6 @@ Each package writes its own `docs/deviations/wp<N>.md` (date, deviation, reason)
 | 2026-09-20 | WP0 | Enemy `try_attack` returns `bool` instead of the 2D `void`, because GDScript overrides must match the base signature | yes (5.3) |
 | 2026-09-20 | WP0 | Branch is `feat/3d-test`, not `3d-test`, to follow the `type/description` branch convention; package branches are `feat/3d-wp<N>` in worktrees under `.claude/worktrees/` | yes (1) |
 | 2026-09-20 | WP2 | Rig adds `set_shake_offset`, `snap_to_target`, default blend 0.6, look-at height 1.0 m; headless viewport is 1600x1600; picking test asserts ground tolerance at the ray/plane point (full text in `docs/deviations/wp2.md`) | yes (6, 11) |
+| 2026-09-20 | WP3a | `path_height_offset` from the measured navmesh height and ground-plane `target_position`; wait for the navigation map after a runtime bake; `is_in_turn_based_combat()` added; `_apply_damage` / `_on_died` virtuals; `end_turn` does not stop movement; headless tests cap `Engine.max_fps` (full text in `docs/deviations/wp3a.md`) | yes (5.1, 11) |
 | 2026-09-20 | WP5 | `HitFlash3D` added; overlays scale 2D pixel sizes by 3.35; bars colours are exports; `ring_burst` in 3D draws on the FX layer at a fixed screen point; `PathPreview3D` drops the glow strip; `--check-only` cannot see autoloads (full text in `docs/deviations/wp5.md`) | yes (7, 11) |
 | 2026-09-20 | WP6 | One inline `as Node2D` cast in the 2D `drop_items` branch (GDScript's `Node` has no `global_position`); `LootMenu` widening cascaded into internal storage; `gather_pile()` returns untyped `Array`; the lead replaced the load-time `preload` of the 3D pickup scene with a lazy `load` so the 2D game does not depend on 3D files (full text in `docs/deviations/wp6.md`) | yes (8) |
