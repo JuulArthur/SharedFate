@@ -7,7 +7,8 @@ extends Node3D
 ##   godot --headless --path . res://scenes/3d/tests/player_test.tscn --quit-after 900
 ##
 ## The steps follow the WP3b brief: weapon and soul damage, free shifting in
-## exploration, one shift per turn, melee with the contact delay, the rogue's
+## exploration, the body, weapon, hand and overhead anchor of each soul (WP9),
+## one shift per turn, melee with the contact delay, the rogue's
 ## bolt landing after its flight time, the two mage spells with the frost snare
 ## cooldown, the knight's three reaction outcomes with the 2D damage maths, and
 ## XP levelling. Contract: docs/3d-port-contracts.md, sections 5.1, 5.2, 11, 12.
@@ -34,6 +35,25 @@ const BOLT_SLACK_MS := 300
 const ENEMY_DAMAGE := 12
 const FAR_MELEE_M := 3.0
 const FAR_THROW_M := 13.0
+
+# WP9 bodies per soul, in Soul.Kind order: the body node under Player/Model,
+# its main mesh, the weapon it holds in the right hand and any weapon that
+# stays in the model.
+const BODY_NODES: Array[String] = ["Knight", "Rogue", "Mage"]
+const BODY_MESHES: Array[String] = ["Knight_Body", "Rogue_Body", "Mage_Body"]
+const HELD_WEAPONS: Array[String] = ["Sword", "Dagger_R", "Staff"]
+const OFF_HAND_WEAPONS: Array[String] = ["", "Dagger_L", ""]
+const HAND_TOLERANCE_M := 0.05
+# WP1: OverheadAnchor 0.25 m above the top of the head.
+const OVERHEAD_CLEARANCE_M := 0.25
+const OVERHEAD_TOLERANCE_M := 0.05
+# The archetype animations turn the holder about the hand's local X, so a
+# weapon's long axis must stay in the body's forward/up plane: its sideways
+# (local X) component stays under this.
+const MAX_SIDEWAYS_AXIS := 0.1
+const WEAPON_ANIMATIONS: Array[StringName] = [
+	Item.ARCHETYPE_MELEE_SLASH, Item.ARCHETYPE_CAST_STAFF, Item.ARCHETYPE_RANGED_BOW]
+const ANIMATION_SAMPLES: Array[float] = [0.0, 0.06, 0.12, 0.15, 0.18, 0.26, 0.32, 0.4, 0.45, 0.55]
 
 @onready var camera: Camera3D = $Camera3D
 @onready var sun: DirectionalLight3D = $Sun
@@ -143,6 +163,7 @@ func _run() -> void:
 	var steps: Array[Callable] = [
 		_step_weapon,
 		_step_free_shifting,
+		_step_bodies,
 		_step_turn_shifting,
 		_step_melee,
 		_step_throw,
@@ -260,6 +281,139 @@ func _step_free_shifting() -> String:
 	if player.get_shifts_left() != 1 or not player.can_shift():
 		return "free shifting: get_shifts_left() %d / can_shift() %s outside combat, expected 1 / true" \
 			% [player.get_shifts_left(), str(player.can_shift())]
+	return ""
+
+
+## 2b. Bodies per soul (WP9): after each shift exactly the soul's body is
+## visible, the soul's own weapon is on EquippedWeaponMesh (the glb's copy
+## hidden), HandPoint and OverheadAnchor sit at that body's empties, and the
+## weapon hangs (blades) or stands (staff) in the swing plane through the attack
+## animations. The knight is checked first as the body shown at _ready.
+func _step_bodies() -> String:
+	await _pause(0.05)
+	var bodies := player.soul_bodies
+	if bodies == null:
+		return "bodies: Player/Model is not a SoulBodies3D"
+	var order: Array[Soul.Kind] = [Soul.Kind.KNIGHT, Soul.Kind.ROGUE, Soul.Kind.MAGE, Soul.Kind.KNIGHT]
+	for kind in order:
+		if player.get_active_soul().kind != kind and not _shift(kind):
+			return "bodies: shift_to(%s) refused in exploration" % Soul.kind_title(kind)
+		# Let the 0.15 s scale punch finish before measuring against the body.
+		await _pause(SoulBodies3D.SHIFT_PUNCH_SECONDS + 0.1)
+		var failure := _check_body(bodies, int(kind))
+		if not failure.is_empty():
+			return "bodies (%s): %s" % [Soul.kind_title(kind), failure]
+		failure = _check_weapon_axis(int(kind))
+		if not failure.is_empty():
+			return "bodies (%s): %s" % [Soul.kind_title(kind), failure]
+	return ""
+
+
+func _check_body(bodies: SoulBodies3D, kind: int) -> String:
+	var expected := bodies.get_node_or_null(BODY_NODES[kind]) as Node3D
+	if expected == null:
+		return "no %s body under Player/Model" % BODY_NODES[kind]
+	if bodies.get_active_body() != expected or bodies.get_active_kind() != kind:
+		return "the active body is %s, expected %s" % [bodies.get_active_body(), expected.name]
+	var visible_bodies: Array[String] = []
+	for body_name in BODY_NODES:
+		var body := bodies.get_node_or_null(body_name) as Node3D
+		if body != null and body.visible:
+			visible_bodies.append(body_name)
+	if visible_bodies.size() != 1 or visible_bodies[0] != BODY_NODES[kind]:
+		return "visible bodies %s, expected only %s" % [str(visible_bodies), BODY_NODES[kind]]
+	if expected.process_mode == Node.PROCESS_MODE_DISABLED:
+		return "the visible body has its processing disabled"
+	if not expected.scale.is_equal_approx(Vector3.ONE):
+		return "the body's scale is %s after the shift punch, expected (1, 1, 1)" % expected.scale
+
+	var original := expected.find_child(HELD_WEAPONS[kind], true, false) as MeshInstance3D
+	if original == null:
+		return "the %s model has no %s mesh" % [BODY_NODES[kind], HELD_WEAPONS[kind]]
+	if original.visible:
+		return "the model's own %s is still visible" % HELD_WEAPONS[kind]
+	var weapon := player.equipped_weapon_mesh
+	if weapon == null or weapon.mesh == null:
+		return "EquippedWeaponMesh has no mesh"
+	if weapon.mesh != original.mesh:
+		return "EquippedWeaponMesh carries %s, expected the %s mesh %s" % [weapon.mesh, HELD_WEAPONS[kind], original.mesh]
+	if not weapon.visible:
+		return "EquippedWeaponMesh is hidden with the Iron Sword equipped"
+	var weapons := bodies.get_weapon_meshes()
+	if weapons.is_empty() or weapons[0] != original:
+		return "get_weapon_meshes() does not start with the held %s" % HELD_WEAPONS[kind]
+	if not OFF_HAND_WEAPONS[kind].is_empty():
+		var off_hand := expected.find_child(OFF_HAND_WEAPONS[kind], true, false) as MeshInstance3D
+		if off_hand == null or not off_hand.visible:
+			return "the off-hand %s is missing or hidden" % OFF_HAND_WEAPONS[kind]
+		if not weapons.has(off_hand):
+			return "get_weapon_meshes() does not list the off-hand %s" % OFF_HAND_WEAPONS[kind]
+
+	var body_hand := expected.find_child("HandPoint", true, false) as Node3D
+	if body_hand == null or bodies.get_hand_point() != body_hand:
+		return "get_hand_point() is not the %s model's HandPoint" % BODY_NODES[kind]
+	var hand_gap := player.hand_point.global_position.distance_to(body_hand.global_position)
+	if hand_gap > HAND_TOLERANCE_M:
+		return "HandPoint is %.3f m from the body's HandPoint %s, expected within %.2f m" \
+			% [hand_gap, body_hand.global_position, HAND_TOLERANCE_M]
+
+	var body_mesh := expected.find_child(BODY_MESHES[kind], true, false) as MeshInstance3D
+	if body_mesh == null:
+		return "no %s mesh" % BODY_MESHES[kind]
+	var to_player := player.global_transform.affine_inverse() * body_mesh.global_transform
+	var head_top := (to_player * body_mesh.get_aabb()).end.y
+	var anchor_y := player.overhead_anchor.position.y
+	if absf(anchor_y - (head_top + OVERHEAD_CLEARANCE_M)) > OVERHEAD_TOLERANCE_M:
+		return "OverheadAnchor at y=%.3f, expected %.3f (head %.3f + %.2f)" \
+			% [anchor_y, head_top + OVERHEAD_CLEARANCE_M, head_top, OVERHEAD_CLEARANCE_M]
+	if not is_equal_approx(anchor_y, bodies.get_overhead_height()):
+		return "OverheadAnchor at y=%.3f, get_overhead_height() %.3f" % [anchor_y, bodies.get_overhead_height()]
+	print("[player_test] %s: hand %.3f m off, anchor %.3f m over a %.3f m head" \
+		% [BODY_NODES[kind], hand_gap, anchor_y, head_top])
+	return ""
+
+
+## Samples melee_slash, cast_staff and ranged_bow: the weapon's long axis (mesh
+## local +Y, grip to tip) stays in the forward/up plane, pointing down for the
+## blades and up for the staff.
+func _check_weapon_axis(kind: int) -> String:
+	var anim_player := player.attack_animation_player
+	if anim_player == null:
+		return "no AttackAnimations player"
+	var points_up := kind == int(Soul.Kind.MAGE)
+	var failure := _weapon_axis_problem("rest", points_up)
+	if not failure.is_empty():
+		return failure
+	for anim_name in WEAPON_ANIMATIONS:
+		var anim := anim_player.get_animation(anim_name)
+		if anim == null:
+			return "no %s animation" % anim_name
+		anim_player.play(anim_name)
+		for t in ANIMATION_SAMPLES:
+			if t > anim.length:
+				break
+			anim_player.seek(t, true)
+			failure = _weapon_axis_problem("%s at %.2f s" % [anim_name, t], points_up)
+			if not failure.is_empty():
+				break
+		anim_player.stop()
+		player.equipped_weapon_holder.position = Player3D.HOLDER_REST_POSITION
+		player.equipped_weapon_holder.rotation = Vector3.ZERO
+		player.model.scale = Vector3.ONE
+		if not failure.is_empty():
+			return failure
+	return ""
+
+
+func _weapon_axis_problem(label: String, points_up: bool) -> String:
+	var weapon := player.equipped_weapon_mesh
+	var axis := (player.global_transform.basis.inverse() * weapon.global_transform.basis.y).normalized()
+	if absf(axis.x) > MAX_SIDEWAYS_AXIS:
+		return "%s: the weapon lies sideways (axis %s in body space)" % [label, axis]
+	if points_up and axis.y <= 0.0:
+		return "%s: the staff points down (axis %s in body space)" % [label, axis]
+	if not points_up and axis.y >= 0.0:
+		return "%s: the blade points up (axis %s in body space)" % [label, axis]
 	return ""
 
 
