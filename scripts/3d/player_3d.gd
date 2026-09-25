@@ -212,6 +212,7 @@ func _unhandled_input(event: InputEvent) -> void:
 ## Replaces the base step with the 2D order: stuck check, manual path, then in
 ## exploration the click-to-attack pursuit, else the navmesh step from the base.
 func _physics_process(delta: float) -> void:
+	_update_locomotion_animation(delta)
 	if navigation_agent == null:
 		return
 	if not _alive:
@@ -1051,6 +1052,8 @@ func _ensure_collision_shape() -> void:
 
 func _setup_body_visuals() -> void:
 	soul_bodies = model as SoulBodies3D
+	if soul_bodies != null:
+		soul_bodies.active_pose_updated.connect(_follow_body_hand)
 	_apply_soul_visual(active_soul, false)
 
 
@@ -1070,15 +1073,95 @@ func _apply_soul_visual(soul: Soul, animate: bool = true) -> void:
 ## Shows `soul`'s body and fits the hand, the overhead anchor and the held
 ## weapon to it. The hand and the anchor stay children of the player so the
 ## archetype animations' `HandPoint/EquippedWeaponHolder` paths and the bars
-## under the anchor keep working; they are moved, not re-parented.
+## under the anchor keep working; they are moved, not re-parented. The new
+## body carries on with the old one's idle or walk (SoulBodies3D.show_soul).
 func _apply_soul_body(soul: Soul) -> void:
 	if soul_bodies == null or not soul_bodies.show_soul(int(soul.kind)):
 		return
-	if hand_point != null and soul_bodies.get_hand_point() != null:
-		hand_point.transform = soul_bodies.get_hand_transform()
+	_follow_body_hand()
 	if overhead_anchor != null:
 		overhead_anchor.position.y = soul_bodies.get_overhead_height()
 	_refresh_weapon_visual(get_equipped_weapon())
+	if _locomotion_state != &"":
+		_play_locomotion(_locomotion_state, _locomotion_speed_scale)
+
+
+## Puts the player's `HandPoint` (and the held weapon under it) on the active
+## body's `HandPoint` as the skeleton poses it: the weapon swings with the arm
+## in the idle and walk cycles (WP11). Runs whenever the active skeleton has a
+## new pose. The archetype animations still key `EquippedWeaponHolder` under
+## it, so an attack swing adds to the arm pose instead of fighting it.
+func _follow_body_hand() -> void:
+	if hand_point == null or soul_bodies == null or soul_bodies.get_hand_point() == null:
+		return
+	hand_point.transform = soul_bodies.get_live_hand_transform()
+
+
+# --- Locomotion clips (WP11) ------------------------------------------------------
+# Each soul's glb carries a skeleton and two looping clips, `idle` (2.0 s) and
+# `walk` (1.0 s, one stride authored for WALK_REFERENCE_SPEED). Every physics
+# frame the active body plays `walk` while the actor moves faster than
+# WALK_MIN_SPEED, with its playback scaled by ground speed so the stride keeps
+# pace with the movement, and `idle` otherwise. The attack lunge and squash
+# tween `Model` and the swing keys the weapon holder, so both play on top of
+# either clip; the walk is not paused for `melee_hit_delay`.
+
+const LOCOMOTION_IDLE := &"idle"
+const LOCOMOTION_WALK := &"walk"
+## Ground speed (m/s) the walk clip's stride is authored for.
+const WALK_REFERENCE_SPEED := 3.5
+## Below this ground speed the body idles.
+const WALK_MIN_SPEED := 0.2
+## A walk survives this long without speed while the actor still reports
+## moving (a frame where avoidance has not answered yet), so it never flickers.
+const WALK_GRACE_SECONDS := 0.12
+const WALK_SPEED_SCALE_MIN := 0.25
+const WALK_SPEED_SCALE_MAX := 1.5
+## Cross-fade between idle and walk.
+const LOCOMOTION_BLEND_SECONDS := 0.15
+
+var _locomotion_state: StringName = &""
+var _locomotion_speed_scale := 1.0
+var _walk_grace_left := 0.0
+
+
+## The locomotion clip the active body is playing (`idle`, `walk`, or empty
+## before the first physics frame or without a rig).
+func get_locomotion_state() -> StringName:
+	return _locomotion_state
+
+
+func _update_locomotion_animation(delta: float) -> void:
+	if soul_bodies == null:
+		return
+	var ground_speed := Vector2(velocity.x, velocity.z).length()
+	var wanted := LOCOMOTION_IDLE
+	var speed_scale := 1.0
+	if _alive and is_moving():
+		if ground_speed > WALK_MIN_SPEED:
+			wanted = LOCOMOTION_WALK
+			_walk_grace_left = WALK_GRACE_SECONDS
+			speed_scale = clampf(ground_speed / WALK_REFERENCE_SPEED, WALK_SPEED_SCALE_MIN, WALK_SPEED_SCALE_MAX)
+		elif _locomotion_state == LOCOMOTION_WALK and _walk_grace_left > 0.0:
+			wanted = LOCOMOTION_WALK
+			_walk_grace_left -= delta
+			speed_scale = _locomotion_speed_scale
+	_play_locomotion(wanted, speed_scale)
+
+
+## Plays `clip` looping on the active body at `speed_scale`, cross-fading from
+## the other clip; a clip that is already playing only takes the new speed.
+func _play_locomotion(clip: StringName, speed_scale: float) -> void:
+	_locomotion_state = clip
+	_locomotion_speed_scale = speed_scale
+	if soul_bodies == null:
+		return
+	var anim_player := soul_bodies.get_animation_player()
+	if anim_player == null or not anim_player.has_animation(clip):
+		return
+	anim_player.speed_scale = speed_scale
+	if StringName(anim_player.current_animation) != clip or not anim_player.is_playing():
+		anim_player.play(clip, LOCOMOTION_BLEND_SECONDS)
 
 
 # --- Manual paths and stuck detection -------------------------------------------

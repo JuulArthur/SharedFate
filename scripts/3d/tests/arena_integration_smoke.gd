@@ -262,6 +262,9 @@ func _step_models() -> String:
 	var active_body := _player.soul_bodies.get_active_body()
 	if active_body == null or active_body.name != &"Knight" or not active_body.visible:
 		return "the visible body is %s, expected the Knight" % (active_body.name if active_body != null else "none")
+	var clips := _player.soul_bodies.get_animation_player()
+	if clips == null or not clips.has_animation(&"idle") or not clips.has_animation(&"walk"):
+		return "the active body has no AnimationPlayer with 'idle' and 'walk' (WP11)"
 	var held := _player.soul_bodies.get_held_weapon_mesh()
 	if held == null:
 		return "the active soul's model has no held weapon mesh"
@@ -322,11 +325,23 @@ func _step_click_to_move() -> String:
 	_main._request_player_move(start + Vector3(EXPLORATION_STEP_M, 0.0, 0.0))
 	if not _player.is_moving():
 		return "the player did not start moving after _request_player_move"
-	if not await _wait_until(func() -> bool: return not _player.is_moving(), MOVE_TIMEOUT_SECONDS):
+	# WP11: the body plays its walk clip on the way.
+	var walk_seen: Array[bool] = [false]
+	var arrived := func() -> bool:
+		if _player.get_locomotion_state() == &"walk":
+			walk_seen[0] = true
+		return not _player.is_moving()
+	if not await _wait_until(arrived, MOVE_TIMEOUT_SECONDS):
 		return "the player is still moving after %.1f s" % MOVE_TIMEOUT_SECONDS
 	var moved := GroundMath.ground_distance(start, _player.global_position)
 	if moved < EXPLORATION_STEP_M - 0.6:
 		return "the player moved %.2f m toward a point %.1f m away" % [moved, EXPLORATION_STEP_M]
+	if not walk_seen[0]:
+		return "the player moved %.2f m without the walk clip playing" % moved
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if _player.get_locomotion_state() != &"idle":
+		return "the body plays '%s' after the move, expected 'idle'" % _player.get_locomotion_state()
 	if _main.combat_state != Main3D.CombatState.EXPLORATION:
 		return "combat started during the exploration move (state %d)" % _main.combat_state
 	return ""

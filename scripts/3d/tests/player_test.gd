@@ -55,6 +55,19 @@ const WEAPON_ANIMATIONS: Array[StringName] = [
 	Item.ARCHETYPE_MELEE_SLASH, Item.ARCHETYPE_CAST_STAFF, Item.ARCHETYPE_RANGED_BOW]
 const ANIMATION_SAMPLES: Array[float] = [0.0, 0.06, 0.12, 0.15, 0.18, 0.26, 0.32, 0.4, 0.45, 0.55]
 
+# WP11 locomotion: a 5 m walk in exploration, clear of the stub targets.
+const WALK_GOAL := Vector3(0.0, 0.0, 5.0)
+const WALK_ARRIVE_M := 0.3
+const WALK_TIMEOUT_SECONDS := 4.0
+const WALK_SPEED_SCALE_TOLERANCE := 0.15
+# The right arm counter-swings about 25 degrees each way, so the hand travels
+# well over this along the body's forward axis during one stride.
+const MIN_HAND_SWING_M := 0.15
+const LOCOMOTION_CLIPS: Array[StringName] = [&"idle", &"walk"]
+# When the walk is shifted to another soul mid-stride the new body resumes at
+# the same point of the clip (seconds of clip time).
+const SHIFT_PHASE_TOLERANCE_S := 0.05
+
 @onready var camera: Camera3D = $Camera3D
 @onready var sun: DirectionalLight3D = $Sun
 @onready var nav_region: NavigationRegion3D = $NavigationRegion3D
@@ -164,6 +177,7 @@ func _run() -> void:
 		_step_weapon,
 		_step_free_shifting,
 		_step_bodies,
+		_step_locomotion,
 		_step_turn_shifting,
 		_step_melee,
 		_step_throw,
@@ -415,6 +429,166 @@ func _weapon_axis_problem(label: String, points_up: bool) -> String:
 	if not points_up and axis.y >= 0.0:
 		return "%s: the blade points up (axis %s in body space)" % [label, axis]
 	return ""
+
+
+## 2c. Locomotion clips (WP11): every soul body carries an AnimationPlayer with
+## looping `idle` and `walk`; walking to a point 5 m away plays `walk`, scaled
+## to the ground speed, with the arm swinging and the transferred weapon riding
+## the hand; a shift mid-stride hands the walk to the new body at the same
+## point of the clip; on arrival the body goes back to `idle`.
+func _step_locomotion() -> String:
+	await _pause(0.05)
+	var bodies := player.soul_bodies
+	if bodies == null:
+		return "locomotion: Player/Model is not a SoulBodies3D"
+	for kind in range(BODY_NODES.size()):
+		var body := bodies.get_node_or_null(BODY_NODES[kind]) as Node3D
+		if body == null:
+			return "locomotion: no %s body under Player/Model" % BODY_NODES[kind]
+		var found := body.find_children("*", "AnimationPlayer", true, false)
+		if found.is_empty():
+			return "locomotion: the %s body has no AnimationPlayer" % BODY_NODES[kind]
+		var body_player := found[0] as AnimationPlayer
+		for clip in LOCOMOTION_CLIPS:
+			if not body_player.has_animation(clip):
+				return "locomotion: the %s AnimationPlayer has no '%s'" % [BODY_NODES[kind], clip]
+			if body_player.get_animation(clip).loop_mode == Animation.LOOP_NONE:
+				return "locomotion: the %s '%s' clip does not loop" % [BODY_NODES[kind], clip]
+		if kind == bodies.get_active_kind() and bodies.get_animation_player() != body_player:
+			return "locomotion: get_animation_player() is not the active %s body's player" % BODY_NODES[kind]
+	if player.get_active_soul().kind != Soul.Kind.KNIGHT:
+		return "locomotion: expected the knight in control, got %s" % player.get_active_soul().title
+
+	# Standing still: idle.
+	var failure := _expect_clip(&"idle", "standing")
+	if not failure.is_empty():
+		return failure
+
+	player.set_navigation_target(WALK_GOAL)
+	var walk_seen := false
+	var shifted_to_rogue := false
+	var shifted_back := false
+	var swing_min := INF
+	var swing_max := -INF
+	var worst_hand_gap := 0.0
+	var worst_weapon_gap := 0.0
+	var samples := 0
+	var started := Time.get_ticks_msec()
+	while player.is_moving():
+		await get_tree().physics_frame
+		var elapsed := float(Time.get_ticks_msec() - started) / 1000.0
+		if elapsed > WALK_TIMEOUT_SECONDS:
+			return "locomotion: still walking after %.1f s" % WALK_TIMEOUT_SECONDS
+		if elapsed < 0.3 or not player.is_moving():
+			continue
+		walk_seen = true
+		failure = _expect_clip(&"walk", "walking at %.2f s" % elapsed)
+		if not failure.is_empty():
+			return failure
+		var anim := bodies.get_animation_player()
+		var ground_speed := Vector2(player.velocity.x, player.velocity.z).length()
+		var expected_scale := ground_speed / Player3D.WALK_REFERENCE_SPEED
+		if absf(anim.speed_scale - expected_scale) > WALK_SPEED_SCALE_TOLERANCE:
+			return "locomotion: walk speed_scale %.2f at %.2f m/s, expected about %.2f" \
+				% [anim.speed_scale, ground_speed, expected_scale]
+
+		# A shift mid-stride: the rogue picks the walk up where the knight was.
+		if not shifted_to_rogue and elapsed >= 0.55:
+			shifted_to_rogue = true
+			failure = _shift_mid_walk(Soul.Kind.ROGUE)
+			if not failure.is_empty():
+				return failure
+			continue
+		if shifted_to_rogue and not shifted_back and elapsed >= 0.8:
+			shifted_back = true
+			failure = _shift_mid_walk(Soul.Kind.KNIGHT)
+			if not failure.is_empty():
+				return failure
+			continue
+		# The weapon rides the swinging hand, whichever soul walks (the shift
+		# punch scales hand and body together, so it needs no exemption).
+		var gaps := _hand_and_weapon_gaps()
+		worst_hand_gap = maxf(worst_hand_gap, gaps.x)
+		worst_weapon_gap = maxf(worst_weapon_gap, gaps.y)
+		var hand_forward := -(player.global_transform.affine_inverse() * bodies.get_hand_point().global_position).z
+		swing_min = minf(swing_min, hand_forward)
+		swing_max = maxf(swing_max, hand_forward)
+		samples += 1
+
+	if not walk_seen:
+		return "locomotion: never saw the player walking"
+	if not shifted_back:
+		return "locomotion: the walk ended before the mid-stride shifts (%.2f s)" \
+			% (float(Time.get_ticks_msec() - started) / 1000.0)
+	if samples == 0:
+		return "locomotion: no hand samples while walking"
+	var swing := swing_max - swing_min
+	if swing < MIN_HAND_SWING_M:
+		return "locomotion: the hand swung only %.3f m along the body's forward axis while walking, expected at least %.2f m" \
+			% [swing, MIN_HAND_SWING_M]
+	if worst_hand_gap > HAND_TOLERANCE_M:
+		return "locomotion: HandPoint was %.3f m from the body's hand while walking" % worst_hand_gap
+	if worst_weapon_gap > HAND_TOLERANCE_M:
+		return "locomotion: the weapon was %.3f m from where the body's hand holds it while walking" % worst_weapon_gap
+	var arrival_gap := GroundMath.ground_distance(player.global_position, WALK_GOAL)
+	if arrival_gap > WALK_ARRIVE_M:
+		return "locomotion: stopped %.2f m from the goal" % arrival_gap
+
+	# Arrived: back to idle once the cross-fade has had a frame or two.
+	await _pause(0.1)
+	failure = _expect_clip(&"idle", "after arriving")
+	if not failure.is_empty():
+		return failure
+	print("[player_test] walk: %d samples, hand %.3f m / weapon %.3f m off at worst, hand swing %.2f m (%.2f..%.2f m forward), arrived %.2f m from the goal"
+		% [samples, worst_hand_gap, worst_weapon_gap, swing, swing_min, swing_max, arrival_gap])
+
+	player.snap_to(Vector3.ZERO)
+	await _pause(0.1)
+	return ""
+
+
+func _expect_clip(clip: StringName, label: String) -> String:
+	var anim := player.soul_bodies.get_animation_player()
+	if anim == null:
+		return "locomotion (%s): the active body has no AnimationPlayer" % label
+	if player.get_locomotion_state() != clip:
+		return "locomotion (%s): player state '%s', expected '%s'" % [label, player.get_locomotion_state(), clip]
+	if StringName(anim.current_animation) != clip or not anim.is_playing():
+		return "locomotion (%s): the body plays '%s' (playing %s), expected '%s'" \
+			% [label, anim.current_animation, str(anim.is_playing()), clip]
+	return ""
+
+
+func _shift_mid_walk(kind: Soul.Kind) -> String:
+	var before := player.soul_bodies.get_animation_player()
+	var position_before := before.current_animation_position
+	if not _shift(kind):
+		return "locomotion: shift_to(%s) refused mid-walk" % Soul.kind_title(kind)
+	var after := player.soul_bodies.get_animation_player()
+	if after == before:
+		return "locomotion: the %s body shares the old body's AnimationPlayer" % Soul.kind_title(kind)
+	if StringName(after.current_animation) != &"walk" or not after.is_playing():
+		return "locomotion: after the shift to %s the new body plays '%s', expected 'walk'" \
+			% [Soul.kind_title(kind), after.current_animation]
+	var phase_gap := absf(after.current_animation_position - position_before)
+	if phase_gap > SHIFT_PHASE_TOLERANCE_S:
+		return "locomotion: the %s body resumed the walk at %.3f s, the old body was at %.3f s" \
+			% [Soul.kind_title(kind), after.current_animation_position, position_before]
+	if not is_equal_approx(after.speed_scale, before.speed_scale):
+		return "locomotion: the %s body walks at speed_scale %.2f, the old body at %.2f" \
+			% [Soul.kind_title(kind), after.speed_scale, before.speed_scale]
+	return ""
+
+
+## x: player HandPoint to the body's HandPoint; y: EquippedWeaponMesh to where
+## the body's hand holds it (the body's HandPoint, the resting holder and the
+## soul's weapon fit).
+func _hand_and_weapon_gaps() -> Vector2:
+	var body_hand := player.soul_bodies.get_hand_point()
+	var hand_gap := player.hand_point.global_position.distance_to(body_hand.global_position)
+	var held_at := (body_hand.global_transform.orthonormalized() * player.soul_bodies.get_weapon_fit()).origin
+	var weapon_gap := player.equipped_weapon_mesh.global_position.distance_to(held_at)
+	return Vector2(hand_gap, weapon_gap)
 
 
 ## 3. Turn mode: one shift per turn.

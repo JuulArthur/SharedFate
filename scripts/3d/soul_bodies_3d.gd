@@ -19,14 +19,31 @@ extends Node3D
 ## the held weapon stays hidden; an off-hand weapon (the rogue's `Dagger_L`)
 ## stays visible in the model.
 ##
-## The imported trees nest the empties and the weapons under `<Name>_Body`
-## (docs/deviations/wp8.md, deviation 1), so every lookup is recursive. All
-## transforms are measured through the local transform chain at `_ready`, when
-## nothing is tweened yet, so a scale punch or an attack lunge running at the
-## moment of a shift never leaks into the hand or anchor positions.
+## Every lookup is by name and recursive, so it does not depend on where the
+## glTF importer puts things. Since WP11 the bodies are rigged
+## (docs/deviations/wp11.md): the tree is `<Name>/<Name>_Armature/Skeleton3D`
+## with the skinned `<Name>_Body` (and `Knight_Cape`) under the skeleton,
+## `HandPoint` and the right-hand weapon under a `BoneAttachment3D` named
+## `LowerArm_R`, the rogue's `Dagger_L` under `LowerArm_L`, `OverheadAnchor`
+## under the armature node, and an `AnimationPlayer` with looping `idle` and
+## `walk` at the root. The rest transforms are measured through the local
+## transform chain at `_ready`, substituting the skeleton's bone rest for a
+## bone attachment, so a scale punch, an attack lunge or a half-played walk at
+## the moment of a shift never leaks into the fit.
+##
+## The hand moves with the arm now: `get_live_hand_transform()` is the active
+## body's `HandPoint` as the skeleton currently poses it, and
+## `active_pose_updated` fires whenever the active skeleton has a new pose, so
+## the player can move its own `HandPoint` (and the weapon under it) along.
+
+## Emitted after the active body's skeleton computed a new pose.
+signal active_pose_updated
 
 const HAND_POINT_NAME := "HandPoint"
 const OVERHEAD_ANCHOR_NAME := "OverheadAnchor"
+## The imported clips every body must loop (WP11). The import settings set
+## their loop mode; `_ready` enforces it again for a file imported without.
+const LOCOMOTION_CLIPS: Array[StringName] = [&"idle", &"walk"]
 ## The shift effect: the new body grows from this scale back to its rest scale.
 const SHIFT_PUNCH_FROM_SCALE := 0.85
 const SHIFT_PUNCH_SECONDS := 0.15
@@ -64,6 +81,9 @@ class Body:
 	## The held weapon relative to the HandPoint as modelled, plus the soul's fit.
 	var weapon_fit := Transform3D.IDENTITY
 	var overhead_height := 0.0
+	## The rig (WP11); either may be null for an unrigged body.
+	var skeleton: Skeleton3D = null
+	var animation_player: AnimationPlayer = null
 
 
 var _bodies: Array[Body] = []
@@ -80,7 +100,16 @@ func _ready() -> void:
 	if _bodies.is_empty():
 		push_warning("%s: no soul bodies found under %s" % [name, get_path()])
 		return
+	# The attack lunge, recoil and squash tween this node after the skeleton
+	# has updated for the frame; a local transform notification re-announces
+	# the pose so a follower of the hand does not trail those by a frame.
+	set_notify_local_transform(true)
 	show_soul(initial_kind)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_LOCAL_TRANSFORM_CHANGED and _active != null:
+		active_pose_updated.emit()
 
 
 ## Makes the body of soul `kind` (a `Soul.Kind` value) the only visible one.
@@ -91,12 +120,15 @@ func show_soul(kind: int) -> bool:
 		push_warning("%s: no body for soul kind %d" % [name, kind])
 		return false
 	_stop_punch()
+	var previous := _active
 	for body in _bodies:
 		var active := body == wanted
 		body.root.visible = active
 		body.root.process_mode = Node.PROCESS_MODE_INHERIT if active else Node.PROCESS_MODE_DISABLED
 		body.root.transform = body.rest_transform
 	_active = wanted
+	if previous != null and previous != wanted:
+		_carry_animation_state(previous, wanted)
 	return true
 
 
@@ -108,9 +140,11 @@ func punch_active_body() -> void:
 		return
 	_stop_punch()
 	var rest_scale := _active.rest_transform.basis.get_scale()
-	_active.root.scale = rest_scale * SHIFT_PUNCH_FROM_SCALE
+	_set_punch_scale(rest_scale * SHIFT_PUNCH_FROM_SCALE)
+	# A method tween, so every step also re-announces the pose: the tween runs
+	# after the skeleton's update for the frame and the hand would trail it.
 	_punch = create_tween()
-	_punch.tween_property(_active.root, "scale", rest_scale, SHIFT_PUNCH_SECONDS) \
+	_punch.tween_method(_set_punch_scale, rest_scale * SHIFT_PUNCH_FROM_SCALE, rest_scale, SHIFT_PUNCH_SECONDS) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
@@ -132,10 +166,31 @@ func get_hand_point() -> Node3D:
 	return _active.hand if _active != null else null
 
 
-## The active body's `HandPoint` in the parent's space at rest; Player3D puts
-## its own `HandPoint` here.
+## The active body's `HandPoint` in the parent's space at rest.
 func get_hand_transform() -> Transform3D:
 	return _active.hand_transform if _active != null else Transform3D.IDENTITY
+
+
+## The active body's `HandPoint` in the parent's space as the skeleton poses it
+## right now, through this node's and the body's current transforms (so it
+## follows the walk, the attack lunge and the shift punch). The basis is
+## orthonormalised: the `Model:scale` squash of an attack must not squash the
+## weapon. Falls back to the rest transform for an unrigged body.
+func get_live_hand_transform() -> Transform3D:
+	if _active == null or _active.hand == null:
+		return get_hand_transform()
+	var live := transform * _active.root.transform * _chain_to(_active.hand, _active.root, true)
+	return live.orthonormalized()
+
+
+## The active body's AnimationPlayer with the `idle` and `walk` clips, or null.
+func get_animation_player() -> AnimationPlayer:
+	return _active.animation_player if _active != null else null
+
+
+## The active body's Skeleton3D, or null.
+func get_skeleton() -> Skeleton3D:
+	return _active.skeleton if _active != null else null
 
 
 ## Height of the active body's `OverheadAnchor` above the parent's origin (the
@@ -193,6 +248,18 @@ func _describe_body(index: int) -> Body:
 	body.rest_transform = root.transform
 	body.hand = root.find_child(HAND_POINT_NAME, true, false) as Node3D
 	body.overhead = root.find_child(OVERHEAD_ANCHOR_NAME, true, false) as Node3D
+	body.skeleton = _first_of_class(root, "Skeleton3D") as Skeleton3D
+	body.animation_player = _first_of_class(root, "AnimationPlayer") as AnimationPlayer
+	if body.animation_player != null:
+		for clip in LOCOMOTION_CLIPS:
+			if not body.animation_player.has_animation(clip):
+				push_warning("%s: %s has no '%s' animation" % [name, root.name, clip])
+				continue
+			var anim := body.animation_player.get_animation(clip)
+			if anim.loop_mode == Animation.LOOP_NONE:
+				anim.loop_mode = Animation.LOOP_LINEAR
+	if body.skeleton != null:
+		body.skeleton.skeleton_updated.connect(_on_skeleton_updated.bind(index))
 
 	var to_parent := transform * body.rest_transform
 	var hand_in_root := _chain_to(body.hand, root) if body.hand != null else Transform3D.IDENTITY
@@ -226,16 +293,62 @@ func _describe_body(index: int) -> Body:
 
 
 ## `node`'s transform in `root`'s space, from the local transforms, so it works
-## before the node is in the tree and ignores `root`'s own transform.
-static func _chain_to(node: Node3D, root: Node3D) -> Transform3D:
+## before the node is in the tree and ignores `root`'s own transform. A
+## `BoneAttachment3D` under a skeleton stands for its bone: at rest
+## (`live` false) the bone's global rest, else the bone's current global pose,
+## read from the skeleton rather than from the attachment, which only catches
+## up when the skeleton next updates.
+static func _chain_to(node: Node3D, root: Node3D, live: bool = false) -> Transform3D:
 	var result := Transform3D.IDENTITY
 	var current: Node = node
 	while current != null and current != root:
+		var attachment := current as BoneAttachment3D
+		var skeleton := current.get_parent() as Skeleton3D
+		if attachment != null and skeleton != null:
+			var bone := skeleton.find_bone(attachment.bone_name)
+			if bone >= 0:
+				var bone_pose := skeleton.get_bone_global_pose(bone) if live else skeleton.get_bone_global_rest(bone)
+				result = bone_pose * result
+				current = skeleton
+				continue
 		var spatial := current as Node3D
 		if spatial != null:
 			result = spatial.transform * result
 		current = current.get_parent()
 	return result
+
+
+static func _first_of_class(root: Node, type_name: String) -> Node:
+	var found := root.find_children("*", type_name, true, false)
+	return found[0] if not found.is_empty() else null
+
+
+## A shift hands the locomotion over: the new body plays what the old one was
+## playing, from the same point and at the same speed, so a shift mid-stride
+## keeps the stride instead of snapping to the start of a clip.
+func _carry_animation_state(from: Body, to: Body) -> void:
+	var source := from.animation_player
+	var target := to.animation_player
+	if source == null or target == null:
+		return
+	var clip := StringName(source.current_animation)
+	if clip == &"" or not target.has_animation(clip):
+		return
+	target.speed_scale = source.speed_scale
+	target.play(clip, 0.0)
+	target.seek(fmod(source.current_animation_position, target.current_animation_length), true)
+
+
+func _set_punch_scale(value: Vector3) -> void:
+	if _active == null or not is_instance_valid(_active.root):
+		return
+	_active.root.scale = value
+	active_pose_updated.emit()
+
+
+func _on_skeleton_updated(kind: int) -> void:
+	if _active != null and _active.kind == kind:
+		active_pose_updated.emit()
 
 
 func _body_of_kind(kind: int) -> Body:
