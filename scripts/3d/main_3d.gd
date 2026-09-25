@@ -17,11 +17,21 @@ extends Node3D
 # Orthographic size handed to the CameraRig (contract, section 2).
 const CAMERA_SIZE_M := 14.0
 const TURN_MOVE_METERS := 6.0
-const COMBAT_TRIGGER_DISTANCE_CELLS := 6
+# WP13: combat no longer starts by the 2D Manhattan-cell proximity
+# (COMBAT_TRIGGER_DISTANCE_CELLS, 6). It starts when an enemy spots the player
+# (`Enemy3D.can_spot`: inside its `detection_range` ring with a clear line of
+# sight) or when the player lands a hit on an enemy in exploration (an ambush,
+# `provoked_by_hit`). An enemy without `can_spot` (the WP0 stub) is read
+# through its `detection_range` / `aggro_range` property as a plain distance.
+const DETECTION_RANGE_PROPERTIES: Array[StringName] = [&"detection_range", &"aggro_range"]
 # How far (in turn meters) from the player an enemy can be and still be part of
 # a fight. On a big map this is what keeps one pack's fight from also taking
-# turns for every other pack; newcomers join as they close in.
-const ENGAGE_RADIUS_METERS := 9.0
+# turns for every other pack; newcomers join as they close in. WP13 raised it
+# from the 2D 9.0 so a pack spread around a clearing joins its spotter.
+const ENGAGE_RADIUS_METERS := 12.0
+# Banners for the two ways a fight starts (WP13): spotted, or the first strike.
+const ANNOUNCE_COMBAT := "COMBAT!"
+const ANNOUNCE_AMBUSH := "AMBUSH!"
 const PLAYER_SPAWN_OFFSET := Vector2i(-6, 0)
 # Enemy turn pacing: a short beat before the first enemy acts, a gap between
 # enemies so the camera can settle on each one, and a beat before control
@@ -207,9 +217,17 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 		var clicked_enemy := _pick_enemy(screen_pos)
-		if clicked_enemy != null and player.has_method("set_attack_target"):
-			# attack_target system handles navigation internally via _refresh_attack_target_position
-			player.call("set_attack_target", clicked_enemy)
+		if clicked_enemy != null:
+			# WP13: the HUD's Throw and spell aims work in exploration too; a
+			# plain click (or the Melee aim) is the click-to-attack pursuit.
+			if selected_player_turn_action == PlayerTurnAction.RANGED:
+				_request_exploration_ranged_attack(clicked_enemy as CharacterBody3D)
+			elif selected_player_turn_action == PlayerTurnAction.SPELL:
+				_request_exploration_spell(clicked_enemy as CharacterBody3D)
+			elif player.has_method("set_attack_target"):
+				# attack_target system handles navigation internally via _refresh_attack_target_position
+				player.call("set_attack_target", clicked_enemy)
+				_set_player_turn_action(PlayerTurnAction.MOVE)
 			get_viewport().set_input_as_handled()
 			return
 		var ground: Variant = _pick_ground(screen_pos)
@@ -245,6 +263,18 @@ func _register_placed_enemies() -> void:
 	extra_enemies.clear()
 	for i in range(1, found.size()):
 		extra_enemies.append(found[i])
+	for enemy_actor in found:
+		_connect_enemy_signals(enemy_actor)
+
+
+# WP13: an enemy that takes a hit outside turn mode reports it; the fight then
+# starts as an ambush. Duck-typed like the rest of the actor contract.
+func _connect_enemy_signals(enemy_actor: CharacterBody3D) -> void:
+	if enemy_actor == null or not enemy_actor.has_signal("provoked_by_hit"):
+		return
+	var handler := Callable(self, "_on_enemy_provoked_by_hit").bind(enemy_actor)
+	if not enemy_actor.is_connected("provoked_by_hit", handler):
+		enemy_actor.connect("provoked_by_hit", handler)
 
 
 func _wire_enemy_ai_targets() -> void:
@@ -556,7 +586,7 @@ func _update_combat_state() -> void:
 		return
 
 	if combat_state == CombatState.EXPLORATION:
-		if _is_close_enough_for_combat_start():
+		if _find_spotting_enemy() != null:
 			_start_turn_based_combat()
 		return
 
@@ -564,22 +594,80 @@ func _update_combat_state() -> void:
 		_run_enemy_turn()
 
 
-func _is_close_enough_for_combat_start() -> bool:
-	var player_cell := GroundMath.to_cell(player.global_position)
+# The enemy that has just spotted the player, or null. The rule is the enemy's
+# own `can_spot` (its ring and its line of sight); a stub without it is read as
+# a plain distance against its detection property. WP13 replaced the 2D
+# Manhattan-cell trigger with this so the visible ring is the real rule.
+func _find_spotting_enemy() -> CharacterBody3D:
 	for enemy_actor in _get_all_alive_enemies():
-		var enemy_cell := GroundMath.to_cell(enemy_actor.global_position)
-		if GroundMath.manhattan(player_cell, enemy_cell) <= COMBAT_TRIGGER_DISTANCE_CELLS:
-			return true
+		if _enemy_can_spot_player(enemy_actor):
+			return enemy_actor
+	return null
+
+
+func _enemy_can_spot_player(enemy_actor: CharacterBody3D) -> bool:
+	if enemy_actor == null or not is_instance_valid(enemy_actor):
+		return false
+	if enemy_actor.has_method("can_spot"):
+		return bool(enemy_actor.call("can_spot", player))
+	for property_name in DETECTION_RANGE_PROPERTIES:
+		var value: Variant = enemy_actor.get(property_name)
+		if value == null:
+			continue
+		var detection := float(value)
+		if detection <= 0.0:
+			return false
+		return GroundMath.ground_distance(player.global_position, enemy_actor.global_position) <= detection
 	return false
 
 
-func _start_turn_based_combat() -> void:
-	# Decide who is in this fight while we can still see every enemy.
+# WP13: a hit landed on `enemy_actor` while exploring. The hit has resolved
+# already; the fight itself starts at the end of the frame, once a lethal hit
+# has finished dying, so a struck enemy that died is not counted.
+func _on_enemy_provoked_by_hit(enemy_actor: CharacterBody3D) -> void:
+	if combat_state != CombatState.EXPLORATION:
+		return
+	call_deferred("_start_ambush_combat", enemy_actor)
+
+
+# The first strike is the reward: the struck enemy and everyone within the
+# joining radius engage, and the enemies take the first turn. When the only
+# witness died of the hit and nobody else is near, nothing starts.
+func _start_ambush_combat(struck_enemy: CharacterBody3D) -> void:
+	if combat_state != CombatState.EXPLORATION:
+		return
+	if player == null or not is_instance_valid(player):
+		return
+	if player.has_method("is_alive") and not bool(player.call("is_alive")):
+		return
 	engaged_enemies.clear()
+	if struck_enemy != null and is_instance_valid(struck_enemy):
+		var struck_alive := not struck_enemy.has_method("is_alive") or bool(struck_enemy.call("is_alive"))
+		if struck_alive:
+			engaged_enemies[struck_enemy.get_instance_id()] = true
 	_refresh_engaged_enemies()
+	var anyone_engaged := false
+	for enemy_actor in _get_all_alive_enemies_unfiltered():
+		if engaged_enemies.has(enemy_actor.get_instance_id()):
+			anyone_engaged = true
+			break
+	if not anyone_engaged:
+		engaged_enemies.clear()
+		return
+	_start_turn_based_combat(true)
+
+
+# Starts turn combat. Spotted (`ambush` false): the fight is scoped here and
+# the player acts first, as in 2D. Ambush (WP13): the caller has already scoped
+# the fight and the enemies act first; the player's turn follows as usual.
+func _start_turn_based_combat(ambush: bool = false) -> void:
+	if not ambush:
+		# Decide who is in this fight while we can still see every enemy.
+		engaged_enemies.clear()
+		_refresh_engaged_enemies()
 	_stop_all_combatants_immediately()
 	_set_player_turn_action(PlayerTurnAction.MOVE)
-	combat_state = CombatState.PLAYER_TURN
+	combat_state = CombatState.ENEMY_TURN if ambush else CombatState.PLAYER_TURN
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
 
@@ -595,16 +683,20 @@ func _start_turn_based_combat() -> void:
 		if enemy_actor.has_method("set_turn_based_combat"):
 			enemy_actor.call("set_turn_based_combat", true)
 
-	if player.has_method("start_turn"):
+	if not ambush and player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
 	for enemy_actor in _get_all_alive_enemies():
 		if enemy_actor.has_method("end_turn"):
 			enemy_actor.call("end_turn")
 
 	_crossfade_music(music_combat, music_exploration)
-	CombatFx.announce("COMBAT!", CombatFx.COLOR_COMBAT, 0.7)
+	if ambush:
+		CombatFx.announce(ANNOUNCE_AMBUSH, CombatFx.COLOR_COMBAT, 0.7)
+		print("Turn-based combat started (ambush, enemies act first)")
+	else:
+		CombatFx.announce(ANNOUNCE_COMBAT, CombatFx.COLOR_COMBAT, 0.7)
+		print("Turn-based combat started")
 	CombatFx.shake(4.0, 0.2)
-	print("Turn-based combat started")
 	_update_turn_ui()
 
 
@@ -786,6 +878,87 @@ func _request_player_turn_spell(target_enemy: CharacterBody3D = null) -> void:
 	player_turn_action_running = false
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	_update_turn_ui()
+
+
+# --- Exploration attacks (WP13) --------------------------------------------------
+# The throw and the spells outside combat, with the turn mode's rings, targeting
+# and refusals. The player stands still to throw or cast. A hit that lands
+# starts the fight as an ambush through `provoked_by_hit`; a refused or missed
+# attack starts nothing. Melee in exploration is the click-to-attack pursuit and
+# the Space sweep, which the player already owns.
+
+func _request_exploration_ranged_attack(target_enemy: CharacterBody3D = null) -> void:
+	if combat_state != CombatState.EXPLORATION:
+		return
+	if player_turn_action_running:
+		return
+	if not player.has_method("try_ranged_attack"):
+		return
+	if target_enemy == null:
+		target_enemy = _get_closest_enemy_to_player()
+	if target_enemy == null:
+		return
+	var max_dist := _get_ranged_attack_range_world()
+	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > max_dist:
+		_fx_popup(_popup_anchor(target_enemy), "Out of range", CombatFx.COLOR_WARNING, 16)
+		return
+
+	_stop_player_for_exploration_attack()
+	player_turn_action_running = true
+	await player.try_ranged_attack(target_enemy)
+	player_turn_action_running = false
+	if combat_state == CombatState.EXPLORATION:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+	_update_turn_ui()
+
+
+func _request_exploration_spell(target_enemy: CharacterBody3D = null) -> void:
+	if combat_state != CombatState.EXPLORATION:
+		return
+	if player_turn_action_running:
+		return
+	if not player.has_method("try_cast_spell"):
+		return
+	var spell := _get_selected_spell()
+	if spell == null:
+		return
+	var cooldown := 0
+	if player.has_method("get_spell_cooldown"):
+		cooldown = int(player.call("get_spell_cooldown", spell.id))
+	if cooldown > 0:
+		_fx_popup(_popup_anchor(player), "Recharging (%d)" % cooldown, CombatFx.COLOR_WARNING, 16)
+		return
+	if target_enemy == null:
+		target_enemy = _get_closest_enemy_to_player()
+	if target_enemy == null:
+		return
+	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > _get_spell_range_world(spell):
+		_fx_popup(_popup_anchor(target_enemy), "Out of range", CombatFx.COLOR_WARNING, 16)
+		return
+
+	_stop_player_for_exploration_attack()
+	player_turn_action_running = true
+	await player.try_cast_spell(spell.id, target_enemy)
+	player_turn_action_running = false
+	if combat_state == CombatState.EXPLORATION:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+	_update_turn_ui()
+
+
+# A throw or a cast is made standing: drop the walk and any melee pursuit.
+func _stop_player_for_exploration_attack() -> void:
+	if player.has_method("clear_attack_target"):
+		player.call("clear_attack_target")
+	if player.has_method("stop_movement_immediately"):
+		player.call("stop_movement_immediately")
+
+
+# Whether the HUD's attack aims (Melee, Throw, spells) may be picked right now:
+# on the player's turn, or in exploration (WP13).
+func _player_can_pick_attack_aim() -> bool:
+	if player_turn_action_running:
+		return false
+	return combat_state == CombatState.PLAYER_TURN or combat_state == CombatState.EXPLORATION
 
 
 func _request_player_turn_engage_enemy(target_enemy: CharacterBody3D = null) -> void:
@@ -1423,6 +1596,7 @@ func _spawn_additional_enemy(target_cell: Vector2i, search_radius: int = 6) -> C
 		enemy = actor
 	else:
 		extra_enemies.append(actor)
+	_connect_enemy_signals(actor)
 	if actor.has_method("set_target"):
 		actor.call("set_target", player)
 	if combat_state != CombatState.EXPLORATION and actor.has_method("set_turn_based_combat"):
@@ -1569,6 +1743,10 @@ func _update_range_rings() -> void:
 	var show := combat_state == CombatState.PLAYER_TURN and not InventoryScreen.is_open()
 	if show and player.has_method("can_turn_attack"):
 		show = bool(player.call("can_turn_attack"))
+	# WP13: in exploration the rings show only while an aim is picked, so the
+	# enemies' detection rings stay readable the rest of the time.
+	if combat_state == CombatState.EXPLORATION and not InventoryScreen.is_open():
+		show = selected_player_turn_action != PlayerTurnAction.MOVE
 	if not show:
 		melee_range_ring.hide_ring()
 		ranged_range_ring.hide_ring()
@@ -1978,14 +2156,16 @@ func _update_turn_ui() -> void:
 	turn_ui_panel.visible = in_turn_mode
 	if turn_ui_order_panel != null:
 		turn_ui_order_panel.visible = in_turn_mode
+	# WP13: the action row stays up in exploration with the attacks the soul
+	# can open a fight with (Melee, Throw, the spells); Block, Wait and End
+	# Turn belong to a turn and are hidden there.
 	if turn_ui_actions_panel != null:
-		turn_ui_actions_panel.visible = in_turn_mode
-	if not in_turn_mode:
-		return
+		turn_ui_actions_panel.visible = true
 
-	var alive_enemies := _get_all_alive_enemies()
-	if turn_ui_enemy_icon_entries.size() != alive_enemies.size():
-		_rebuild_turn_enemy_icons()
+	if in_turn_mode:
+		var alive_enemies := _get_all_alive_enemies()
+		if turn_ui_enemy_icon_entries.size() != alive_enemies.size():
+			_rebuild_turn_enemy_icons()
 
 	var can_attack := false
 	var is_blocking := false
@@ -1994,9 +2174,10 @@ func _update_turn_ui() -> void:
 	if player != null and player.has_method("is_blocking"):
 		is_blocking = bool(player.call("is_blocking"))
 
-	var can_player_use_actions := combat_state == CombatState.PLAYER_TURN and not player_turn_action_running
-	if can_player_use_actions and player != null and player.has_method("is_moving"):
+	var can_player_use_actions := _player_can_pick_attack_aim()
+	if can_player_use_actions and combat_state == CombatState.PLAYER_TURN and player != null and player.has_method("is_moving"):
 		can_player_use_actions = not bool(player.call("is_moving"))
+	var can_player_use_turn_actions := can_player_use_actions and combat_state == CombatState.PLAYER_TURN
 	# An aim that can no longer be carried out - attack spent, or a shift to a
 	# soul without that action - falls back to plain movement.
 	var soul := _get_active_soul()
@@ -2023,8 +2204,8 @@ func _update_turn_ui() -> void:
 				ranged_label += " (Select)"
 			turn_ui_ranged_button.text = ranged_label
 	if turn_ui_block_button != null:
-		turn_ui_block_button.visible = soul == null or soul.can_block_stance
-		turn_ui_block_button.disabled = not can_player_use_actions
+		turn_ui_block_button.visible = in_turn_mode and (soul == null or soul.can_block_stance)
+		turn_ui_block_button.disabled = not can_player_use_turn_actions
 		turn_ui_block_button.text = "Block (Active)" if is_blocking else "Block"
 	for spell_id in turn_ui_spell_buttons:
 		var spell_button := turn_ui_spell_buttons[spell_id] as Button
@@ -2045,20 +2226,25 @@ func _update_turn_ui() -> void:
 			spell_label += " (Select)"
 		spell_button.text = spell_label
 	if turn_ui_wait_button != null:
-		turn_ui_wait_button.disabled = not can_player_use_actions
+		turn_ui_wait_button.visible = in_turn_mode
+		turn_ui_wait_button.disabled = not can_player_use_turn_actions
 	if turn_ui_end_turn_button != null:
-		turn_ui_end_turn_button.disabled = not can_player_use_actions
+		turn_ui_end_turn_button.visible = in_turn_mode
+		turn_ui_end_turn_button.disabled = not can_player_use_turn_actions
 		# Pulse End Turn once there is nothing left to spend, so the eye goes to
 		# the one button that matters.
 		var remaining_move := 0.0
 		if player != null and player.has_method("get_turn_remaining_move_meters"):
 			remaining_move = float(player.call("get_turn_remaining_move_meters"))
-		var nothing_left := can_player_use_actions and not can_attack and remaining_move <= 0.05
+		var nothing_left := can_player_use_turn_actions and not can_attack and remaining_move <= 0.05
 		if nothing_left:
 			var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.008)
 			turn_ui_end_turn_button.modulate = Color.WHITE.lerp(Color(1.45, 1.3, 0.75, 1.0), pulse)
 		else:
 			turn_ui_end_turn_button.modulate = Color.WHITE
+
+	if not in_turn_mode:
+		return
 
 	var player_turn_active := combat_state == CombatState.PLAYER_TURN
 	var player_icon_dim := Color(1.0, 1.0, 1.0, 1.0) if player_turn_active else Color(0.45, 0.45, 0.45, 0.95)
@@ -2175,9 +2361,7 @@ func _set_player_turn_action(action: PlayerTurnAction) -> void:
 
 
 func _on_turn_attack_button_pressed() -> void:
-	if combat_state != CombatState.PLAYER_TURN:
-		return
-	if player_turn_action_running:
+	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.ATTACK:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
@@ -2191,9 +2375,7 @@ func _on_turn_attack_button_pressed() -> void:
 
 
 func _on_turn_ranged_button_pressed() -> void:
-	if combat_state != CombatState.PLAYER_TURN:
-		return
-	if player_turn_action_running:
+	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.RANGED:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
@@ -2207,9 +2389,7 @@ func _on_turn_ranged_button_pressed() -> void:
 
 
 func _on_turn_spell_button_pressed(spell_id: StringName) -> void:
-	if combat_state != CombatState.PLAYER_TURN:
-		return
-	if player_turn_action_running:
+	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.SPELL and selected_spell_id == spell_id:
 		_set_player_turn_action(PlayerTurnAction.MOVE)

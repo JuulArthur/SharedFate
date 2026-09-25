@@ -6,15 +6,17 @@ extends Node
 ##
 ## Headless has no clicks, so once the navmesh is baked this drives the
 ## coordinator's request methods directly through one scripted sequence:
-## exploration move, wait for combat to start by proximity, one turn move
-## within budget, one melee attack, End Turn, one enemy turn. Prints `SMOKE OK`
-## or `SMOKE FAIL: <step>: <reason>` for the first failing step. Run with
+## exploration move, wait for combat to start when the stub enemy spots the
+## player, one turn move within budget, one melee attack, End Turn, one enemy
+## turn. Prints `SMOKE OK` or `SMOKE FAIL: <step>: <reason>` for the first
+## failing step. Run with
 ##
 ##   godot --headless --path . res://scenes/3d/tests/main3d_stub_arena.tscn --quit-after 240
 ##
-## Placement: the stub enemy is 5 m from the spawn (4 cells in x, 3 in z), a
-## Manhattan distance of 7 cells, one more than COMBAT_TRIGGER_DISTANCE_CELLS,
-## so exploration lasts until the first move closes the gap.
+## Placement: the stub enemy is 5 m from the spawn (4 cells in x, 3 in z), one
+## metre outside its 4 m `aggro_range`, which the coordinator reads as the
+## stub's detection distance (WP13; the 2D Manhattan-cell trigger is gone), so
+## exploration lasts until the first move closes the gap.
 
 const Main3D := preload("res://scripts/3d/main_3d.gd")
 
@@ -73,7 +75,8 @@ func _run() -> void:
 		_fail("player did not start moving after _request_player_move")
 		return
 
-	# 3. Combat starts by proximity (Manhattan cell distance <= 6).
+	# 3. Combat starts once the player is inside the stub's 4 m aggro_range
+	# (WP13: the coordinator's detection fallback for an enemy without can_spot).
 	_step = "combat_start"
 	if not await _wait_until(func() -> bool: return main.combat_state == Main3D.CombatState.PLAYER_TURN, STEP_TIMEOUT_SECONDS):
 		_fail("combat did not start within %.1f s (state %d)" % [STEP_TIMEOUT_SECONDS, main.combat_state])

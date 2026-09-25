@@ -7,7 +7,7 @@ extends Node
 ## Headless has no clicks, so this drives the parity checklist of
 ## docs/3d-test-plan.md through the coordinator's request methods and the
 ## actors' APIs, in one scripted fight against the first wolf and then the
-## second: click-to-move, combat start by proximity, movement budget trimming,
+## second: click-to-move, combat start by detection (WP13), movement budget trimming,
 ## melee with the contact delay, the counter window (a simulated perfect press
 ## while the knight is in control negates the bite), one shift per turn, the
 ## rogue throw and both mage spells with their rings, enemy turn pacing, a
@@ -53,7 +53,11 @@ const PLAYER_ANCHOR_HEIGHT_M := 2.245
 const PLAYER_ANCHOR_TOLERANCE_M := 0.01
 const WOLF_ANCHOR_HEIGHT_M := 0.95
 const EXPLORATION_STEP_M := 1.5
-# The second and third wolf wait here, outside the 9 m engagement radius, so
+# WP13: combat starts on the frame the player crosses the detection ring; at
+# 3.5 m/s that is within one physics step of the edge.
+const DETECTION_TOLERANCE_M := 0.05
+const DETECTION_STEP_SLACK_M := 0.5
+# The second and third wolf wait here, outside the 12 m engagement radius, so
 # the scripted fight has one opponent and one enemy turn per beat.
 const PARK_B := Vector3(10.0, 0.0, -10.0)
 const PARK_C := Vector3(10.0, 0.0, 10.0)
@@ -358,13 +362,19 @@ func _step_click_to_move() -> String:
 	return ""
 
 
-## Walking toward the first wolf starts turn combat when the Manhattan cell
-## distance drops to COMBAT_TRIGGER_DISTANCE_CELLS; the other two wolves are
-## parked beyond the engagement radius first.
+## Walking toward the first wolf starts turn combat when the player steps
+## inside its detection ring (WP13: `Enemy3D.can_spot`, 5 m for a wolf), with
+## the player's turn first and the COMBAT! banner; the other two wolves are
+## parked beyond the 12 m engagement radius first.
 func _step_combat_start() -> String:
 	_wolves[1].snap_to(PARK_B)
 	_wolves[2].snap_to(PARK_C)
 	var wolf := _wolves[0]
+	var ring := wolf.get_detection_ring()
+	if ring == null or not ring.visible:
+		return "%s shows no detection ring in exploration" % wolf.name
+	if not is_equal_approx(ring.radius, wolf.detection_range):
+		return "%s's detection ring is %.2f m, expected %.2f m" % [wolf.name, ring.radius, wolf.detection_range]
 	_main._request_player_move(wolf.global_position)
 	if not await _wait_until(func() -> bool: return _main.combat_state == Main3D.CombatState.PLAYER_TURN, COMBAT_TIMEOUT_SECONDS):
 		return "combat did not start within %.1f s (state %d)" % [COMBAT_TIMEOUT_SECONDS, _main.combat_state]
@@ -373,10 +383,16 @@ func _step_combat_start() -> String:
 		return "turn budget is %.2f m, expected %.2f m" % [budget, Main3D.TURN_MOVE_METERS]
 	if _main.engaged_enemies.size() != 1:
 		return "%d wolves engaged, expected only the first (the others are parked %.0f m away)" % [_main.engaged_enemies.size(), GroundMath.ground_distance(_player.global_position, PARK_B)]
-	var cells := GroundMath.manhattan(GroundMath.to_cell(_player.global_position), GroundMath.to_cell(wolf.global_position))
-	if cells > Main3D.COMBAT_TRIGGER_DISTANCE_CELLS:
-		return "combat started at %d cells, beyond the %d cell trigger" % [cells, Main3D.COMBAT_TRIGGER_DISTANCE_CELLS]
-	print("[integration] combat started at %d cells from %s" % [cells, wolf.name])
+	var distance := GroundMath.ground_distance(_player.global_position, wolf.global_position)
+	if distance > wolf.detection_range + DETECTION_TOLERANCE_M:
+		return "combat started at %.2f m, outside the %.2f m detection ring" % [distance, wolf.detection_range]
+	if distance < wolf.detection_range - DETECTION_STEP_SLACK_M:
+		return "combat started at %.2f m, well inside the %.2f m detection ring" % [distance, wolf.detection_range]
+	if ring.visible:
+		return "%s's detection ring is still visible in turn combat" % wolf.name
+	if CombatFx._banner == null or CombatFx._banner.text != Main3D.ANNOUNCE_COMBAT:
+		return "the banner reads '%s', expected %s" % [CombatFx._banner.text if CombatFx._banner != null else "", Main3D.ANNOUNCE_COMBAT]
+	print("[integration] combat started at %.2f m from %s (ring %.1f m)" % [distance, wolf.name, wolf.detection_range])
 	return ""
 
 

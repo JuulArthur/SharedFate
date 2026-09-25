@@ -30,7 +30,8 @@ const NAV_MAP_FRAMES := 60
 const NAV_MAP_TOLERANCE_M := 0.5
 const MAP_PROBE := Vector3(0.0, 0.0, 2.5)
 
-## Phase A: the wolf starts inside its 4 m aggro range of a standing player.
+## Phase A: the wolf starts inside its 5 m detection range of a standing player
+## (WP13; with no coordinator in the scene the realtime chase and bite run).
 const A_PLAYER := Vector3(0.0, 0.0, 0.0)
 const A_WOLF := Vector3(3.5, 0.0, 0.0)
 const A_MAX_SECONDS := 3.5
