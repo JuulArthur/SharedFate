@@ -12,8 +12,9 @@ extends Node
 ## while the knight is in control negates the bite), one shift per turn, the
 ## rogue throw and both mage spells with their rings, enemy turn pacing, a
 ## loot drop and pickup, the inventory screen and the story book. It also
-## keeps WP7's level checks and verifies the imported models (the knight's
-## sword hanging from the right hand, the wolf body). Prints INTEGRATION OK,
+## keeps WP7's level checks and verifies the imported models (the three soul
+## bodies with the knight's shown and its sword hanging from the right hand,
+## the wolf body). Prints INTEGRATION OK,
 ## or the first failing step with its values, then quits.
 ##
 ## Inert with a window: it only runs headless, or with the user argument
@@ -42,7 +43,10 @@ const PROP_LAYER := 8
 const SWORD_MIN_DROP_M := 0.4
 const SWORD_MAX_RISE_M := 0.3
 const SWORD_MAX_LATERAL_M := 0.5
-const PLAYER_ANCHOR_HEIGHT_M := 2.25
+# WP9: the anchor follows the active body; the knight's glb OverheadAnchor is
+# 0.25 m over its 1.995 m head.
+const PLAYER_ANCHOR_HEIGHT_M := 2.245
+const PLAYER_ANCHOR_TOLERANCE_M := 0.01
 const WOLF_ANCHOR_HEIGHT_M := 0.95
 const EXPLORATION_STEP_M := 1.5
 # The second and third wolf wait here, outside the 9 m engagement radius, so
@@ -239,26 +243,35 @@ func _step_level() -> String:
 	return ""
 
 
-## The imported models: the knight under Player/Model with its sword handed to
-## the weapon holder and hanging point-down from the right hand; the wolf body
-## under each enemy's Model; the overhead anchors at their new heights.
+## The imported models: the three soul bodies under Player/Model with only the
+## knight's visible (WP9), the active soul's weapon handed to the weapon holder
+## and hanging point-down from the right hand; the wolf body under each enemy's
+## Model; the overhead anchors at their new heights.
 func _step_models() -> String:
 	if _player.model == null:
 		return "the player has no Model node"
 	if _player.model.get_node_or_null("Body") != null:
 		return "the placeholder Model/Body capsule is still in the player scene"
-	if _player.model.find_child("Knight_Body", true, false) as MeshInstance3D == null:
-		return "no Knight_Body mesh under Player/Model"
-	var knight_sword := _player.model.find_child("Sword", true, false) as MeshInstance3D
-	if knight_sword == null:
-		return "no Sword mesh in the knight model"
-	if knight_sword.visible:
-		return "the knight glb's own Sword is still visible"
+	if _player.soul_bodies == null:
+		return "Player/Model is not a SoulBodies3D"
+	for body_mesh_name in ["Knight_Body", "Rogue_Body", "Mage_Body"]:
+		if _player.model.find_child(body_mesh_name, true, false) as MeshInstance3D == null:
+			return "no %s mesh under Player/Model" % body_mesh_name
+	if _player.get_active_soul().kind != Soul.Kind.KNIGHT:
+		return "expected the knight in control at the start, got %s" % _player.get_active_soul().title
+	var active_body := _player.soul_bodies.get_active_body()
+	if active_body == null or active_body.name != &"Knight" or not active_body.visible:
+		return "the visible body is %s, expected the Knight" % (active_body.name if active_body != null else "none")
+	var held := _player.soul_bodies.get_held_weapon_mesh()
+	if held == null:
+		return "the active soul's model has no held weapon mesh"
+	if held.visible:
+		return "the %s glb's own %s is still visible" % [active_body.name, held.name]
 	var weapon := _player.equipped_weapon_mesh
 	if weapon == null or weapon.mesh == null:
 		return "EquippedWeaponMesh has no mesh"
-	if weapon.mesh != knight_sword.mesh:
-		return "EquippedWeaponMesh does not carry the knight's sword mesh"
+	if weapon.mesh != held.mesh:
+		return "EquippedWeaponMesh does not carry the %s's %s mesh" % [active_body.name, held.name]
 	if not weapon.visible:
 		return "EquippedWeaponMesh is hidden; is the starter sword equipped?"
 	if _player.hand_point == null:
@@ -273,7 +286,7 @@ func _step_models() -> String:
 	var lateral := Vector2(centre.x - hand.x, centre.z - hand.z).length()
 	if lateral > SWORD_MAX_LATERAL_M:
 		return "the sword's centre is %.2f m from the hand on the ground plane" % lateral
-	if _player.overhead_anchor == null or not is_equal_approx(_player.overhead_anchor.position.y, PLAYER_ANCHOR_HEIGHT_M):
+	if _player.overhead_anchor == null or absf(_player.overhead_anchor.position.y - PLAYER_ANCHOR_HEIGHT_M) > PLAYER_ANCHOR_TOLERANCE_M:
 		return "player OverheadAnchor at y=%.2f, expected %.2f" % [_player.overhead_anchor.position.y if _player.overhead_anchor != null else -1.0, PLAYER_ANCHOR_HEIGHT_M]
 
 	for wolf in _wolves:
