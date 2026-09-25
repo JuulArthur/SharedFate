@@ -30,10 +30,16 @@ import bpy
 import bmesh
 import math
 import os
-from mathutils import Vector, Matrix
+from mathutils import Vector, Matrix, Euler
 
 SF_ASSET_SCENE = "SharedFate_Assets"
 SF_RIG_COLLECTION = "SF_PreviewRig"
+
+# Rigid skinning (WP11): while a body bmesh is being built, every primitive
+# records the bone that owns its vertices. `skin_begin(bm)` starts recording for
+# one bmesh, `skin_bone(name)` sets the owner of the parts that follow, and
+# `finish_object` turns the record into one vertex group per bone (weight 1.0).
+_SF_SKIN = {"bm": None, "bone": None, "bones": []}
 
 
 # --------------------------------------------------------------------------
@@ -108,13 +114,43 @@ def make_material(name, hexcol, metallic=0.0, roughness=0.5, emission=None,
 # bmesh primitives
 # --------------------------------------------------------------------------
 
+def skin_begin(bm):
+    """Record the owning bone of every vertex added to `bm` from now on."""
+    _SF_SKIN["bm"] = bm
+    _SF_SKIN["bone"] = None
+    _SF_SKIN["bones"] = []
+
+
+def skin_bone(name):
+    """Bone that owns the parts added next (rigid skinning, weight 1.0)."""
+    _SF_SKIN["bone"] = name
+
+
+def side_bone(base, sign):
+    """`UpperArm` + side: +X is the character's right (`_R`), -X its left."""
+    return base + ("_R" if sign > 0 else "_L")
+
+
+def _skin_record(bm, verts_before):
+    if _SF_SKIN["bm"] is not bm:
+        return
+    added = len(bm.verts) - verts_before
+    _SF_SKIN["bones"].extend([_SF_SKIN["bone"]] * added)
+
+
+def _from_mesh_recorded(bm, me):
+    before = len(bm.verts)
+    bm.from_mesh(me)
+    _skin_record(bm, before)
+
+
 def _merge(bm, tmp, mi):
     for f in tmp.faces:
         f.material_index = mi
     me = bpy.data.meshes.new("_sf_tmp")
     tmp.to_mesh(me)
     tmp.free()
-    bm.from_mesh(me)
+    _from_mesh_recorded(bm, me)
     bpy.data.meshes.remove(me)
 
 
@@ -157,7 +193,7 @@ def sphere(bm, center, radius, mi, scale=(1.0, 1.0, 1.0), u=8, v=6, face_mat=Non
     me = bpy.data.meshes.new("_sf_tmp")
     tmp.to_mesh(me)
     tmp.free()
-    bm.from_mesh(me)
+    _from_mesh_recorded(bm, me)
     bpy.data.meshes.remove(me)
 
 
@@ -232,10 +268,20 @@ def _purge_data(data):
         bpy.data.cameras.remove(data)
     elif isinstance(data, bpy.types.Light):
         bpy.data.lights.remove(data)
+    elif isinstance(data, bpy.types.Armature):
+        bpy.data.armatures.remove(data)
 
 
 def finish_object(bm, name, materials, smooth=False):
-    """Close a bmesh into a flat-shaded object with the given material slots."""
+    """Close a bmesh into a flat-shaded object with the given material slots.
+
+    When `skin_begin(bm)` recorded the parts' bones, every vertex lands in
+    exactly one vertex group named after its bone, with weight 1.0."""
+    skinned = _SF_SKIN["bm"] is bm
+    bones = list(_SF_SKIN["bones"]) if skinned else []
+    if skinned:
+        _SF_SKIN["bm"] = None
+        _SF_SKIN["bones"] = []
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     purge_object(name)
     me = bpy.data.meshes.new(name)
@@ -246,6 +292,18 @@ def finish_object(bm, name, materials, smooth=False):
     for m in materials:
         me.materials.append(m)
     ob = bpy.data.objects.new(name, me)
+    if skinned:
+        if len(bones) != len(me.vertices):
+            raise RuntimeError("%s: %d skin records for %d vertices"
+                               % (name, len(bones), len(me.vertices)))
+        if None in bones:
+            raise RuntimeError("%s: %d vertices were added before skin_bone()"
+                               % (name, bones.count(None)))
+        groups = {}
+        for index, bone in enumerate(bones):
+            groups.setdefault(bone, []).append(index)
+        for bone, indices in groups.items():
+            ob.vertex_groups.new(name=bone).add(indices, 1.0, "REPLACE")
     return ob
 
 
@@ -370,15 +428,154 @@ def look_at(ob, target):
 
 
 # --------------------------------------------------------------------------
+# armature, rigid skinning and actions (WP11)
+# --------------------------------------------------------------------------
+#
+# Every bone is rolled so its local X axis is the armature's +X (the
+# character's right). A pose rotation about local X is then a pitch in the
+# forward/up plane for every bone, up- or down-pointing alike: a positive angle
+# swings a hanging limb forward (+Y) and tips an upright bone backward. Local Y
+# runs along the bone (world up for Hips/Spine/Head, world down for the limbs),
+# so a rotation about local Y is a twist about the vertical, and for a hanging
+# bone local Z is world +Y, so a rotation about local Z is a sideways roll.
+
+def build_armature(name, bones, collection):
+    """Armature object `name` at the origin with `bones`, a list of
+    (bone, head, tail, parent or None, connected) tuples in Blender space."""
+    purge_object(name)
+    arm = bpy.data.armatures.get(name)
+    if arm is not None and arm.users == 0:
+        bpy.data.armatures.remove(arm)
+    arm = bpy.data.armatures.new(name)
+    ob = bpy.data.objects.new(name, arm)
+    collection.objects.link(ob)
+    prev = enter_assets_scene()
+    view_layer = bpy.context.view_layer
+    for other in view_layer.objects:
+        other.select_set(False)
+    view_layer.objects.active = ob
+    ob.select_set(True)
+    bpy.ops.object.mode_set(mode="EDIT")
+    try:
+        x_axis = Vector((1.0, 0.0, 0.0))
+        for bone, head, tail, parent, connected in bones:
+            eb = arm.edit_bones.new(bone)
+            eb.head = Vector(head)
+            eb.tail = Vector(tail)
+            eb.align_roll(x_axis.cross((eb.tail - eb.head).normalized()))
+            if parent is not None:
+                eb.parent = arm.edit_bones[parent]
+                eb.use_connect = connected
+    finally:
+        bpy.ops.object.mode_set(mode="OBJECT")
+    ob.select_set(False)
+    restore_scene(prev)
+    for bone in arm.bones:
+        x = bone.matrix_local.col[0].xyz
+        if (x - x_axis).length > 1e-4:
+            raise RuntimeError("%s: bone %s has local X %s, expected +X" % (name, bone.name, tuple(x)))
+    return ob
+
+
+def skin_to_armature(ob, armature):
+    """Parent a mesh to the armature (object parent, rest transform kept) and
+    deform it with an Armature modifier through its vertex groups."""
+    ob.parent = armature
+    ob.matrix_parent_inverse = armature.matrix_world.inverted()
+    mod = ob.modifiers.new("Armature", "ARMATURE")
+    mod.object = armature
+    mod.use_vertex_groups = True
+    return mod
+
+
+def skin_whole(ob, bone):
+    """Assign every vertex of `ob` to `bone` with weight 1.0."""
+    group = ob.vertex_groups.get(bone) or ob.vertex_groups.new(name=bone)
+    group.add([v.index for v in ob.data.vertices], 1.0, "REPLACE")
+
+
+def parent_to_bone(ob, armature, bone_name, world=None):
+    """Bone-parent `ob` (an empty or a rigid mesh) to `bone_name`, keeping its
+    world transform at rest. `world` defaults to the object's own transform
+    (its parent must be the armature's space, i.e. the origin, or none)."""
+    if world is None:
+        world = ob.matrix_basis.copy()
+    bone = armature.data.bones[bone_name]
+    # Blender's bone parent space is the bone's tail, in the bone's rest frame.
+    parent_mat = (armature.matrix_world @ bone.matrix_local
+                  @ Matrix.Translation((0.0, bone.length, 0.0)))
+    ob.parent = armature
+    ob.parent_type = "BONE"
+    ob.parent_bone = bone_name
+    ob.matrix_parent_inverse = Matrix.Identity(4)
+    ob.matrix_basis = parent_mat.inverted() @ world
+    return ob
+
+
+def reset_pose(armature):
+    for pb in armature.pose.bones:
+        pb.rotation_mode = "QUATERNION"
+        pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        pb.location = (0.0, 0.0, 0.0)
+        pb.scale = (1.0, 1.0, 1.0)
+
+
+def author_action(armature, name, frames, sample, step=2):
+    """A plain action `name`, `frames` long, keyed every `step` frames from
+    frame 0 to `frames` inclusive with linear interpolation.
+
+    `sample(phase)` gets the loop phase in [0, 1) and returns
+    {bone: {"rot": (x, y, z) degrees in the bone's local axes,
+            "loc": (x, y, z) metres in the bone's local axes}}.
+    Every pose bone is keyed on every sample (missing bones at rest), and the
+    last key repeats phase 0 so the clip loops seamlessly."""
+    if armature.animation_data is None:
+        armature.animation_data_create()
+    old = bpy.data.actions.get(name)
+    if old is not None:
+        bpy.data.actions.remove(old)
+    act = bpy.data.actions.new(name)
+    act.use_fake_user = True
+    armature.animation_data.action = act
+    for pb in armature.pose.bones:
+        pb.rotation_mode = "QUATERNION"
+    for frame in range(0, frames + 1, step):
+        phase = (frame % frames) / float(frames)
+        pose = sample(phase)
+        unknown = set(pose) - set(pb.name for pb in armature.pose.bones)
+        if unknown:
+            raise RuntimeError("%s: no bones %s" % (name, sorted(unknown)))
+        for pb in armature.pose.bones:
+            values = pose.get(pb.name, {})
+            rot = values.get("rot", (0.0, 0.0, 0.0))
+            pb.rotation_quaternion = Euler(tuple(math.radians(a) for a in rot), "XYZ").to_quaternion()
+            pb.location = values.get("loc", (0.0, 0.0, 0.0))
+            pb.keyframe_insert("rotation_quaternion", frame=frame, group=pb.name)
+            pb.keyframe_insert("location", frame=frame, group=pb.name)
+    for fc in act.fcurves:
+        for kp in fc.keyframe_points:
+            kp.interpolation = "LINEAR"
+    armature.animation_data.action = None
+    reset_pose(armature)
+    return act
+
+
+# --------------------------------------------------------------------------
 # export
 # --------------------------------------------------------------------------
 
-def export_glb(objects, path, root_name=None):
+def export_glb(objects, path, root_name=None, animations=False):
     """Export exactly `objects` (meshes and empties) to a .glb at `path`.
 
     The glTF scene name becomes the root node name of the imported Godot scene,
     and the exporter takes it from the Blender scene, so the assets scene is
     renamed to `root_name` for the duration of the export.
+
+    `animations=True` (WP11) exports the skin and every armature action as its
+    own glTF animation named after the action ("ACTIONS" mode with
+    `export_anim_single_armature`, which needs exactly one armature among
+    `objects`). The actions themselves must be plain (no NLA), keyed from
+    frame 0, and the scene frame rate decides their length in seconds.
     """
     path = os.path.abspath(path)
     folder = os.path.dirname(path)
@@ -394,18 +591,41 @@ def export_glb(objects, path, root_name=None):
     for ob in objects:
         ob.select_set(True)
     view_layer.objects.active = objects[0]
-    try:
-        bpy.ops.export_scene.gltf(
-            filepath=path,
-            use_selection=True,
-            export_format="GLB",
-            export_yup=True,
-            export_apply=True,
-            export_cameras=False,
-            export_lights=False,
-            export_animations=False,
-            export_extras=False,
+    options = dict(
+        filepath=path,
+        use_selection=True,
+        # Only the assets scene: without this the exporter writes every scene
+        # with a selection, and the factory startup's selected default Cube
+        # rode along in a second glTF scene in every WP1 file (WP11 fix).
+        use_active_scene=True,
+        export_format="GLB",
+        export_yup=True,
+        export_apply=True,
+        export_cameras=False,
+        export_lights=False,
+        export_animations=animations,
+        export_extras=False,
+    )
+    if animations:
+        options.update(
+            export_skins=True,
+            export_def_bones=False,
+            export_rest_position_armature=True,
+            export_animation_mode="ACTIONS",
+            export_anim_single_armature=True,
+            export_force_sampling=True,
+            export_frame_range=False,
+            export_anim_slide_to_zero=False,
+            export_reset_pose_bones=True,
+            export_bake_animation=False,
+            export_morph_animation=False,
         )
+    known = {p.identifier for p in bpy.ops.export_scene.gltf.get_rna_type().properties}
+    missing = sorted(set(options) - known)
+    if missing:
+        raise RuntimeError("glTF exporter has no options %s" % missing)
+    try:
+        bpy.ops.export_scene.gltf(**options)
     finally:
         bpy.context.scene.name = scene_name
     restore_scene(prev)

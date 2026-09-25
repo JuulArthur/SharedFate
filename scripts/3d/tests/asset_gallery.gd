@@ -110,6 +110,7 @@ func _describe(model: Node3D) -> PackedStringArray:
 			triangles, str(has_hand), hand, str(has_overhead), overhead,
 			str(faces_back) if is_character else "n/a",
 			", ".join(mesh_names), _count_bodies(model)])
+	problems.append_array(_describe_rig(model, is_character))
 
 	if not has_bounds:
 		problems.append("%s: no MeshInstance3D children" % model.name)
@@ -128,6 +129,62 @@ func _describe(model: Node3D) -> PackedStringArray:
 			problems.append("%s: missing HandPoint" % model.name)
 		if not has_overhead:
 			problems.append("%s: missing OverheadAnchor" % model.name)
+	return problems
+
+
+## WP11: the rig as the glTF importer laid it out. Prints the skeleton and its
+## bones, the AnimationPlayer and its clips, and the node path of every empty
+## and weapon (bone-parented objects land under a BoneAttachment3D). A
+## character must carry a skeleton, an AnimationPlayer with looping `idle` and
+## `walk`, and a HandPoint that rides the right forearm.
+func _describe_rig(model: Node3D, is_character: bool) -> PackedStringArray:
+	var problems := PackedStringArray()
+	var skeletons := model.find_children("*", "Skeleton3D", true, false)
+	var players := model.find_children("*", "AnimationPlayer", true, false)
+	if skeletons.is_empty() and players.is_empty():
+		if is_character:
+			problems.append("%s: no Skeleton3D and no AnimationPlayer" % model.name)
+		return problems
+
+	var skeleton: Skeleton3D = skeletons[0] as Skeleton3D if not skeletons.is_empty() else null
+	var bone_names := PackedStringArray()
+	if skeleton != null:
+		for bone in range(skeleton.get_bone_count()):
+			bone_names.append(skeleton.get_bone_name(bone))
+	var clips := PackedStringArray()
+	var player: AnimationPlayer = players[0] as AnimationPlayer if not players.is_empty() else null
+	if player != null:
+		for anim_name in player.get_animation_list():
+			var anim := player.get_animation(anim_name)
+			clips.append("%s %.2f s loop=%d tracks=%d" % [anim_name, anim.length, anim.loop_mode, anim.get_track_count()])
+	print("RIG   %-12s skeleton=%s bones=%d [%s] player=%s clips=[%s]"
+		% [model.name, model.get_path_to(skeleton) if skeleton != null else "none",
+			bone_names.size(), ", ".join(bone_names),
+			model.get_path_to(player) if player != null else "none", "; ".join(clips)])
+	for node_name in ["HandPoint", "OverheadAnchor", "Sword", "Dagger_R", "Dagger_L", "Staff"]:
+		var node := model.find_child(node_name, true, false) as Node3D
+		if node == null:
+			continue
+		var attachment := node.get_parent() as BoneAttachment3D
+		print("RIG   %-12s %-14s at %s%s" % [model.name, node_name, model.get_path_to(node),
+			(" (bone %s)" % attachment.bone_name) if attachment != null else ""])
+
+	if not is_character:
+		return problems
+	if skeleton == null or skeleton.get_bone_count() < 8:
+		problems.append("%s: expected a Skeleton3D with at least 8 bones" % model.name)
+	if player == null:
+		problems.append("%s: no AnimationPlayer" % model.name)
+	else:
+		for clip in [&"idle", &"walk"]:
+			if not player.has_animation(clip):
+				problems.append("%s: no '%s' animation" % [model.name, clip])
+			elif player.get_animation(clip).loop_mode == Animation.LOOP_NONE:
+				problems.append("%s: '%s' does not loop (import settings)" % [model.name, clip])
+	var hand := model.find_child("HandPoint", true, false) as Node3D
+	var hand_attachment: BoneAttachment3D = hand.get_parent() as BoneAttachment3D if hand != null else null
+	if hand_attachment == null or hand_attachment.bone_name != "LowerArm_R":
+		problems.append("%s: HandPoint does not ride the LowerArm_R bone" % model.name)
 	return problems
 
 
