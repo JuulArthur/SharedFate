@@ -1,0 +1,13 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/3d/enemy_3d.tscn" id="1_enemy_scene"]
+
+[node name="Wolf" instance=ExtResource("1_enemy_scene")]
+move_speed = 3.6
+max_health = 36
+attack_damage = 10
+attack_range = 1.1
+attack_cooldown = 0.7
+experience_reward = 35
+loot_drop_chance = 0.5
+aggro_range = 4.0
