@@ -24,10 +24,14 @@ extends ActorBase3D
 @export var loot_drop_chance := 0.6
 ## Metres, like every other 3D range. The 2D value was 20 px.
 @export var loot_drop_spread := 0.3
-## How close the player must come, in metres, before this enemy gives chase.
-## 0 keeps the old behaviour (chase from anywhere); wolves use a short range so
-## each pack is its own fight. Taking a hit always provokes.
-@export var aggro_range := 0.0
+## How close the player must come, in metres, before this enemy spots it (WP13:
+## replaces `aggro_range`, so the visible ring, the realtime chase gate and the
+## coordinator's combat trigger are one rule, `can_spot`). 0 means the enemy
+## never spots anyone on its own and only a hit provokes it (an unaware enemy;
+## the 2D `aggro_range` 0 meant "chase from anywhere", which would start turn
+## combat on the first frame). Wolves use 5 m, the generic enemy 4 m. Taking a
+## hit always provokes.
+@export var detection_range := 4.0
 @export var attack_wind_up_duration := 0.2
 @export var attack_strike_duration := 0.12
 @export var attack_recovery_duration := 0.2
@@ -36,6 +40,32 @@ extends ActorBase3D
 ## Realtime keeps the snappier values above.
 @export var turn_attack_wind_up_duration := 0.55
 @export var turn_attack_strike_duration := 0.18
+
+## Emitted once per hit that lands while this enemy is not in turn mode (WP13).
+## The coordinator answers by starting combat as an ambush: the hit has already
+## resolved (health changed, and `_die` follows this signal when it was lethal),
+## then the enemies get the first turn.
+signal provoked_by_hit
+
+## Detection (WP13). The ring is a RangeRing3D child at `detection_range`,
+## shown while the enemy is alive, calm and out of turn mode: a faint dashed
+## circle that turns warning red once the player is within
+## DETECTION_WARNING_MARGIN_M of its edge.
+const DETECTION_RING_COLOR_CALM := Color(0.55, 0.75, 0.95, 0.30)
+const DETECTION_RING_COLOR_WARNING := Color(1.0, 0.30, 0.25, 0.75)
+const DETECTION_WARNING_MARGIN_M := 1.5
+## Line of sight: a ray from the enemy's eyes to the target's chest against
+## props (layer 8, docs/3d-port-contracts.md section 3). A tree or a crate
+## between the two hides the player even inside the ring.
+const DETECTION_LINE_OF_SIGHT_MASK := 8
+const DETECTION_EYE_HEIGHT_M := 0.6
+const DETECTION_TARGET_HEIGHT_M := 0.9
+
+enum DetectionRingState {
+	HIDDEN,
+	CALM,
+	WARNING
+}
 
 const DEATH_SECONDS := 0.42
 ## The dissolve after the topple, the 2D `modulate:a` fade.
@@ -89,6 +119,9 @@ var _model_idle_scale := Vector3.ONE
 var _counter_prompt: CounterPrompt3D = null
 var _bars: OverheadBars3D = null
 var _root_ring: RangeRing3D = null
+var _detection_ring: RangeRing3D = null
+var _detection_ring_state: DetectionRingState = DetectionRingState.HIDDEN
+var _detection_ring_radius := 0.0
 var _hover_overlay: StandardMaterial3D = null
 
 var _target: Node3D = null
@@ -112,14 +145,25 @@ func _ready() -> void:
 	_setup_overhead_bars()
 	_setup_counter_prompt()
 	_setup_root_ring()
+	_setup_detection_ring()
 	_update_health_bar()
+
+
+func _process(_delta: float) -> void:
+	_update_detection_ring()
 
 
 # --- Realtime AI ------------------------------------------------------------------
 
 ## The 2D `_physics_process`, in the same order: turn mode just walks its path,
-## realtime ticks the timers, gates on aggro, refreshes the approach point and
-## swings once the target is inside `attack_range`.
+## realtime ticks the timers, gates on detection, refreshes the approach point
+## and swings once the target is inside `attack_range`.
+##
+## WP13: under the coordinator, spotting the player starts turn combat on the
+## same frame, so the realtime chase and bite below only ever run in a scene
+## without a coordinator (enemy_test, approach_test) or after a hit provoked an
+## enemy there. They are kept for those scenes; in the arena an enemy never
+## bites in realtime before combat begins.
 func _physics_process(delta: float) -> void:
 	_update_locomotion_animation(delta)
 	if navigation_agent == null:
@@ -140,9 +184,10 @@ func _physics_process(delta: float) -> void:
 		_halt()
 		return
 
-	# Ambushers hold still until the player wanders close enough.
-	if aggro_range > 0.0 and not _aggroed:
-		if GroundMath.ground_distance(global_position, target.global_position) > aggro_range:
+	# Watchers hold still until the player is spotted: inside the detection
+	# ring and in view. A hit sets `_aggroed` directly.
+	if not _aggroed:
+		if not can_spot(target):
 			_halt()
 			return
 		_aggroed = true
@@ -182,6 +227,95 @@ func _live_target() -> Node3D:
 func set_target(target: Node3D) -> void:
 	_target = target
 	_refresh_target_position()
+
+
+# --- Detection (WP13) ---------------------------------------------------------------
+
+## The one rule for "spotted": alive on both sides, `target` on the ground
+## within `detection_range` and nothing on the prop layer between the enemy's
+## eyes and the target's chest. The coordinator asks this every frame in
+## exploration to start combat; the realtime chase gates on it too, so the
+## visible ring is exactly the rule.
+func can_spot(target: Node3D) -> bool:
+	if not is_alive() or _dying or detection_range <= 0.0:
+		return false
+	if target == null or not is_instance_valid(target):
+		return false
+	if target.has_method("is_alive") and not bool(target.call("is_alive")):
+		return false
+	if GroundMath.ground_distance(global_position, target.global_position) > detection_range:
+		return false
+	return has_line_of_sight_to(target)
+
+
+## True when no prop (layer 8) blocks the ray from this enemy's eyes to the
+## target's chest. Actors are not on that layer, so the player never hides
+## behind another enemy. Answers true while the world has no physics space yet.
+func has_line_of_sight_to(target: Node3D) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	var world := get_world_3d()
+	if world == null or world.direct_space_state == null:
+		return true
+	var from := global_position + Vector3(0.0, DETECTION_EYE_HEIGHT_M, 0.0)
+	var to := target.global_position + Vector3(0.0, DETECTION_TARGET_HEIGHT_M, 0.0)
+	var query := PhysicsRayQueryParameters3D.create(from, to, DETECTION_LINE_OF_SIGHT_MASK)
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	var excluded: Array[RID] = [get_rid()]
+	if target is CollisionObject3D:
+		excluded.append((target as CollisionObject3D).get_rid())
+	query.exclude = excluded
+	var hit: Dictionary = world.direct_space_state.intersect_ray(query)
+	return hit.is_empty()
+
+
+## True once this enemy has noticed the player (spotted it, or was hit) and is
+## no longer just watching. Reset when turn combat ends.
+func is_alerted() -> bool:
+	return _aggroed
+
+
+## The visible detection ring, for a coordinator or a test that wants to read it.
+func get_detection_ring() -> RangeRing3D:
+	return _detection_ring
+
+
+func _setup_detection_ring() -> void:
+	_detection_ring = RangeRing3D.new()
+	_detection_ring.name = "DetectionRing"
+	add_child(_detection_ring)
+	_detection_ring.hide_ring()
+	_detection_ring_state = DetectionRingState.HIDDEN
+
+
+## Shown while the enemy is alive, calm and in exploration; hidden in turn
+## mode, once alerted, while dying and for an unaware enemy (range 0). Calm blue
+## far from the player, warning red once the player is within
+## DETECTION_WARNING_MARGIN_M of the edge. The ring mesh is only rebuilt when
+## its state or radius changes.
+func _update_detection_ring() -> void:
+	if _detection_ring == null:
+		return
+	var wanted_shown := is_alive() and not _dying and not is_in_turn_based_combat() \
+		and not _aggroed and detection_range > 0.0
+	if not wanted_shown:
+		if _detection_ring_state != DetectionRingState.HIDDEN:
+			_detection_ring.hide_ring()
+			_detection_ring_state = DetectionRingState.HIDDEN
+		return
+	var wanted_state := DetectionRingState.CALM
+	var target := _live_target()
+	if target != null and GroundMath.ground_distance(global_position, target.global_position) \
+			<= detection_range + DETECTION_WARNING_MARGIN_M:
+		wanted_state = DetectionRingState.WARNING
+	if wanted_state == _detection_ring_state and is_equal_approx(_detection_ring_radius, detection_range):
+		return
+	var ring_color := DETECTION_RING_COLOR_WARNING if wanted_state == DetectionRingState.WARNING \
+		else DETECTION_RING_COLOR_CALM
+	_detection_ring.show_ring(detection_range, ring_color, true)
+	_detection_ring_state = wanted_state
+	_detection_ring_radius = detection_range
 
 
 func _refresh_target_position() -> void:
@@ -396,8 +530,13 @@ func flash_hit() -> void:
 	_flash_model(HitFlash3D.DEFAULT_COLOR, HitFlash3D.DEFAULT_DURATION)
 	_update_health_bar()
 	if _last_applied_damage > 0:
-		_play_hit_feedback(_last_applied_damage)
+		var landed := _last_applied_damage
 		_last_applied_damage = 0
+		_play_hit_feedback(landed)
+		# WP13: a hit outside turn mode is an ambush; the coordinator starts
+		# combat from this (deferred, so a lethal hit has finished dying first).
+		if not is_in_turn_based_combat():
+			provoked_by_hit.emit()
 
 
 func _play_hit_feedback(amount: int) -> void:
@@ -439,6 +578,7 @@ func _on_died() -> void:
 	_hide_counter_prompt()
 	if _root_ring != null:
 		_root_ring.hide_ring()
+	_update_detection_ring()
 	if _bars != null:
 		_bars.set_visible_bars(false)
 	set_deferred("collision_mask", 0)
@@ -522,6 +662,10 @@ func set_turn_based_combat(enabled: bool) -> void:
 	if not enabled:
 		_rooted_turns = 0
 		_update_root_visual()
+		# The fight is over; whoever is left goes back to watching (WP13). Under
+		# the coordinator that is only ever an enemy that was never engaged.
+		_aggroed = false
+	_update_detection_ring()
 
 
 ## A rooted enemy keeps its attack but goes nowhere this turn.

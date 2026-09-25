@@ -22,7 +22,7 @@ The `IntegrationSmoke` node in the arena drives that check. It only runs headles
 | Input | Exploration | Turn combat |
 | --- | --- | --- |
 | Left click on the ground | walk there | spend movement (path preview shows the 6 m budget) |
-| Left click on a wolf | walk up and attack | melee, or the aimed throw / spell |
+| Left click on a wolf | walk up and attack, or the aimed throw / spell (see below) | melee, or the aimed throw / spell |
 | Left click on a dropped item | open the loot panel (walks over if far) | same |
 | Space | sword sweep | end the turn |
 | 1 / 2 / 3, Q | shift to knight / rogue / mage, cycle | one shift per turn (two after a perfect reaction) |
@@ -30,7 +30,19 @@ The `IntegrationSmoke` node in the arena drives that check. It only runs headles
 | I | inventory screen | same |
 | Esc | close a panel, skip the story book | same |
 
-Combat starts by proximity (6 cells). The HUD buttons Melee, Throw, Block, Arcane Burst, Frost Snare, Wait and End Turn do what they say; Block and Wait hand the turn over. Hovering a wolf or an item highlights it. The Sound button (top right) unmutes the music.
+### How a fight starts (WP13)
+
+Every wolf shows a faint dashed ring on the ground while you explore: its detection range (5 m for a wolf, 4 m for the generic enemy). The ring turns red when you are within 1.5 m of its edge. Step inside the ring with nothing in the way and the wolf spots you: combat starts at once (`COMBAT!`), you act first, and every wolf within 12 m of you joins the fight. A tree or a crate between you and the wolf hides you even inside the ring (a line-of-sight ray against the prop layer). Rings disappear in combat and on death; a wolf with a detection range of 0 is unaware and never spots you on its own.
+
+You can also strike first. In exploration the action row shows Melee and, for the soul in control, Throw or the two spells. Pick Throw or a spell and click a wolf: the same range ring, targeting and refusals as in a turn (`Out of range`, `Recharging (n)`), and the player stands still to throw or cast. A plain click on a wolf, or Space next to one, is the melee. Any hit that lands on a wolf outside combat starts it as an ambush (`AMBUSH!`): the hit resolves fully first, the struck wolf and everyone within 12 m of you engage, the wolves take the first turn, and your turn follows as usual. A refused or out-of-range attack starts nothing. Outside combat the attacks are spaced by the realtime 0.35 s cooldown, and a spell's cooldown melts one turn every 3 s of real time (spells still start every fight fresh).
+
+The HUD buttons Melee, Throw, Block, Arcane Burst, Frost Snare, Wait and End Turn do what they say; Block and Wait hand the turn over and only show in combat. Hovering a wolf or an item highlights it. The Sound button (top right) unmutes the music.
+
+Headless check of the detection and ambush rules (prints `DETECTION OK`):
+
+```powershell
+& $godot --headless --path . res://scenes/3d/tests/detection_test.tscn --quit-after 1200
+```
 
 ## What is placeholder
 

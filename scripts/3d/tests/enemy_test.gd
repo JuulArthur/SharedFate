@@ -4,7 +4,8 @@ extends Node3D
 ## on the arena skeleton's layout, with a runtime navmesh bake.
 ##
 ## Scripted steps, in order: the wolf's rig carries looping `idle` and `trot`
-## (WP12); the aggro gate holds the wolf still at 8 m; at 3 m it chases on the
+## (WP12); the detection gate holds the wolf still at 8 m with its detection
+## ring shown (WP13); at 3 m it chases on the
 ## trot, reaches its attack range, idles and bites through the player's
 ## `resolve_enemy_attack` while the counter prompt is up; a long straight chase
 ## keeps the planted front paw from sliding (WP12); in turn mode the swing
@@ -162,22 +163,36 @@ func _run_test() -> void:
 	get_tree().quit()
 
 
-# --- 1) The aggro gate ---------------------------------------------------------------
+# --- 1) The detection gate (WP13: `detection_range` replaces `aggro_range`) ---------
 
 func _step_aggro_gate() -> bool:
 	wolf.set_target(player)
 	var start_position := wolf.global_position
 	var start_distance := GroundMath.ground_distance(start_position, player.global_position)
-	if start_distance <= wolf.aggro_range:
-		_fail("the player starts %.2f m away, inside the wolf's %.2f m aggro range"
-			% [start_distance, wolf.aggro_range])
+	if start_distance <= wolf.detection_range:
+		_fail("the player starts %.2f m away, inside the wolf's %.2f m detection range"
+			% [start_distance, wolf.detection_range])
+		return false
+	if wolf.can_spot(player):
+		_fail("can_spot(player) is true at %.2f m with a %.2f m detection range"
+			% [start_distance, wolf.detection_range])
 		return false
 
 	await _wait(IDLE_SECONDS)
 	var drift := GroundMath.ground_distance(wolf.global_position, start_position)
 	if drift > IDLE_TOLERANCE_M:
-		_fail("the wolf moved %.2f m in %.1f s with the player %.2f m away, outside its %.2f m aggro range"
-			% [drift, IDLE_SECONDS, start_distance, wolf.aggro_range])
+		_fail("the wolf moved %.2f m in %.1f s with the player %.2f m away, outside its %.2f m detection range"
+			% [drift, IDLE_SECONDS, start_distance, wolf.detection_range])
+		return false
+	var ring := wolf.get_detection_ring()
+	if ring == null or not ring.visible:
+		_fail("the calm wolf shows no detection ring in exploration")
+		return false
+	if not is_equal_approx(ring.radius, wolf.detection_range):
+		_fail("the detection ring is %.2f m, expected the %.2f m detection range" % [ring.radius, wolf.detection_range])
+		return false
+	if ring.color != Enemy3D.DETECTION_RING_COLOR_CALM:
+		_fail("the detection ring is %s with the player %.2f m away, expected the calm colour" % [str(ring.color), start_distance])
 		return false
 	return true
 
@@ -369,6 +384,11 @@ func _step_turn_attack() -> bool:
 	wolf.set_turn_based_combat(true)
 	player.set_turn_based_combat(true)
 	wolf.start_turn(6.0)
+	# WP13: no detection ring in turn combat.
+	var ring := wolf.get_detection_ring()
+	if ring != null and ring.visible:
+		_fail("the detection ring is still visible in turn combat")
+		return false
 
 	_arm_hit_watch()
 	var started_msec := Time.get_ticks_msec()

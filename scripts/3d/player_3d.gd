@@ -67,6 +67,12 @@ const SHIFT_LIGHT_BLEND_SECONDS := 0.35
 # Used for spell radii until the coordinator reports the map's meter scale. In
 # 3D one world unit is one metre, so the coordinator sends 1.0.
 const DEFAULT_METER_WORLD_UNITS := GroundMath.METER_WORLD_UNITS
+# WP13: the throw and the spells can be used in exploration. A spell's cooldown
+# is authored in player turns; outside turn mode one "turn" of cooldown melts
+# every EXPLORATION_SECONDS_PER_TURN seconds of real time, so a 2-turn Frost
+# Snare is ready again 6 s after the cast. The realtime `attack_cooldown`
+# (0.35 s) spaces every attack outside combat, throws and casts included.
+const EXPLORATION_SECONDS_PER_TURN := 3.0
 
 # --- Pixel to metre conversions ----------------------------------------------
 # Items are authored in 2D pixels (Item.weapon_range, grip_offset). One
@@ -146,6 +152,8 @@ var shifts_left_this_turn := 0
 var _resonance_pending := false
 # Spell id -> player turns until that spell is ready again.
 var spell_cooldowns: Dictionary = {}
+# Real time left until the next exploration cooldown tick (WP13).
+var _exploration_cooldown_tick_left := EXPLORATION_SECONDS_PER_TURN
 var _meter_world_units := DEFAULT_METER_WORLD_UNITS
 var manual_path_points: Array[Vector3] = []
 var manual_path_index := 0
@@ -226,6 +234,7 @@ func _physics_process(delta: float) -> void:
 	if not _turn_mode:
 		attack_cooldown_left = maxf(attack_cooldown_left - delta, 0.0)
 		target_refresh_left -= delta
+		_tick_exploration_spell_cooldowns(delta)
 		if _pursue_attack_target():
 			return
 
@@ -521,37 +530,51 @@ func try_attack(target: Node3D = null) -> bool:
 	return true
 
 
-# Turn-mode ranged attack (the rogue's throw). Coroutine like `try_attack`: the
-# bolt travels and damage lands on arrival, so a 12 m shot visibly takes longer
-# than a 3 m one. Refused for souls with no ranged attack, and (unlike 2D, where
-# only the coordinator checked) for a target beyond the soul's range.
+# The rogue's throw. Coroutine like `try_attack`: the bolt travels and damage
+# lands on arrival, so a 12 m shot visibly takes longer than a 3 m one. Refused
+# for souls with no ranged attack, and (unlike 2D, where only the coordinator
+# checked) for a target beyond the soul's range. In turn mode it spends the
+# turn's attack; in exploration (WP13) it is gated by the realtime
+# `attack_cooldown` instead, and a hit that lands there is an ambush.
 func try_ranged_attack(target: Node3D = null) -> bool:
-	if _turn_mode:
-		if not _alive:
-			return false
-		if active_soul == null or not active_soul.has_ranged():
-			return false
-		if not _turn_active:
-			return false
-		if not _turn_attack_available:
-			return false
-		if target == null or not is_instance_valid(target):
-			return false
-		if not target.has_method("receive_damage"):
-			return false
-		if GroundMath.ground_distance(global_position, target.global_position) > get_ranged_range_meters() + ATTACK_RANGE_TOLERANCE:
-			return false
+	if not _alive:
+		return false
+	if active_soul == null or not active_soul.has_ranged():
+		return false
+	if not _attack_available_now():
+		return false
+	if target == null or not is_instance_valid(target):
+		return false
+	if not target.has_method("receive_damage"):
+		return false
+	if GroundMath.ground_distance(global_position, target.global_position) > get_ranged_range_meters() + ATTACK_RANGE_TOLERANCE:
+		return false
 
+	_spend_attack()
+	_face_toward_world(target.global_position)
+	_flash_ranged_feedback(target)
+	var damage := active_soul.ranged_damage
+	await _launch_bolt(target)
+	if is_instance_valid(target) and target.has_method("receive_damage"):
+		target.call("receive_damage", damage)
+		CombatFx.hit_stop(0.04, 0.3)
+	return true
+
+
+## Whether an attack may start right now: the turn's attack in turn mode, the
+## realtime cooldown in exploration (WP13).
+func _attack_available_now() -> bool:
+	if _turn_mode:
+		return _turn_active and _turn_attack_available
+	return attack_cooldown_left <= 0.0
+
+
+## Spends what `_attack_available_now` checked.
+func _spend_attack() -> void:
+	if _turn_mode:
 		_turn_attack_available = false
-		_face_toward_world(target.global_position)
-		_flash_ranged_feedback(target)
-		var damage := active_soul.ranged_damage
-		await _launch_bolt(target)
-		if is_instance_valid(target) and target.has_method("receive_damage"):
-			target.call("receive_damage", damage)
-			CombatFx.hit_stop(0.04, 0.3)
-		return true
-	return false
+	else:
+		attack_cooldown_left = attack_cooldown
 
 
 func get_ranged_range_meters() -> float:
@@ -560,17 +583,18 @@ func get_ranged_range_meters() -> float:
 	return active_soul.ranged_range_meters
 
 
-# Turn-mode spell (the mage). Spends the turn's attack like a throw does, then
-# recharges over the player's own turns. Coroutine: the bolt flies, and on
-# impact the spell hits the one target or, for an area spell, everyone near
-# the impact point. Frost Snare also roots its primary target.
+# The mage's spells. Spends the turn's attack like a throw does, then recharges
+# over the player's own turns (in exploration, WP13, over real time; see
+# EXPLORATION_SECONDS_PER_TURN). Coroutine: the bolt flies, and on impact the
+# spell hits the one target or, for an area spell, everyone near the impact
+# point. Frost Snare also roots its primary target.
 func try_cast_spell(spell_id: StringName, target: Node3D = null) -> bool:
-	if not _turn_mode or active_soul == null or not _alive:
+	if active_soul == null or not _alive:
 		return false
 	var spell := active_soul.get_spell(spell_id)
 	if spell == null:
 		return false
-	if not _turn_active or not _turn_attack_available:
+	if not _attack_available_now():
 		return false
 	if get_spell_cooldown(spell_id) > 0:
 		return false
@@ -581,7 +605,7 @@ func try_cast_spell(spell_id: StringName, target: Node3D = null) -> bool:
 	if GroundMath.ground_distance(global_position, target.global_position) > spell.range_meters + ATTACK_RANGE_TOLERANCE:
 		return false
 
-	_turn_attack_available = false
+	_spend_attack()
 	if spell.cooldown_turns > 0:
 		spell_cooldowns[spell_id] = spell.cooldown_turns
 	_face_toward_world(target.global_position)
@@ -1427,6 +1451,20 @@ func _tick_spell_cooldowns() -> void:
 			spell_cooldowns.erase(spell_id)
 		else:
 			spell_cooldowns[spell_id] = left
+
+
+## Exploration (WP13): with no turns to count, one turn of cooldown melts every
+## EXPLORATION_SECONDS_PER_TURN seconds. The clock only runs while something is
+## recharging, so the first tick after a cast is a full interval away.
+func _tick_exploration_spell_cooldowns(delta: float) -> void:
+	if spell_cooldowns.is_empty():
+		_exploration_cooldown_tick_left = EXPLORATION_SECONDS_PER_TURN
+		return
+	_exploration_cooldown_tick_left -= delta
+	if _exploration_cooldown_tick_left > 0.0:
+		return
+	_exploration_cooldown_tick_left = EXPLORATION_SECONDS_PER_TURN
+	_tick_spell_cooldowns()
 
 
 # --- Inventory and the held weapon ------------------------------------------------
