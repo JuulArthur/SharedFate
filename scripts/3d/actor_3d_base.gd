@@ -35,6 +35,25 @@ const STUCK_MOVE_EPSILON := 0.03
 ## Slack on `attack_range` so a target standing exactly at range still gets hit.
 const ATTACK_RANGE_TOLERANCE := 0.05
 
+## Approach spacing (WP10). An actor walking up to attack aims at a point on the
+## line to its target, this far from the target's origin:
+##
+##   clamp(reach - reach_margin,  own radius + target radius + SURFACE_GAP,  reach - arrival slack)
+##
+## The lower bound keeps the two collision surfaces APPROACH_SURFACE_GAP_M apart
+## (the old buffers aimed 0.2 to 0.4 m inside the other body). The upper bound is
+## the farthest point from which the attack still lands once the agent has
+## stopped, because the walk ends up to `target_desired_distance` short of its
+## goal. When the geometry cannot give both (a short weapon against a long body)
+## reach wins and the surfaces may touch.
+const APPROACH_SURFACE_GAP_M := 0.1
+## How far inside the reach the walk aims by default: the arrival slack plus
+## the same again, so a stop anywhere in the slack is still an attack.
+const APPROACH_REACH_MARGIN_M := 0.2
+## Footprint assumed for a target without a CollisionShape3D (the coordinator's
+## DEFAULT_CHARACTER_RADIUS_M).
+const DEFAULT_COLLISION_RADIUS_M := 0.4
+
 var health: int = 0
 
 var navigation_agent: NavigationAgent3D = null
@@ -50,6 +69,14 @@ var _turn_move_left := 0.0
 var _turn_attack_available := false
 var _stuck_timer := 0.0
 var _last_position := Vector3.ZERO
+# Set by `_step_navigation` on a frame it hands a velocity to the avoidance
+# simulation; `_on_velocity_computed` only moves the body while it is set. The
+# NavigationServer keeps the last submitted velocity and answers every physics
+# frame, so without this gate a body that has halted keeps sliding, and a body
+# that never asked to move is shoved aside by a neighbour's avoidance (RVO
+# splits the dodge between both agents).
+var _avoidance_step_requested := false
+var _avoidance_velocity_submitted := false
 
 
 func _ready() -> void:
@@ -85,6 +112,7 @@ func _physics_process(delta: float) -> void:
 ## body is moved there instead.
 func _step_navigation() -> void:
 	if navigation_agent.is_navigation_finished():
+		_submit_avoidance_velocity(Vector3.ZERO)
 		velocity = Vector3.ZERO
 		move_and_slide()
 		_settle_on_ground()
@@ -96,7 +124,8 @@ func _step_navigation() -> void:
 		rotation.y = GroundMath.yaw_facing(direction)
 	var desired_velocity := direction * move_speed
 	if navigation_agent.avoidance_enabled:
-		navigation_agent.set_velocity(desired_velocity)
+		_avoidance_step_requested = true
+		_submit_avoidance_velocity(desired_velocity)
 		return
 	velocity = desired_velocity
 	move_and_slide()
@@ -104,9 +133,44 @@ func _step_navigation() -> void:
 
 
 func _on_velocity_computed(safe_velocity: Vector3) -> void:
-	if not _alive:
+	if not _alive or not _avoidance_step_requested:
 		return
-	velocity = safe_velocity
+	_avoidance_step_requested = false
+	# The simulation may answer with any speed up to the agent's max_speed when
+	# it dodges; a body never moves faster than it walks.
+	velocity = safe_velocity.limit_length(move_speed)
+	move_and_slide()
+	_settle_on_ground()
+
+
+## Hands the avoidance simulation the velocity this body wants. A zero is
+## submitted once, so neighbours see a stationary agent and the server's stored
+## velocity cannot outlive the walk.
+func _submit_avoidance_velocity(wanted: Vector3) -> void:
+	if navigation_agent == null or not navigation_agent.avoidance_enabled:
+		return
+	var is_zero := wanted == Vector3.ZERO
+	if is_zero and not _avoidance_velocity_submitted:
+		return
+	navigation_agent.set_velocity(wanted)
+	_avoidance_velocity_submitted = not is_zero
+
+
+## Stand still this frame and give up the current destination, without the
+## side effects of `stop_movement_immediately` (the player's override clears its
+## attack target there). Used by the chase and the click-to-attack pursuit once
+## the target is within reach: the agent is parked so `is_moving()` turns false
+## and the stuck detector stops counting, and the avoidance simulation is told
+## the body wants to stay put. The pursuit re-routes when the target steps out
+## of reach.
+func hold_position() -> void:
+	_submit_avoidance_velocity(Vector3.ZERO)
+	_avoidance_step_requested = false
+	velocity = Vector3.ZERO
+	if navigation_agent != null and not navigation_agent.is_navigation_finished():
+		navigation_agent.target_position = global_position
+	_stuck_timer = 0.0
+	_last_position = global_position
 	move_and_slide()
 	_settle_on_ground()
 
@@ -143,7 +207,9 @@ func snap_to(world_position: Vector3) -> void:
 	velocity = Vector3.ZERO
 	_stuck_timer = 0.0
 	_last_position = grounded
+	_avoidance_step_requested = false
 	if navigation_agent != null:
+		_submit_avoidance_velocity(Vector3.ZERO)
 		navigation_agent.target_position = grounded
 
 
@@ -179,6 +245,8 @@ func _closest_navigation_point(world_position: Vector3) -> Vector3:
 func stop_movement_immediately() -> void:
 	velocity = Vector3.ZERO
 	if navigation_agent != null:
+		_submit_avoidance_velocity(Vector3.ZERO)
+		_avoidance_step_requested = false
 		navigation_agent.target_position = global_position
 	_stuck_timer = 0.0
 	_last_position = global_position
@@ -338,6 +406,53 @@ func try_attack(target: Node3D = null) -> bool:
 ## and soul aware.
 func _outgoing_damage() -> int:
 	return attack_damage
+
+
+# --- Approach spacing (WP10) --------------------------------------------------------
+
+## Where to stop when walking up to attack `target`: the distance from the
+## target's origin, by the rule documented at APPROACH_SURFACE_GAP_M. `reach`
+## defaults to `attack_range` (the player passes its weapon range) and
+## `reach_margin` to APPROACH_REACH_MARGIN_M.
+func get_attack_approach_distance(target: Node3D, reach: float = -1.0, reach_margin: float = -1.0) -> float:
+	if reach < 0.0:
+		reach = attack_range
+	if reach_margin < 0.0:
+		reach_margin = APPROACH_REACH_MARGIN_M
+	var arrival_slack := 0.0
+	if navigation_agent != null:
+		arrival_slack = navigation_agent.target_desired_distance
+	var farthest_attacking_stop := maxf(0.0, reach - arrival_slack)
+	var surfaces_apart := get_collision_radius() + collision_radius_of(target) + APPROACH_SURFACE_GAP_M
+	var lower := minf(surfaces_apart, farthest_attacking_stop)
+	return clampf(reach - reach_margin, lower, farthest_attacking_stop)
+
+
+## This body's footprint radius on the ground, from its CollisionShape3D.
+func get_collision_radius() -> float:
+	return collision_radius_of(self)
+
+
+## Footprint radius of any body with a `CollisionShape3D` child: the radius of a
+## capsule, sphere or cylinder, the larger half extent of a box on the ground
+## plane. DEFAULT_COLLISION_RADIUS_M without a usable shape.
+static func collision_radius_of(body: Node) -> float:
+	if body == null or not is_instance_valid(body):
+		return DEFAULT_COLLISION_RADIUS_M
+	var shape_node := body.get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if shape_node == null or shape_node.shape == null:
+		return DEFAULT_COLLISION_RADIUS_M
+	var shape := shape_node.shape
+	if shape is CapsuleShape3D:
+		return (shape as CapsuleShape3D).radius
+	if shape is SphereShape3D:
+		return (shape as SphereShape3D).radius
+	if shape is CylinderShape3D:
+		return (shape as CylinderShape3D).radius
+	if shape is BoxShape3D:
+		var size := (shape as BoxShape3D).size
+		return maxf(size.x, size.z) * 0.5
+	return DEFAULT_COLLISION_RADIUS_M
 
 
 # --- Children ----------------------------------------------------------------------

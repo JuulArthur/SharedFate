@@ -25,6 +25,9 @@ extends ActorBase3D
 
 # Base class exports keep their 2D names: move_speed (3.5 m/s), max_health,
 # attack_damage, attack_range (1.2 m).
+# How far inside the melee reach the walk-up aims (the 2D value was 20 px). The
+# base class's approach rule floors this at the two collision surfaces plus a
+# gap, so against a wolf the floor wins (WP10).
 @export var attack_approach_buffer := 0.4
 @export var attack_cooldown := 0.35
 @export var attack_animation_speed_scale := 1.6
@@ -85,9 +88,6 @@ const WEAPON_MESH_SIZE := Vector3(0.06, 0.8, 0.02)
 const WEAPON_MESH_COLOR := Color(0.78, 0.8, 0.84, 1.0)
 # Where the placeholder hand sits when the scene has no HandPoint of its own.
 const DEFAULT_HAND_POINT := Vector3(0.34, 0.85, -0.08)
-# 2D used 4 px; 3D actors do not collide with each other, so this only keeps the
-# approach point from landing inside the target.
-const MIN_APPROACH_DISTANCE_M := 0.2
 const MANUAL_PATH_ARRIVE_M := 0.1
 # Height of the exploration sweep sphere and of the bolt endpoints.
 const SWEEP_HEIGHT_M := 0.9
@@ -241,16 +241,18 @@ func _pursue_attack_target() -> bool:
 		clear_attack_target()
 		return false
 
-	if target_refresh_left <= 0.0:
-		_refresh_attack_target_position()
-		target_refresh_left = target_refresh_interval
-
+	# In reach: stand and swing. The walk is parked, not re-aimed every refresh,
+	# so nothing keeps nudging the body toward a point inside the enemy (WP10).
 	if GroundMath.ground_distance(global_position, attack_target.global_position) <= get_melee_range():
-		velocity = Vector3.ZERO
-		move_and_slide()
-		_settle_on_ground()
+		hold_position()
 		_try_attack_target(attack_target)
 		return true
+
+	# Out of reach: re-aim on the refresh interval, or at once when the walk was
+	# parked in reach and the enemy has since stepped away.
+	if target_refresh_left <= 0.0 or navigation_agent.is_navigation_finished():
+		_refresh_attack_target_position()
+		target_refresh_left = target_refresh_interval
 	return false
 
 
@@ -799,8 +801,13 @@ func _compute_approach_point(target_world_position: Vector3, stop_distance: floa
 	return there + (to_mover / distance) * stop_distance
 
 
-func get_preferred_attack_approach_distance() -> float:
-	return maxf(MIN_APPROACH_DISTANCE_M, get_melee_range() - attack_approach_buffer)
+## Where the walk-up to `target` (the current attack target when omitted) stops:
+## the base class's spacing rule with the weapon's reach and this player's
+## buffer (WP10). With no target at all only the reach and the buffer apply.
+func get_preferred_attack_approach_distance(target: Node3D = null) -> float:
+	if target == null:
+		target = attack_target
+	return get_attack_approach_distance(target, get_melee_range(), attack_approach_buffer)
 
 
 ## The exploration sweep (spacebar): everything within melee range takes a hit.

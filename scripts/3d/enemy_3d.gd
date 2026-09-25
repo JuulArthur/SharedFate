@@ -72,11 +72,9 @@ const DEATH_FLASH_TINT := Color(2.6, 2.6, 2.6, 1.0)
 ## The 2D hover outline colour, as a faint additive rim on the model.
 const HOVER_TINT := Color(0.95, 0.14, 0.14, 0.28)
 
-## How far short of `attack_range` the chase aims. 2D used `attack_range - 20 px`
-## against an 8 px `target_desired_distance`; 3D stops 0.4 m short of its goal, so
-## the buffer has to be wider or the enemy parks just outside its own reach.
-const APPROACH_BUFFER_M := 0.5
-const MIN_APPROACH_DISTANCE_M := 0.06
+## Where the chase aims is the base class's approach rule (WP10,
+## `get_attack_approach_distance`): inside `attack_range`, but never closer than
+## the two collision surfaces plus a gap. 2D aimed `attack_range - 20 px`.
 ## The 2D swing aborts when the target has walked out of `attack_range * 1.2`.
 const ATTACK_BREAK_FACTOR := 1.2
 
@@ -148,24 +146,28 @@ func _physics_process(delta: float) -> void:
 			return
 		_aggroed = true
 
-	if _target_refresh_left <= 0.0:
-		_refresh_target_position()
-		_target_refresh_left = target_refresh_interval
-
+	# Within reach: stand and bite. The chase is parked rather than re-aimed
+	# every refresh, so nothing keeps nudging the body toward a point inside
+	# the player (WP10).
 	if GroundMath.ground_distance(global_position, target.global_position) <= attack_range:
 		_halt()
 		_try_attack_target()
 		return
 
+	# Out of reach: re-aim on the refresh interval, or at once when the chase
+	# was parked while the player stood in reach and has since stepped away.
+	if _target_refresh_left <= 0.0 or navigation_agent.is_navigation_finished():
+		_refresh_target_position()
+		_target_refresh_left = target_refresh_interval
+
 	super(delta)
 
 
-## The 2D `velocity = ZERO; move_and_slide()`: stand still without touching the
-## navigation target, so the chase resumes the moment the gate opens.
+## The 2D `velocity = ZERO; move_and_slide()`, plus what 3D needs: the agent is
+## parked and the avoidance simulation is told the body is standing (WP10). The
+## chase resumes from `_refresh_target_position` the moment the gate opens.
 func _halt() -> void:
-	velocity = Vector3.ZERO
-	move_and_slide()
-	_settle_on_ground()
+	hold_position()
 
 
 func _live_target() -> Node3D:
@@ -187,9 +189,10 @@ func _refresh_target_position() -> void:
 	set_navigation_target(_compute_approach_point(_target.global_position, _approach_distance()))
 
 
-## Stop short of the target instead of walking into it, as 2D does.
+## Stop short of the target instead of walking into it, as 2D does; the rule
+## that keeps the two bodies apart lives in ActorBase3D.
 func _approach_distance() -> float:
-	return maxf(MIN_APPROACH_DISTANCE_M, attack_range - APPROACH_BUFFER_M)
+	return get_attack_approach_distance(_target)
 
 
 func _compute_approach_point(target_world_position: Vector3, stop_distance: float) -> Vector3:
@@ -240,7 +243,9 @@ func _attack_precheck() -> bool:
 		return false
 	if _target.has_method("is_alive") and not bool(_target.call("is_alive")):
 		return false
-	if GroundMath.ground_distance(global_position, _target.global_position) > attack_range:
+	# The base's tolerance (WP10): a turn-mode approach may stop exactly on the
+	# reach, and the 2D strict compare refused the bite by a rounding error.
+	if GroundMath.ground_distance(global_position, _target.global_position) > attack_range + ATTACK_RANGE_TOLERANCE:
 		return false
 	return _target.has_method("receive_damage")
 

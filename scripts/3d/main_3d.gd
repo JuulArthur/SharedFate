@@ -37,11 +37,15 @@ const CAMERA_ENEMY_FOCUS_BLEND := 0.6
 const TURN_MODE_ENEMY_BLOCKER_EXTRA_RADIUS := 0.6
 const ENEMY_PERSONAL_SPACE_PADDING_M := 0.2
 const TEST_LOOT_SPREAD_M := 0.8
-# An enemy walks to this far inside its own reach (2D: max(4 px, range - 20 px)).
-# Same buffer the 3D player uses (`attack_approach_buffer`, 0.4 m).
+# Fallback approach stop for an actor without the WP10 spacing rule (the WP0
+# stubs): this far inside its reach (2D: max(4 px, range - 20 px)). Real actors
+# answer `get_attack_approach_distance`, see `approach_distance_for`.
 const ENEMY_APPROACH_BUFFER_M := 0.4
 const ENEMY_APPROACH_MIN_M := 0.2
 const DEFAULT_CHARACTER_RADIUS_M := 0.4
+# The actors' own slack on a range check (ActorBase3D.ATTACK_RANGE_TOLERANCE):
+# a turn-mode approach may stop exactly on the reach (WP10).
+const ATTACK_RANGE_TOLERANCE_M := 0.05
 # Popups anchor to the actor's OverheadAnchor; this is the fallback height.
 const POPUP_HEIGHT_M := 1.8
 # Collision layers, docs/3d-port-contracts.md section 3.
@@ -679,7 +683,7 @@ func _request_player_turn_attack(target_enemy: CharacterBody3D = null) -> void:
 		target_enemy = _get_closest_enemy_to_player()
 	if target_enemy == null:
 		return
-	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > _get_player_melee_range():
+	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > _get_player_melee_range() + ATTACK_RANGE_TOLERANCE_M:
 		return
 
 	await player.try_attack(target_enemy)
@@ -816,9 +820,7 @@ func _request_player_turn_engage_enemy(target_enemy: CharacterBody3D = null) -> 
 	if remaining_meters <= 0.0 and can_attack:
 		_fx_popup(_popup_anchor(target_enemy), "Out of reach", CombatFx.COLOR_WARNING, 16)
 	if remaining_meters > 0.0:
-		var player_approach_distance := float(player.get("attack_range"))
-		if player.has_method("get_preferred_attack_approach_distance"):
-			player_approach_distance = float(player.call("get_preferred_attack_approach_distance"))
+		var player_approach_distance := approach_distance_for(player, target_enemy, _get_player_melee_range())
 		var approach_point := _compute_approach_world_point(player.global_position, target_enemy.global_position, player_approach_distance)
 		var used_meters := _request_player_turn_move_by_distance(approach_point, remaining_meters)
 		if used_meters > 0.0:
@@ -947,7 +949,7 @@ func _player_can_attack_enemy_now(target_enemy: CharacterBody3D = null) -> bool:
 		target_enemy = _get_closest_enemy_to_player()
 	if target_enemy == null:
 		return false
-	return GroundMath.ground_distance(player.global_position, target_enemy.global_position) <= _get_player_melee_range()
+	return GroundMath.ground_distance(player.global_position, target_enemy.global_position) <= _get_player_melee_range() + ATTACK_RANGE_TOLERANCE_M
 
 
 # --- Navigation grid (AStarGrid2D on GroundMath cells) -----------------------
@@ -1121,7 +1123,7 @@ func _request_enemy_turn_move_by_distance(enemy_actor: CharacterBody3D, max_mete
 	_rebuild_navigation_grid()
 
 	var enemy_attack_range := float(enemy_actor.get("attack_range"))
-	var stop_distance := maxf(ENEMY_APPROACH_MIN_M, enemy_attack_range - ENEMY_APPROACH_BUFFER_M)
+	var stop_distance := approach_distance_for(enemy_actor, player, enemy_attack_range)
 	var approach_point := _compute_approach_world_point(enemy_actor.global_position, player.global_position, stop_distance)
 	var world_path := _build_world_path_from_navigation(enemy_actor.global_position, approach_point, enemy_actor)
 	if world_path.size() <= 1:
@@ -1214,6 +1216,19 @@ func _get_closest_enemy_to_player() -> CharacterBody3D:
 			closest_dist = d
 			closest = candidate
 	return closest
+
+
+# How far from `target`'s origin `mover` stops before attacking with `reach`
+# (WP10). Real actors own the rule (ActorBase3D.get_attack_approach_distance:
+# inside the reach, never closer than the two collision surfaces plus a gap), so
+# turn combat stops at the same spacing as the realtime chase. A stub without
+# it gets its own preference, else the 2D-style buffer.
+static func approach_distance_for(mover: Node, target: Node, reach: float) -> float:
+	if mover != null and mover.has_method("get_attack_approach_distance"):
+		return float(mover.call("get_attack_approach_distance", target, reach))
+	if mover != null and mover.has_method("get_preferred_attack_approach_distance"):
+		return float(mover.call("get_preferred_attack_approach_distance"))
+	return maxf(ENEMY_APPROACH_MIN_M, reach - ENEMY_APPROACH_BUFFER_M)
 
 
 # Point on the ground plane `stop_distance` short of `target_world`, on the
