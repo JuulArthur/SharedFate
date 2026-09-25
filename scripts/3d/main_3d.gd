@@ -9,16 +9,13 @@ extends Node3D
 ## camera rays, and the overlays go through the section 7 APIs of
 ## docs/3d-port-contracts.md. Actors are duck-typed (section 5).
 ##
-## Level node contract: docs/3d-port-contracts.md, section 9. Until WP2, WP5 and
-## WP6 land, every place that has to be rewired is marked `TODO(3d-integration)`.
+## Level node contract: docs/3d-port-contracts.md, section 9. Picking goes
+## through WorldPicker and the level's CameraRig (section 6), popups and shake
+## through the CombatFx adapters (section 7), loot through LootDropper and
+## LootMenu (section 8). Integrated in WP8.
 
-const CAMERA_FOLLOW_SPEED := 6.0
-# Fallback camera until the WP2 CameraRig lands: orthographic, fixed angle,
-# 14 m tall, yaw 45 / pitch -35, looking at the player (contract, section 2).
+# Orthographic size handed to the CameraRig (contract, section 2).
 const CAMERA_SIZE_M := 14.0
-const CAMERA_YAW_DEG := 45.0
-const CAMERA_PITCH_DEG := -35.0
-const CAMERA_DISTANCE := 30.0
 const TURN_MOVE_METERS := 6.0
 const COMBAT_TRIGGER_DISTANCE_CELLS := 6
 # How far (in turn meters) from the player an enemy can be and still be part of
@@ -47,7 +44,6 @@ const ENEMY_APPROACH_MIN_M := 0.2
 const DEFAULT_CHARACTER_RADIUS_M := 0.4
 # Popups anchor to the actor's OverheadAnchor; this is the fallback height.
 const POPUP_HEIGHT_M := 1.8
-const PICK_RAY_LENGTH := 500.0
 # Collision layers, docs/3d-port-contracts.md section 3.
 const LAYER_GROUND := 1
 const LAYER_ACTORS := 2
@@ -55,6 +51,8 @@ const LAYER_PICKUPS := 4
 const LAYER_PROPS := 8
 # Grid used when the level has no NavigationRegion3D/Ground box to measure.
 const FALLBACK_MAP_REGION := Rect2i(-20, -20, 40, 40)
+# Physics frames to wait for the navigation map to sync a (baked) mesh.
+const NAV_MAP_SYNC_MAX_FRAMES := 120
 const MUSIC_CROSSFADE_SECONDS := 1.2
 const MUSIC_VOLUME_DB := -6.0
 
@@ -73,9 +71,8 @@ enum PlayerTurnAction {
 
 @onready var player: CharacterBody3D = $Player
 @onready var nav_region: NavigationRegion3D = get_node_or_null("NavigationRegion3D")
-# WP2's rig (section 6) when present; otherwise the plain Camera3D fallback.
-@onready var camera_rig: Node3D = get_node_or_null("CameraRig")
-@onready var fallback_camera: Camera3D = get_node_or_null("Camera3D")
+# The level's WP2 rig (section 6): the only camera a 3D level runs through.
+@onready var camera_rig: CameraRig3D = get_node_or_null("CameraRig") as CameraRig3D
 
 # Debug convenience: drop a few items beside the player on startup so the loot
 # menu can be tested without hunting down a crate. Untick in the inspector once
@@ -84,8 +81,8 @@ enum PlayerTurnAction {
 # Chapter read in the story book when this level opens (once per session).
 # Authored in StoryLibrary; leave empty for no narration.
 @export var story_chapter_id: StringName = StoryLibrary.PROLOGUE
-# Scene instanced by `_spawn_additional_enemy`. The WP0 stub until WP3c lands.
-@export var enemy_scene: PackedScene = preload("res://scenes/3d/stubs/stub_enemy_3d.tscn")
+# Scene instanced by `_spawn_additional_enemy`: the WP3c wolf by default.
+@export var enemy_scene: PackedScene = preload("res://scenes/3d/wolf_3d.tscn")
 # A level authored in the editor ships a baked NavigationMesh; a test scene may
 # not, in which case the coordinator bakes one at start.
 @export var bake_navmesh_if_empty: bool = true
@@ -104,6 +101,8 @@ var combat_state: CombatState = CombatState.EXPLORATION
 var enemy_turn_running := false
 var active_enemy_turn_actor: CharacterBody3D
 var hovered_enemy: CharacterBody3D
+# The 3D pickup under the cursor; it never hit-tests itself (section 8).
+var hovered_pickup: Node3D
 var player_turn_action_running := false
 var turn_ui_layer: CanvasLayer
 var turn_ui_panel: PanelContainer
@@ -133,13 +132,13 @@ var soul_ui_panel: PanelContainer
 var soul_ui_buttons: Array[Button] = []
 var soul_ui_status_label: Label
 var _soul_ui_styled_kind := -1
-# Overlays (section 7), created through `_create_overlay` and called duck-typed
-# so the placeholder and the WP5 nodes are interchangeable.
-var path_preview: Node3D
-var melee_range_ring: Node3D
-var ranged_range_ring: Node3D
-var spell_area_ring: Node3D
-var _camera_focus := Vector3.ZERO
+# Overlays (section 7, WP5). The path preview lives under the level root and
+# takes global points; the melee and ranged rings ride under the player body;
+# the blast ring is moved onto the hovered enemy each frame.
+var path_preview: PathPreview3D
+var melee_range_ring: RangeRing3D
+var ranged_range_ring: RangeRing3D
+var spell_area_ring: RangeRing3D
 var _camera_rig_focused := false
 var music_exploration: AudioStreamPlayer
 var music_combat: AudioStreamPlayer
@@ -155,14 +154,16 @@ func _ready() -> void:
 	_map_region = _compute_map_region()
 	_cache_blocked_cells_from_props()
 	_rebuild_navigation_grid()
-	_setup_navmesh()
 	_place_player()
 	# Spell radii are authored in meters; with 1 unit = 1 m this is 1.0.
 	if player.has_method("set_turn_meter_world_units"):
 		player.call("set_turn_meter_world_units", _get_turn_meter_world_units())
 	_spawn_test_loot()
 	_register_placed_enemies()
-	_wire_enemy_ai_targets()
+	# Enemy targets are wired once the navigation map has synced (`_setup_navmesh`):
+	# Enemy3D.set_target routes at once, and a map query before the first sync
+	# is a NavigationServer error (docs/deviations/wp3c.md, section 11).
+	_setup_navmesh()
 	_setup_camera()
 
 	_setup_path_preview()
@@ -173,20 +174,20 @@ func _ready() -> void:
 	StoryBook.show_chapter_once(StoryLibrary.chapter(story_chapter_id))
 
 
-func _process(delta: float) -> void:
-	_update_camera(delta)
+func _exit_tree() -> void:
+	# The CombatFx autoload outlives this level; put it back into its 2D state
+	# so the hub does not project popups through a freed camera (section 7).
+	CombatFx.set_world_projector(Callable())
+	CombatFx.set_shake_target(null)
+
+
+func _process(_delta: float) -> void:
+	_update_camera_rig()
 	_update_combat_state()
-	_update_enemy_hover_state()
+	_update_hover_state()
 	_update_turn_ui()
 	_update_path_preview()
 	_update_range_rings()
-
-
-func _get_camera_focus_position() -> Vector3:
-	if combat_state == CombatState.ENEMY_TURN \
-			and active_enemy_turn_actor != null and is_instance_valid(active_enemy_turn_actor):
-		return player.global_position.lerp(active_enemy_turn_actor.global_position, CAMERA_ENEMY_FOCUS_BLEND)
-	return player.global_position
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -284,39 +285,79 @@ func _compute_map_region() -> Rect2i:
 	return Rect2i(min_cell, max_cell - min_cell + Vector2i.ONE)
 
 
-# Static blockers for the A* grid: every prop (layer 4) box under the
-# navigation region marks the cells it covers, as the object tilemap did in 2D.
+# Static blockers for the A* grid: every prop collider (layer 4) anywhere under
+# the navigation region marks the cells its shape covers, as the object tilemap
+# did in 2D. The imported props nest their StaticBody3D two levels down and
+# carry a concave trimesh (docs/deviations/wp7.md, deviation 2), so this walks
+# descendants and measures each shape's global AABB rather than expecting a
+# direct child with a BoxShape3D.
 func _cache_blocked_cells_from_props() -> void:
 	blocked_cells.clear()
 	if nav_region == null:
 		return
-	for child in nav_region.get_children():
-		var body := child as CollisionObject3D
-		if body == null or (body.collision_layer & LAYER_PROPS) == 0:
+	var bodies: Array[CollisionObject3D] = []
+	_collect_collision_objects(nav_region, bodies)
+	for body in bodies:
+		if (body.collision_layer & LAYER_PROPS) == 0:
 			continue
 		for shape_child in body.get_children():
 			var shape_node := shape_child as CollisionShape3D
-			if shape_node == null or not (shape_node.shape is BoxShape3D):
+			if shape_node == null or shape_node.shape == null or shape_node.disabled:
 				continue
-			var box := shape_node.shape as BoxShape3D
-			var half := box.size * 0.5
-			var origin := shape_node.global_position
-			var min_cell := GroundMath.to_cell(Vector3(origin.x - half.x, 0.0, origin.z - half.z))
-			var max_cell := GroundMath.to_cell(Vector3(origin.x + half.x - 0.001, 0.0, origin.z + half.z - 0.001))
+			var bounds := _shape_global_aabb(shape_node)
+			if bounds.size == Vector3.ZERO:
+				continue
+			var min_cell := GroundMath.to_cell(Vector3(bounds.position.x, 0.0, bounds.position.z))
+			var max_cell := GroundMath.to_cell(Vector3(bounds.end.x - 0.001, 0.0, bounds.end.z - 0.001))
 			for x in range(min_cell.x, max_cell.x + 1):
 				for y in range(min_cell.y, max_cell.y + 1):
 					blocked_cells[Vector2i(x, y)] = true
 
 
+func _collect_collision_objects(node: Node, out: Array[CollisionObject3D]) -> void:
+	for child in node.get_children():
+		if child is CollisionObject3D:
+			out.append(child as CollisionObject3D)
+		_collect_collision_objects(child, out)
+
+
+# World-space bounds of a collision shape: the shape's local bounds (box size,
+# trimesh faces, or the debug mesh for anything else) through the node's global
+# transform.
+func _shape_global_aabb(shape_node: CollisionShape3D) -> AABB:
+	var shape := shape_node.shape
+	var local := AABB()
+	if shape is BoxShape3D:
+		var size := (shape as BoxShape3D).size
+		local = AABB(-size * 0.5, size)
+	elif shape is ConcavePolygonShape3D:
+		var faces := (shape as ConcavePolygonShape3D).get_faces()
+		if faces.is_empty():
+			return AABB()
+		local = AABB(faces[0], Vector3.ZERO)
+		for vertex in faces:
+			local = local.expand(vertex)
+	else:
+		var debug_mesh := shape.get_debug_mesh()
+		if debug_mesh == null:
+			return AABB()
+		local = debug_mesh.get_aabb()
+	return shape_node.global_transform * local
+
+
 func _setup_navmesh() -> void:
 	if nav_region == null:
 		push_warning("main_3d: no NavigationRegion3D; turn moves will find no paths")
+		_wire_enemy_ai_targets()
 		return
 	var mesh := nav_region.navigation_mesh
 	if mesh != null and mesh.get_polygon_count() > 0:
-		_navmesh_ready = true
+		# An editor-baked mesh (WP7) still reaches the server only on the first
+		# map sync, one physics frame away.
+		_finish_navmesh_setup(0)
 		return
 	if not bake_navmesh_if_empty:
+		_wire_enemy_ai_targets()
 		return
 	if mesh == null:
 		mesh = NavigationMesh.new()
@@ -328,12 +369,39 @@ func _setup_navmesh() -> void:
 
 
 func _on_navmesh_bake_finished() -> void:
-	# The region hands its mesh to the server on the next map sync; two physics
-	# frames later `map_get_path` sees it.
-	await get_tree().physics_frame
-	await get_tree().physics_frame
-	_navmesh_ready = true
+	# The region hands its mesh to the server on the next map sync; wait for
+	# that iteration before anyone routes.
+	_finish_navmesh_setup(NavigationServer3D.map_get_iteration_id(_level_navigation_map()))
 	print("[main_3d] navmesh baked")
+
+
+# Coroutine: waits until the navigation map has synced past `after_iteration`
+# (the mesh is then queryable), marks the level ready and wires the enemies.
+func _finish_navmesh_setup(after_iteration: int) -> void:
+	await _wait_for_navigation_map(after_iteration)
+	_navmesh_ready = true
+	_wire_enemy_ai_targets()
+
+
+# A map query made before the server's first sync is a NavigationServer error,
+# and a freshly baked mesh is only visible from the next sync on. The map's
+# iteration id counts those syncs.
+func _wait_for_navigation_map(after_iteration: int) -> void:
+	var map := _level_navigation_map()
+	if not map.is_valid():
+		return
+	for _i in range(NAV_MAP_SYNC_MAX_FRAMES):
+		if NavigationServer3D.map_get_iteration_id(map) > after_iteration:
+			return
+		await get_tree().physics_frame
+	push_warning("main_3d: the navigation map did not sync within %d physics frames" % NAV_MAP_SYNC_MAX_FRAMES)
+
+
+func _level_navigation_map() -> RID:
+	var world := get_world_3d()
+	if world == null:
+		return RID()
+	return world.navigation_map
 
 
 ## True once NavigationServer3D can answer path queries for this level.
@@ -347,12 +415,8 @@ func _spawn_test_loot() -> void:
 
 	# Goes out through LootDropper like every other drop, so what you test is
 	# exactly what a crate or a dead enemy produces. One of everything, so the
-	# inventory screen has a full set of gear to try on.
-	if not _loot_dropper_accepts_node3d():
-		# TODO(3d-integration): LootDropper.drop_items still takes a Node2D; WP6
-		# widens it to Node and instances the 3D pickup. Skipped until then.
-		print("[main_3d] test loot skipped: LootDropper.drop_items does not accept a Node3D source yet")
-		return
+	# inventory screen has a full set of gear to try on. The 3D branch of
+	# `drop_items` (WP6) spreads the ring on the ground plane in metres.
 	var items: Array[Item] = [
 		ItemFactory.create_sword(),
 		ItemFactory.create_dagger(),
@@ -360,8 +424,7 @@ func _spawn_test_loot() -> void:
 	]
 	for builder in ItemFactory.gear_builders():
 		items.append(builder.call())
-	# Dynamic call: the analyzer still sees the 2D `Node2D` parameter type.
-	LootDropper.new().call("drop_items", player, items, TEST_LOOT_SPREAD_M)
+	LootDropper.drop_items(player, items, TEST_LOOT_SPREAD_M)
 
 
 func _place_player() -> void:
@@ -433,61 +496,26 @@ func _handle_turn_input(event: InputEvent) -> void:
 
 
 # --- Picking (section 6) -----------------------------------------------------
-# Camera rays against the ground, actor and pickup layers.
+# WorldPicker rays through the rig's camera against the ground, actor and
+# pickup layers, in the 2D order: pickup, enemy, ground.
 
-func _ray_query(screen_pos: Vector2, mask: int, with_bodies: bool, with_areas: bool) -> Dictionary:
-	var camera := _get_active_camera()
-	if camera == null:
-		return {}
-	var space := get_world_3d().direct_space_state
-	if space == null:
-		return {}
-	var from := camera.project_ray_origin(screen_pos)
-	var to := from + camera.project_ray_normal(screen_pos) * PICK_RAY_LENGTH
-	var params := PhysicsRayQueryParameters3D.create(from, to, mask)
-	params.collide_with_bodies = with_bodies
-	params.collide_with_areas = with_areas
-	return space.intersect_ray(params)
-
-
-# TODO(3d-integration): replace with WorldPicker.pick_ground(camera, screen_pos) (WP2).
 func _pick_ground(screen_pos: Vector2) -> Variant:
-	var hit := _ray_query(screen_pos, LAYER_GROUND, true, false)
-	if hit.is_empty():
-		return null
-	return hit["position"]
+	return WorldPicker.pick_ground(_get_active_camera(), screen_pos)
 
 
-# TODO(3d-integration): replace with WorldPicker.pick_enemy(camera, screen_pos) (WP2).
 func _pick_enemy(screen_pos: Vector2) -> Node3D:
-	var hit := _ray_query(screen_pos, LAYER_ACTORS, true, false)
-	if hit.is_empty():
-		return null
-	var collider := hit.get("collider") as Node3D
-	if collider == null or not collider.is_in_group("enemies"):
-		return null
-	if collider.has_method("is_alive") and not bool(collider.call("is_alive")):
-		return null
-	return collider
+	return WorldPicker.pick_enemy(_get_active_camera(), screen_pos)
 
 
-# TODO(3d-integration): replace with WorldPicker.pick_pickup(camera, screen_pos) (WP2).
+# Only an available pickup counts as clickable; WorldPicker returns the owning
+# ItemPickup3D (or a bare area when nothing above it answers `is_available`).
 func _pick_pickup(screen_pos: Vector2) -> Node3D:
-	var hit := _ray_query(screen_pos, LAYER_PICKUPS, false, true)
-	if hit.is_empty():
+	var pickup := WorldPicker.pick_pickup(_get_active_camera(), screen_pos)
+	if pickup == null or not pickup.has_method("is_available"):
 		return null
-	var node := hit.get("collider") as Node
-	# The area may be the pickup itself or a child of it (WP6's ItemPickup3D).
-	for _depth in range(3):
-		if node == null:
-			return null
-		if node.has_method("is_available"):
-			var pickup := node as Node3D
-			if pickup != null and bool(node.call("is_available")):
-				return pickup
-			return null
-		node = node.get_parent()
-	return null
+	if not bool(pickup.call("is_available")):
+		return null
+	return pickup
 
 
 # A click on a pickup. Returns true when the click was spent on loot (menu
@@ -496,12 +524,7 @@ func _try_click_pickup(screen_pos: Vector2) -> bool:
 	var pickup := _pick_pickup(screen_pos)
 	if pickup == null:
 		return false
-	if not _loot_menu_accepts_node3d():
-		# TODO(3d-integration): LootMenu.request_loot still takes a Node2D; WP6
-		# widens it to Node. Until then a 3D pickup click falls through.
-		return false
-	var looted := bool(LootMenu.call("request_loot", pickup, player))
-	if looted:
+	if LootMenu.request_loot(pickup, player):
 		return true
 	# Too far to loot. The 2D pickup left the click unhandled so click-to-move
 	# walked the player over; here the coordinator does that walk itself, and
@@ -514,33 +537,6 @@ func _try_click_pickup(screen_pos: Vector2) -> bool:
 	else:
 		_request_player_turn_move(approach)
 	return true
-
-
-func _loot_menu_accepts_node3d() -> bool:
-	return _method_arg_accepts_node3d(LootMenu.get_method_list(), "request_loot", 0)
-
-
-func _loot_dropper_accepts_node3d() -> bool:
-	return _method_arg_accepts_node3d(LootDropper.new().get_method_list(), "drop_items", 0)
-
-
-# Whether `method_name`'s argument `arg_index` can take a Node3D: untyped, or
-# typed as a class Node3D inherits from. False for the 2D `Node2D` signature.
-static func _method_arg_accepts_node3d(methods: Array[Dictionary], method_name: String, arg_index: int) -> bool:
-	for method in methods:
-		if String(method.get("name", "")) != method_name:
-			continue
-		var args: Array = method.get("args", [])
-		if arg_index >= args.size():
-			return false
-		var arg: Dictionary = args[arg_index]
-		if int(arg.get("type", TYPE_NIL)) != TYPE_OBJECT:
-			return true
-		var class_id := String(arg.get("class_name", ""))
-		if class_id.is_empty():
-			return true
-		return ClassDB.is_parent_class("Node3D", class_id)
-	return false
 
 
 # --- Combat state --------------------------------------------------------------
@@ -1420,127 +1416,81 @@ func _spawn_additional_enemy(target_cell: Vector2i, search_radius: int = 6) -> C
 
 
 # --- Camera (section 6) --------------------------------------------------------
+# A 3D level runs through its CameraRig and nothing else: `_ready` reports a
+# missing rig, and every pick and projection then answers null / zero.
 
 func _get_active_camera() -> Camera3D:
-	if camera_rig != null and camera_rig.has_method("get_camera"):
-		var rig_camera: Variant = camera_rig.call("get_camera")
-		if rig_camera is Camera3D:
-			return rig_camera
-	if fallback_camera != null:
-		return fallback_camera
-	return get_viewport().get_camera_3d()
+	if camera_rig == null:
+		return null
+	return camera_rig.get_camera()
 
 
 func _setup_camera() -> void:
-	_camera_focus = player.global_position
-	if camera_rig != null and camera_rig.has_method("set_follow_target"):
-		camera_rig.call("set_follow_target", player)
-		if camera_rig.has_method("set_zoom_size"):
-			camera_rig.call("set_zoom_size", CAMERA_SIZE_M)
+	if camera_rig == null:
+		push_error("main_3d: %s has no CameraRig (scenes/3d/camera_rig_3d.tscn, contract section 9); clicks, popups and the follow camera are disabled" % name)
 		return
-
-	# TODO(3d-integration): remove this fallback once WP2's CameraRig is in
-	# every 3D level. A node named CameraRig without the section 6 API is
-	# ignored and the plain camera is used.
-	camera_rig = null
-	if fallback_camera == null:
-		fallback_camera = Camera3D.new()
-		fallback_camera.name = "Camera3D"
-		add_child(fallback_camera)
-	fallback_camera.projection = Camera3D.PROJECTION_ORTHOGONAL
-	fallback_camera.size = CAMERA_SIZE_M
-	fallback_camera.near = 0.1
-	fallback_camera.far = 200.0
-	fallback_camera.current = true
-	_update_camera(1.0)
+	camera_rig.set_follow_target(player)
+	camera_rig.set_zoom_size(CAMERA_SIZE_M)
+	# Drop onto the player this frame instead of lerping in from the origin,
+	# the 3D twin of the 2D `_center_camera`.
+	camera_rig.snap_to_target()
 
 
-func _update_camera(delta: float) -> void:
-	if camera_rig != null:
-		_update_camera_rig()
-		return
-	if fallback_camera == null:
-		return
-	# TODO(3d-integration): CameraRig.set_follow_target / focus_between replace
-	# this fixed-angle follow (WP2).
-	var weight := clampf(delta * CAMERA_FOLLOW_SPEED, 0.0, 1.0)
-	_camera_focus = _camera_focus.lerp(_get_camera_focus_position(), weight)
-	var look_at_point := GroundMath.flatten(_camera_focus, 1.0)
-	var back := Vector3(0.0, 0.0, CAMERA_DISTANCE)
-	back = back.rotated(Vector3.RIGHT, deg_to_rad(CAMERA_PITCH_DEG))
-	back = back.rotated(Vector3.UP, deg_to_rad(CAMERA_YAW_DEG))
-	fallback_camera.global_position = look_at_point + back
-	fallback_camera.look_at(look_at_point, Vector3.UP)
-
-
+# Enemy-turn framing: the rig looks between the player and the acting enemy,
+# biased toward the enemy, and returns to the follow target afterwards.
 func _update_camera_rig() -> void:
+	if camera_rig == null:
+		return
 	var focus_enemy: CharacterBody3D = null
 	if combat_state == CombatState.ENEMY_TURN \
 			and active_enemy_turn_actor != null and is_instance_valid(active_enemy_turn_actor):
 		focus_enemy = active_enemy_turn_actor
 	if focus_enemy != null:
-		if camera_rig.has_method("focus_between"):
-			camera_rig.call("focus_between", player, focus_enemy, CAMERA_ENEMY_FOCUS_BLEND)
-			_camera_rig_focused = true
+		camera_rig.focus_between(player, focus_enemy, CAMERA_ENEMY_FOCUS_BLEND)
+		_camera_rig_focused = true
 	elif _camera_rig_focused:
-		if camera_rig.has_method("clear_focus"):
-			camera_rig.call("clear_focus")
+		camera_rig.clear_focus()
 		_camera_rig_focused = false
 
 
 # --- CombatFx adapters (section 7) --------------------------------------------
+# Installed once the camera exists and cleared in `_exit_tree`, because the
+# autoload outlives the level.
 
 func _setup_combat_fx_adapters() -> void:
-	if CombatFx.has_method("set_world_projector"):
-		CombatFx.call("set_world_projector", Callable(self, "_project_world_to_screen"))
-	# else: TODO(3d-integration): WP5 adds set_world_projector; until then
-	# `_fx_popup` projects each popup itself at spawn time.
-	if CombatFx.has_method("set_shake_target"):
-		CombatFx.call("set_shake_target", Callable(self, "_apply_camera_shake_offset"))
-	# else: TODO(3d-integration): WP5 adds set_shake_target; until then
-	# CombatFx.shake finds no Camera2D and does nothing.
+	CombatFx.set_world_projector(_project_world_to_screen)
+	CombatFx.set_shake_target(_apply_camera_shake_offset)
 
 
+# Every CombatFx world position (damage numbers, XP, ROOTED, bursts) is a
+# Vector3 in 3D and lands on screen through the rig's camera.
 func _project_world_to_screen(world: Variant) -> Vector2:
 	if world is Vector2:
 		return world
-	var camera := _get_active_camera()
-	if camera == null or not (world is Vector3):
+	if not (world is Vector3):
 		return Vector2.ZERO
-	return camera.unproject_position(world)
+	return WorldPicker.world_to_screen(_get_active_camera(), world)
 
 
-# Receives CombatFx's shake offset (pixels) and applies it in metres to the
-# rig's `shake_offset` or the fallback camera's h/v offsets.
-func _apply_camera_shake_offset(offset: Variant) -> void:
-	var offset_px := Vector2.ZERO
-	if offset is Vector2:
-		offset_px = offset
+# CombatFx shakes in 2D pixels (it wrote Camera2D.offset); the rig's
+# `shake_offset` is a screen-plane offset in metres, so the pixel jitter is
+# scaled by the orthographic size over the viewport height. Screen y points
+# down while the camera's v_offset points up.
+func _apply_camera_shake_offset(offset: Vector2) -> void:
+	if camera_rig == null:
+		return
 	var camera := _get_active_camera()
 	if camera == null:
 		return
 	var viewport_height := maxf(1.0, get_viewport().get_visible_rect().size.y)
-	var offset_m := offset_px * (camera.size / viewport_height)
-	if camera_rig != null and "shake_offset" in camera_rig:
-		camera_rig.set("shake_offset", offset_m)
-		return
-	if fallback_camera != null:
-		fallback_camera.h_offset = offset_m.x
-		fallback_camera.v_offset = -offset_m.y
+	var offset_m := offset * (camera.size / viewport_height)
+	camera_rig.set_shake_offset(Vector2(offset_m.x, -offset_m.y))
 
 
-# Popup at a world position. With WP5's projector CombatFx tracks the world
-# point itself; without it the popup is placed at its projected screen point.
+# Popup at a world position; CombatFx projects it through the adapter above
+# every frame, so it follows the camera like a 2D popup.
 func _fx_popup(world: Vector3, text: String, color: Color, font_size: int = 16) -> void:
-	if CombatFx.has_method("set_world_projector"):
-		CombatFx.call("popup_text", world, text, color, font_size)
-		return
-	# TODO(3d-integration): drop this branch when WP5 lands; a popup placed
-	# this way does not follow the camera.
-	var camera := _get_active_camera()
-	if camera == null or camera.is_position_behind(world):
-		return
-	CombatFx.popup_text(camera.unproject_position(world), text, color, font_size)
+	CombatFx.popup_text(world, text, color, font_size)
 
 
 # Where an actor's popups appear: its OverheadAnchor, else above its feet.
@@ -1553,25 +1503,16 @@ func _popup_anchor(actor: Node3D) -> Vector3:
 	return actor.global_position + Vector3.UP * POPUP_HEIGHT_M
 
 
-# --- Overlays (section 7) ------------------------------------------------------
+# --- Overlays (section 7, WP5) ---------------------------------------------------
 
-## The single place WP8 changes to swap the placeholder overlays for the WP5
-## nodes: return RangeRing3D.new(), PathPreview3D.new(), CounterPrompt3D.new()
-## and OverheadBars3D.new() for the matching kind.
-func _create_overlay(kind: StringName) -> Node3D:
-	# TODO(3d-integration): instantiate the WP5 overlay nodes here.
-	return Main3DPlaceholders.create(kind)
-
-
-## Counter-prompt hookup for an enemy that should not care which overlay
-## implementation is present: creates one through the overlay factory and
-## parents it under the enemy's OverheadAnchor (or the enemy itself).
+## Counter-prompt hookup for an enemy that does not build its own: a
+## CounterPrompt3D parented under the enemy's OverheadAnchor (or the enemy
+## itself), which the enemy then drives through the four phases. Enemy3D makes
+## its own prompt in `_ready`; this stays for other enemy scripts.
 func acquire_counter_prompt(prompt_owner: Node3D) -> Node3D:
 	if prompt_owner == null or not is_instance_valid(prompt_owner):
 		return null
-	var prompt := _create_overlay(Main3DPlaceholders.KIND_COUNTER_PROMPT)
-	if prompt == null:
-		return null
+	var prompt := CounterPrompt3D.new()
 	prompt.name = "CounterPrompt3D"
 	var anchor := prompt_owner.get_node_or_null("OverheadAnchor") as Node3D
 	if anchor != null:
@@ -1582,11 +1523,9 @@ func acquire_counter_prompt(prompt_owner: Node3D) -> Node3D:
 
 
 func _setup_path_preview() -> void:
-	path_preview = _create_overlay(Main3DPlaceholders.KIND_PATH_PREVIEW)
-	if path_preview == null:
-		return
+	# One per level, under the root: `show_path` takes global points.
+	path_preview = PathPreview3D.new()
 	path_preview.name = "PathPreview"
-	path_preview.visible = false
 	add_child(path_preview)
 
 
@@ -1594,35 +1533,19 @@ func _setup_range_rings() -> void:
 	# Two rings under the player in turn mode: the melee reach (always, faint)
 	# and the ranged reach (dashed, only while aiming a ranged shot). They are
 	# the same circles the attack checks use, so "inside the ring" means "will
-	# hit".
-	melee_range_ring = _create_overlay(Main3DPlaceholders.KIND_RANGE_RING)
-	if melee_range_ring != null:
-		melee_range_ring.name = "MeleeRangeRing"
-		melee_range_ring.visible = false
-		add_child(melee_range_ring)
+	# hit". Parented to the body, they follow it at the local origin.
+	melee_range_ring = RangeRing3D.new()
+	melee_range_ring.name = "MeleeRangeRing"
+	player.add_child(melee_range_ring)
 
-	ranged_range_ring = _create_overlay(Main3DPlaceholders.KIND_RANGE_RING)
-	if ranged_range_ring != null:
-		ranged_range_ring.name = "RangedRangeRing"
-		ranged_range_ring.visible = false
-		add_child(ranged_range_ring)
+	ranged_range_ring = RangeRing3D.new()
+	ranged_range_ring.name = "RangedRangeRing"
+	player.add_child(ranged_range_ring)
 
-	# Blast preview for area spells, drawn around the enemy under the cursor.
-	spell_area_ring = _create_overlay(Main3DPlaceholders.KIND_RANGE_RING)
-	if spell_area_ring != null:
-		spell_area_ring.name = "SpellAreaRing"
-		spell_area_ring.visible = false
-		add_child(spell_area_ring)
-
-
-func _ring_show(ring: Node3D, radius_m: float, color: Color, use_dashes: bool = false) -> void:
-	if ring != null and ring.has_method("show_ring"):
-		ring.call("show_ring", radius_m, color, use_dashes)
-
-
-func _ring_hide(ring: Node3D) -> void:
-	if ring != null and ring.has_method("hide_ring"):
-		ring.call("hide_ring")
+	# Blast preview for area spells, moved onto the enemy under the cursor.
+	spell_area_ring = RangeRing3D.new()
+	spell_area_ring.name = "SpellAreaRing"
+	add_child(spell_area_ring)
 
 
 func _update_range_rings() -> void:
@@ -1632,35 +1555,32 @@ func _update_range_rings() -> void:
 	if show and player.has_method("can_turn_attack"):
 		show = bool(player.call("can_turn_attack"))
 	if not show:
-		_ring_hide(melee_range_ring)
-		_ring_hide(ranged_range_ring)
-		_ring_hide(spell_area_ring)
+		melee_range_ring.hide_ring()
+		ranged_range_ring.hide_ring()
+		spell_area_ring.hide_ring()
 		return
 
-	var feet := GroundMath.flatten(player.global_position)
-	melee_range_ring.global_position = feet
-	ranged_range_ring.global_position = feet
-	_ring_hide(spell_area_ring)
+	spell_area_ring.hide_ring()
 	if selected_player_turn_action == PlayerTurnAction.RANGED:
-		_ring_hide(melee_range_ring)
-		_ring_show(ranged_range_ring, _get_ranged_attack_range_world(), Color(0.55, 0.85, 1.0, 0.55), true)
+		melee_range_ring.hide_ring()
+		ranged_range_ring.show_ring(_get_ranged_attack_range_world(), Color(0.55, 0.85, 1.0, 0.55), true)
 	elif selected_player_turn_action == PlayerTurnAction.SPELL:
-		_ring_hide(melee_range_ring)
+		melee_range_ring.hide_ring()
 		var spell := _get_selected_spell()
 		if spell == null:
-			_ring_hide(ranged_range_ring)
+			ranged_range_ring.hide_ring()
 		else:
-			_ring_show(ranged_range_ring, _get_spell_range_world(spell), Color(spell.color.r, spell.color.g, spell.color.b, 0.6), true)
+			ranged_range_ring.show_ring(_get_spell_range_world(spell), Color(spell.color.r, spell.color.g, spell.color.b, 0.6), true)
 			if spell.is_area() and hovered_enemy != null and is_instance_valid(hovered_enemy):
 				spell_area_ring.global_position = GroundMath.flatten(hovered_enemy.global_position)
-				_ring_show(spell_area_ring, spell.radius_meters * _get_turn_meter_world_units(),
+				spell_area_ring.show_ring(spell.radius_meters * _get_turn_meter_world_units(),
 					Color(spell.color.r, spell.color.g, spell.color.b, 0.45))
 	else:
-		_ring_hide(ranged_range_ring)
+		ranged_range_ring.hide_ring()
 		var melee_color := Color(1.0, 0.9, 0.7, 0.28)
 		if selected_player_turn_action == PlayerTurnAction.ATTACK:
 			melee_color = Color(1.0, 0.85, 0.5, 0.6)
-		_ring_show(melee_range_ring, _get_player_melee_range(), melee_color)
+		melee_range_ring.show_ring(_get_player_melee_range(), melee_color)
 
 
 # --- Music ---------------------------------------------------------------------
@@ -1763,8 +1683,8 @@ func _crossfade_music(fade_in_player: AudioStreamPlayer, fade_out_player: AudioS
 # --- Path preview --------------------------------------------------------------
 
 func _hide_path_preview() -> void:
-	if path_preview != null and path_preview.has_method("hide_path"):
-		path_preview.call("hide_path")
+	if path_preview != null:
+		path_preview.hide_path()
 
 
 func _update_path_preview() -> void:
@@ -1807,8 +1727,7 @@ func _update_path_preview() -> void:
 	var used_meters := used_distance / meter_units
 
 	var trimmed := GroundMath.trim_path(world_path, used_distance)
-	if path_preview.has_method("show_path"):
-		path_preview.call("show_path", trimmed, used_meters, remaining_meters)
+	path_preview.show_path(trimmed, used_meters, remaining_meters)
 
 
 # --- Turn UI -------------------------------------------------------------------
@@ -2513,15 +2432,33 @@ func _rebuild_turn_enemy_icons() -> void:
 		})
 
 
-func _update_enemy_hover_state() -> void:
+func _update_hover_state() -> void:
 	# Outside combat the outline tells you the enemy is a click-to-attack
-	# target; inside it marks what a click will engage.
+	# target; inside it marks what a click will engage. Pickups get the same
+	# push, because a 3D pickup never hit-tests itself (section 8).
 	if InventoryScreen.is_open() or LootMenu.is_open():
 		_set_hovered_enemy(null)
+		_set_hovered_pickup(null)
 		return
 
-	var hovered := _pick_enemy(get_viewport().get_mouse_position()) as CharacterBody3D
+	var mouse := get_viewport().get_mouse_position()
+	var hovered := _pick_enemy(mouse) as CharacterBody3D
 	_set_hovered_enemy(hovered)
+	_set_hovered_pickup(_pick_pickup(mouse))
+
+
+func _set_hovered_pickup(new_pickup: Node3D) -> void:
+	if hovered_pickup != null and not is_instance_valid(hovered_pickup):
+		hovered_pickup = null
+	if new_pickup != null and not is_instance_valid(new_pickup):
+		new_pickup = null
+	if hovered_pickup == new_pickup:
+		return
+	if hovered_pickup != null and hovered_pickup.has_method("set_hover_highlighted"):
+		hovered_pickup.call("set_hover_highlighted", false)
+	hovered_pickup = new_pickup
+	if hovered_pickup != null and hovered_pickup.has_method("set_hover_highlighted"):
+		hovered_pickup.call("set_hover_highlighted", true)
 
 
 func _set_hovered_enemy(new_enemy: CharacterBody3D) -> void:

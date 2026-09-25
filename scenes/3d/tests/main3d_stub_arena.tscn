@@ -1,9 +1,10 @@
-[gd_scene load_steps=15 format=3]
+[gd_scene load_steps=16 format=3]
 
 [ext_resource type="Script" path="res://scripts/3d/main_3d.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/3d/stubs/stub_player_3d.gd" id="2_player"]
 [ext_resource type="PackedScene" path="res://scenes/3d/stubs/stub_enemy_3d.tscn" id="3_enemy"]
 [ext_resource type="Script" path="res://scripts/3d/tests/main3d_smoke.gd" id="4_smoke"]
+[ext_resource type="PackedScene" path="res://scenes/3d/camera_rig_3d.tscn" id="5_camera_rig"]
 
 [sub_resource type="Environment" id="Environment_arena"]
 background_mode = 1
@@ -63,8 +64,7 @@ transform = Transform3D(0.866025, -0.409576, 0.286788, 0, 0.573576, 0.819152, -0
 light_energy = 1.4
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 20, 20)
+[node name="CameraRig" parent="." instance=ExtResource("5_camera_rig")]
 
 [node name="NavigationRegion3D" type="NavigationRegion3D" parent="."]
 navigation_mesh = SubResource("NavigationMesh_arena")
