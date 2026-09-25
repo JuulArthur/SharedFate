@@ -169,6 +169,7 @@ Two practical notes. Fable 5.1 takes longer single turns on hard tasks and does 
 - [x] Install the Godot editor matching the project's declared version on the Windows PC; confirm the Mac editor matches.
 - [x] Tag `2d-baseline` and create the `feat/3d-test` branch (2026-09-20).
 - [x] Run WP0 with Claude Fable 5.1 (2026-09-20). Read `docs/3d-port-contracts.md` before merging phase 1.
-- [ ] Start phase 1: one worktree and one session per package, prompts built from the contracts document.
-- [ ] Merge phase 1, start phase 2 as inputs land, then WP8.
-- [ ] Play the arena and the 2D hub side by side, then decide: merge and keep both, or delete the branch.
+- [x] Start phase 1: one worktree and one session per package, prompts built from the contracts document (2026-09-20).
+- [x] Merge phase 1, start phase 2 as inputs land, then WP8 (all nine packages merged on `feat/3d-test` by 2026-09-25; every finding folded into `docs/3d-port-contracts.md`; the slice's acceptance test prints `INTEGRATION OK`, see `docs/3d-arena.md`).
+- [ ] Play the arena (`scenes/3d/arena.tscn`, F6) and the 2D hub side by side, then decide: merge and keep both, or delete the branch.
+- [ ] Open decisions after the slice: swap bodies per soul (`rogue.glb` and `mage.glb` are imported but unused), a story chapter for the arena, a hub link, and whether to extract the turn rules shared by `main.gd` and `main_3d.gd`.
