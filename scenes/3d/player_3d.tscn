@@ -20,9 +20,11 @@ shape = SubResource("CapsuleShape3D_player")
 
 [node name="NavigationAgent3D" type="NavigationAgent3D" parent="."]
 path_desired_distance = 0.3
-target_desired_distance = 0.4
+target_desired_distance = 0.1
 avoidance_enabled = true
+time_horizon_agents = 0.25
 radius = 0.4
+max_speed = 3.5
 
 [node name="OverheadAnchor" type="Node3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.25, 0)

@@ -230,9 +230,11 @@ func _phase_b() -> void:
 func _phase_c() -> void:
 	_begin_phase("C turn-mode engage and enemy turn")
 	_reset_actors(C_PLAYER, C_WOLF)
+	# As the coordinator does it: targets are wired at load, and switching to
+	# turn mode stops every combatant where it stands.
+	wolf.set_target(player)
 	player.set_turn_based_combat(true)
 	wolf.set_turn_based_combat(true)
-	wolf.set_target(player)
 
 	# The player's engage: approach point, navmesh path, trim to the budget.
 	player.start_turn(Main3D.TURN_MOVE_METERS)
@@ -278,12 +280,12 @@ func _phase_c() -> void:
 
 ## What `_request_player_turn_engage_enemy` in main_3d.gd aims for.
 func _coordinator_player_approach_distance() -> float:
-	return player.get_preferred_attack_approach_distance()
+	return Main3D.approach_distance_for(player, wolf, player.get_melee_range())
 
 
 ## What `_request_enemy_turn_move_by_distance` in main_3d.gd aims for.
 func _coordinator_enemy_approach_distance() -> float:
-	return maxf(Main3D.ENEMY_APPROACH_MIN_M, wolf.attack_range - Main3D.ENEMY_APPROACH_BUFFER_M)
+	return Main3D.approach_distance_for(wolf, player, wolf.attack_range)
 
 
 ## `_compute_approach_world_point` in main_3d.gd.
