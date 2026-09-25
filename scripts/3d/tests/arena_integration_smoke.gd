@@ -38,6 +38,10 @@ const SPAWN_TOLERANCE_M := 0.5
 const PATH_TARGET_DISTANCE_M := 10.0
 const PATH_MAX_LENGTH_M := 20.0
 const PROP_LAYER := 8
+# WP12: the props were re-exported without the stray default scene; the level
+# must see the same 22 props and 48 blocked cells as before.
+const EXPECTED_PROP_COUNT := 22
+const EXPECTED_BLOCKED_CELLS := 48
 # The sword hangs from the hand: its lowest point well below the hand, its top
 # not far above it, its centre near the hand on the ground plane.
 const SWORD_MIN_DROP_M := 0.4
@@ -239,6 +243,10 @@ func _step_level() -> String:
 		return "blocked_cells misses the chest's cell (3, -3); %d cells blocked" % _main.blocked_cells.size()
 	if _main.blocked_cells.has(GroundMath.to_cell(_spawn.global_position)):
 		return "blocked_cells marks the spawn cell solid"
+	if props.size() != EXPECTED_PROP_COUNT:
+		return "%d props in group 'navmesh_source', expected %d" % [props.size(), EXPECTED_PROP_COUNT]
+	if _main.blocked_cells.size() != EXPECTED_BLOCKED_CELLS:
+		return "%d blocked cells, expected %d" % [_main.blocked_cells.size(), EXPECTED_BLOCKED_CELLS]
 	print("[integration] path %.2f m, %d props on layer %d, %d blocked cells" % [path_length, props.size(), PROP_LAYER, _main.blocked_cells.size()])
 	return ""
 
@@ -300,6 +308,9 @@ func _step_models() -> String:
 			return "%s has no Wolf_Body mesh under Model" % wolf.name
 		if model.get_node_or_null("MeshInstance3D") != null:
 			return "%s still carries the placeholder box under Model" % wolf.name
+		var wolf_clips := wolf.get_animation_player()
+		if wolf_clips == null or not wolf_clips.has_animation(&"idle") or not wolf_clips.has_animation(&"trot"):
+			return "%s has no AnimationPlayer with 'idle' and 'trot' (WP12)" % wolf.name
 		if wolf.overhead_anchor == null or not is_equal_approx(wolf.overhead_anchor.position.y, WOLF_ANCHOR_HEIGHT_M):
 			return "%s OverheadAnchor at y=%.2f, expected %.2f" % [wolf.name, wolf.overhead_anchor.position.y if wolf.overhead_anchor != null else -1.0, WOLF_ANCHOR_HEIGHT_M]
 	print("[integration] sword spans y %.2f..%.2f m from a hand at %.2f m" % [bounds.position.y, bounds.end.y, hand.y])
