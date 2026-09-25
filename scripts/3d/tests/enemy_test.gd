@@ -3,12 +3,15 @@ extends Node3D
 ## WP3c test: the ported `Enemy3D` (as `wolf_3d.tscn`) against the WP0 stub player
 ## on the arena skeleton's layout, with a runtime navmesh bake.
 ##
-## Five scripted steps, in order: the aggro gate holds the wolf still at 8 m; at
-## 3 m it chases, reaches its attack range and bites through the player's
-## `resolve_enemy_attack` while the counter prompt is up; in turn mode the swing
+## Scripted steps, in order: the wolf's rig carries looping `idle` and `trot`
+## (WP12); the aggro gate holds the wolf still at 8 m; at 3 m it chases on the
+## trot, reaches its attack range, idles and bites through the player's
+## `resolve_enemy_attack` while the counter prompt is up; a long straight chase
+## keeps the planted front paw from sliding (WP12); in turn mode the swing
 ## lands after `turn_attack_wind_up_duration + turn_attack_strike_duration` and
 ## spends the turn's attack; a root costs the next turn's movement and melts on
-## `end_turn`; and death pays out XP and loot before the body disappears.
+## `end_turn`; and death stops the clip, pays out XP and loot before the body
+## disappears.
 ##
 ## Prints the first failing check with its values, or `ENEMY OK`.
 ##
@@ -31,6 +34,24 @@ const SETTLE_SECONDS := 2.0
 ## 5) Death.
 const DEATH_WAIT_SECONDS := 0.7
 const LOOT_RADIUS_M := 1.0
+## Checked this long into the 0.42 s topple.
+const DEATH_CLIP_CHECK_SECONDS := 0.2
+
+## WP12: the rig and the foot-slide chase. The player steps 11 m away along -X,
+## the open side of the test floor; the samples start once the trot has
+## blended in and stop before the wolf slows for its approach.
+const WOLF_BONES: Array[StringName] = [&"Hips", &"Spine", &"Neck", &"Head", &"Tail",
+	&"FrontLeg_L", &"FrontLeg_R", &"HindLeg_L", &"HindLeg_R"]
+const FOOT_BONE := &"FrontLeg_L"
+const FOOT_SLIDE_PLAYER_POSITION := Vector3(-10.0, 0.0, 0.0)
+const FOOT_SLIDE_WARMUP_SECONDS := 0.4
+const FOOT_SLIDE_SAMPLE_SECONDS := 1.2
+const FOOT_SLIDE_STOP_DISTANCE_M := 3.5
+const FOOT_SLIDE_MIN_TRAVEL_M := 2.5
+const FOOT_SLIDE_MIN_LIFT_M := 0.03
+## The planted paw may drift at most this share of the body's travel per cycle.
+const FOOT_SLIDE_MAX_SHARE := 0.2
+const FOOT_SLIDE_ARRIVE_SECONDS := 5.0
 
 const NAV_MAP_FRAMES := 60
 const NAV_MAP_TOLERANCE_M := 0.5
@@ -57,6 +78,7 @@ var _closed_in_to := 0.0
 var _realtime_damage := 0
 var _turn_hit_delay := 0.0
 var _turn_hit_expected := 0.0
+var _foot_report := ""
 
 
 func _ready() -> void:
@@ -117,9 +139,13 @@ func _run_test() -> void:
 		_fail("could not put the stub player in the rogue soul")
 		return
 
+	if not _step_rig():
+		return
 	if not await _step_aggro_gate():
 		return
 	if not await _step_chase_and_bite():
+		return
+	if not await _step_foot_slide():
 		return
 	if not await _step_turn_attack():
 		return
@@ -130,6 +156,7 @@ func _run_test() -> void:
 
 	print("[enemy_test] closed to %.2f m, realtime bite %d, turn hit after %.2f s (expected %.2f s)"
 		% [_closed_in_to, _realtime_damage, _turn_hit_delay, _turn_hit_expected])
+	print("[enemy_test] %s" % _foot_report)
 	print("ENEMY OK")
 	_finished = true
 	get_tree().quit()
@@ -160,7 +187,11 @@ func _step_aggro_gate() -> bool:
 func _step_chase_and_bite() -> bool:
 	player.snap_to(PLAYER_NEAR_POSITION)
 	var reach := wolf.attack_range + REACH_MARGIN_M
+	# WP12: the model trots while it chases.
+	var trot_seen: Array[bool] = [false]
 	var closed_in := await _wait_until(func() -> bool:
+		if wolf.is_moving() and wolf.get_locomotion_state() == &"trot":
+			trot_seen[0] = true
 		return GroundMath.ground_distance(wolf.global_position, player.global_position) <= reach,
 		CLOSE_IN_SECONDS)
 	if not closed_in:
@@ -188,7 +219,142 @@ func _step_chase_and_bite() -> bool:
 	if not wolf.has_shown_counter_prompt():
 		_fail("the wolf resolved a hit without ever showing its counter prompt")
 		return false
+	if not trot_seen[0]:
+		_fail("the wolf chased %.1f m without its trot clip playing"
+			% GroundMath.ground_distance(Vector3.ZERO, wolf.global_position))
+		return false
+	return _expect_idle_in_reach("after the first bite")
+
+
+## The wolf stands in reach and its model plays `idle` (WP12).
+func _expect_idle_in_reach(when: String) -> bool:
+	var distance := GroundMath.ground_distance(wolf.global_position, player.global_position)
+	if distance > wolf.attack_range + ActorBase3D.ATTACK_RANGE_TOLERANCE:
+		_fail("%s the wolf is %.2f m from the player, outside its %.2f m reach" % [when, distance, wolf.attack_range])
+		return false
+	var anim := wolf.get_animation_player()
+	if wolf.get_locomotion_state() != &"idle" or StringName(anim.current_animation) != &"idle":
+		_fail("%s the wolf holds position in reach but plays '%s' (state '%s'), expected 'idle'"
+			% [when, anim.current_animation, wolf.get_locomotion_state()])
+		return false
 	return true
+
+
+# --- 0) The rig (WP12) ---------------------------------------------------------------
+
+func _step_rig() -> bool:
+	var anim := wolf.get_animation_player()
+	if anim == null:
+		_fail("the wolf's Model has no AnimationPlayer")
+		return false
+	for clip in [&"idle", &"trot"]:
+		if not anim.has_animation(clip):
+			_fail("the wolf's AnimationPlayer has no '%s' clip (has %s)" % [clip, str(anim.get_animation_list())])
+			return false
+		if anim.get_animation(clip).loop_mode == Animation.LOOP_NONE:
+			_fail("the wolf's '%s' clip does not loop" % clip)
+			return false
+	var skeleton := _wolf_skeleton()
+	if skeleton == null:
+		_fail("the wolf's Model has no Skeleton3D")
+		return false
+	for bone in WOLF_BONES:
+		if skeleton.find_bone(bone) < 0:
+			_fail("the wolf's skeleton has no bone %s" % bone)
+			return false
+	return true
+
+
+func _wolf_skeleton() -> Skeleton3D:
+	var model := wolf.get_node_or_null("Model")
+	if model == null:
+		return null
+	var found := model.find_children("*", "Skeleton3D", true, false)
+	return found[0] as Skeleton3D if not found.is_empty() else null
+
+
+# --- 2b) Foot slide on a straight chase (WP12) ------------------------------------------
+
+## The player steps far away along -X and the wolf trots after it in a straight
+## line at its full 3.6 m/s. Every physics frame the front-left paw (the tail
+## of the FrontLeg_L bone, i.e. the sole) and the body are sampled. While the
+## paw is in the lowest third of its height range it is planted, and whatever
+## it moves over the ground then is slide. The slide per cycle must stay under
+## 20 percent of the body's travel per cycle.
+func _step_foot_slide() -> bool:
+	var settled := await _wait_until(func() -> bool: return not wolf.is_attacking(), SETTLE_SECONDS)
+	if not settled:
+		_fail("the realtime attack sequence never finished within %.1f s" % SETTLE_SECONDS)
+		return false
+	var skeleton := _wolf_skeleton()
+	var bone := skeleton.find_bone(FOOT_BONE)
+	# The paw in the bone's own frame: at rest it stands on the ground right
+	# below the shoulder, whatever axes the importer gave the bone.
+	var rest_world := skeleton.global_transform * skeleton.get_bone_global_rest(bone)
+	var paw_rest := Vector3(rest_world.origin.x, wolf.global_position.y, rest_world.origin.z)
+	var paw_local := rest_world.affine_inverse() * paw_rest
+
+	player.snap_to(FOOT_SLIDE_PLAYER_POSITION)
+	await _wait(FOOT_SLIDE_WARMUP_SECONDS)
+	if wolf.get_locomotion_state() != &"trot":
+		_fail("%.1f s into a chase the wolf plays '%s', expected 'trot'" % [FOOT_SLIDE_WARMUP_SECONDS, wolf.get_locomotion_state()])
+		return false
+
+	var paws: Array[Vector3] = []
+	var bodies: Array[Vector3] = []
+	var deadline := Time.get_ticks_msec() + int(FOOT_SLIDE_SAMPLE_SECONDS * 1000.0)
+	while Time.get_ticks_msec() < deadline:
+		await get_tree().physics_frame
+		if GroundMath.ground_distance(wolf.global_position, player.global_position) < FOOT_SLIDE_STOP_DISTANCE_M:
+			break
+		paws.append(skeleton.global_transform * skeleton.get_bone_global_pose(bone) * paw_local)
+		bodies.append(wolf.global_position)
+
+	if paws.size() < 10:
+		_fail("only %d foot samples on the straight chase" % paws.size())
+		return false
+	var low := INF
+	var high := -INF
+	for paw in paws:
+		low = minf(low, paw.y)
+		high = maxf(high, paw.y)
+	if high - low < FOOT_SLIDE_MIN_LIFT_M:
+		_fail("the front paw only rises %.3f m on the trot, expected at least %.2f m" % [high - low, FOOT_SLIDE_MIN_LIFT_M])
+		return false
+	var planted_below := low + (high - low) / 3.0
+	var slide := 0.0
+	var planted := 0
+	for i in range(1, paws.size()):
+		if paws[i - 1].y <= planted_below and paws[i].y <= planted_below:
+			slide += GroundMath.ground_distance(paws[i - 1], paws[i])
+			planted += 1
+	var travel := GroundMath.ground_distance(bodies[0], bodies[bodies.size() - 1])
+	if travel < FOOT_SLIDE_MIN_TRAVEL_M:
+		_fail("the wolf only travelled %.2f m while its paw was sampled" % travel)
+		return false
+	var cycles := travel / Enemy3D.TROT_STRIDE_PER_CYCLE_M
+	var share := slide / travel
+	var seconds := float(paws.size()) / float(Engine.physics_ticks_per_second)
+	_foot_report = ("foot slide: %d samples over %.2f s, body %.2f m (%.2f m/s, %.1f cycles, speed_scale %.2f), paw rises %.3f m, "
+		+ "%d planted steps slid %.3f m = %.3f m per cycle, %.1f %% of the %.3f m travel per cycle") \
+		% [paws.size(), seconds, travel, travel / seconds, cycles, wolf.get_animation_player().speed_scale, high - low,
+			planted, slide, slide / cycles, share * 100.0, travel / cycles]
+	if share >= FOOT_SLIDE_MAX_SHARE:
+		_fail("the planted front paw slid %.3f m while the body travelled %.2f m (%.1f %% per cycle, limit %.0f %%)"
+			% [slide, travel, share * 100.0, FOOT_SLIDE_MAX_SHARE * 100.0])
+		return false
+
+	# Let the chase end in reach, standing on idle, so the turn-mode steps start
+	# from a wolf that can bite.
+	var arrived := await _wait_until(func() -> bool:
+		return GroundMath.ground_distance(wolf.global_position, player.global_position) <= wolf.attack_range \
+			and not wolf.is_moving() and wolf.get_locomotion_state() == &"idle",
+		FOOT_SLIDE_ARRIVE_SECONDS)
+	if not arrived:
+		_fail("after the long chase the wolf is %.2f m from the player and plays '%s'"
+			% [GroundMath.ground_distance(wolf.global_position, player.global_position), wolf.get_locomotion_state()])
+		return false
+	return _expect_idle_in_reach("after the long chase")
 
 
 # --- 3) The turn-mode swing -------------------------------------------------------------
@@ -260,12 +426,26 @@ func _step_death() -> bool:
 	var xp_before := player.get_experience_toward_next()
 	var level_before := player.get_player_level()
 
+	var anim := wolf.get_animation_player()
 	wolf.receive_damage(1000)
 	if wolf.is_alive():
 		_fail("is_alive() is still true on the frame a lethal hit landed")
 		return false
 
-	await _wait(DEATH_WAIT_SECONDS)
+	# WP12: no locomotion clip under the topple.
+	if anim.is_playing() or wolf.get_locomotion_state() != &"":
+		_fail("the wolf's clip '%s' still plays on the frame it died (state '%s')"
+			% [anim.current_animation, wolf.get_locomotion_state()])
+		return false
+	await _wait(DEATH_CLIP_CHECK_SECONDS)
+	if not is_instance_valid(wolf) or not is_instance_valid(anim):
+		_fail("the wolf was freed %.1f s into its topple" % DEATH_CLIP_CHECK_SECONDS)
+		return false
+	if anim.is_playing() or wolf.get_locomotion_state() != &"":
+		_fail("the wolf's clip '%s' plays %.1f s into the death topple" % [anim.current_animation, DEATH_CLIP_CHECK_SECONDS])
+		return false
+
+	await _wait(DEATH_WAIT_SECONDS - DEATH_CLIP_CHECK_SECONDS)
 	if is_instance_valid(wolf):
 		_fail("the wolf node is still in the tree %.1f s after dying" % DEATH_WAIT_SECONDS)
 		return false

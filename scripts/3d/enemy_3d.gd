@@ -121,6 +121,7 @@ func _ready() -> void:
 ## realtime ticks the timers, gates on aggro, refreshes the approach point and
 ## swings once the target is inside `attack_range`.
 func _physics_process(delta: float) -> void:
+	_update_locomotion_animation(delta)
 	if navigation_agent == null:
 		return
 	if not is_alive():
@@ -432,6 +433,7 @@ func _on_died() -> void:
 	if _dying:
 		return
 	_dying = true
+	_stop_locomotion()
 	set_hover_highlighted(false)
 	_cancel_counter_on_target(_target)
 	_hide_counter_prompt()
@@ -555,6 +557,115 @@ func is_hover_highlighted() -> bool:
 	return _hover_highlighted
 
 
+# --- Locomotion clips (WP12) -----------------------------------------------------------
+# The wolf's glb carries a skeleton and two looping clips, `idle` (2.0 s) and
+# `trot` (0.4 s, one full diagonal-gait cycle). The player's WP11 rule, mirrored:
+# every physics frame the model plays `trot` while the enemy moves faster than
+# TROT_MIN_SPEED, its playback scaled by ground speed so the planted paws keep
+# pace with the ground, and `idle` otherwise. The clips drive bones only; the
+# attack lunge, the recoil and the topple tween `Model` and the tints ride on
+# material overlays, so they all play on top. A model without an
+# AnimationPlayer (the generic `enemy_3d.tscn` box) is left alone.
+
+const LOCOMOTION_IDLE := &"idle"
+const LOCOMOTION_TROT := &"trot"
+## Ground distance the body covers in one trot cycle with the planted paws
+## standing still: the paw sweeps 2 * 0.40 m * sin(28 deg) = 0.376 m back over
+## its half-cycle stance, and the other diagonal pair carries the body the other
+## half. Measured on the posed rig by `tools/blender/generate_wolf.py`
+## (`SF_TROT stride_per_cycle`, docs/deviations/wp12.md).
+const TROT_STRIDE_PER_CYCLE_M := 0.7512
+## Length of the `trot` clip (24 frames at 60 fps).
+const TROT_CLIP_SECONDS := 0.4
+## Ground speed (m/s) at which `trot` plays at 1.0x without the paws sliding;
+## the wolf's 3.6 m/s chase plays it at about 1.92x.
+const TROT_REFERENCE_SPEED := TROT_STRIDE_PER_CYCLE_M / TROT_CLIP_SECONDS
+## Below this ground speed the model idles.
+const TROT_MIN_SPEED := 0.2
+## A trot survives this long without speed (an avoidance frame that has not
+## answered yet, a chase re-aimed at a moved target), so it never flickers.
+const TROT_GRACE_SECONDS := 0.12
+const TROT_SPEED_SCALE_MIN := 0.25
+const TROT_SPEED_SCALE_MAX := 3.0
+## Cross-fade between idle and trot.
+const LOCOMOTION_BLEND_SECONDS := 0.15
+
+var _anim_player: AnimationPlayer = null
+var _locomotion_state: StringName = &""
+var _locomotion_speed_scale := 1.0
+var _trot_grace_left := 0.0
+
+
+## The locomotion clip the model is playing (`idle`, `trot`), or empty without
+## a rig, before the first physics frame and from the moment of death.
+func get_locomotion_state() -> StringName:
+	return _locomotion_state
+
+
+## The AnimationPlayer found under `Model`, or null for an unrigged model.
+func get_animation_player() -> AnimationPlayer:
+	return _anim_player
+
+
+## Finds the AnimationPlayer anywhere under `Model` and makes both clips loop
+## (the import settings already do; this covers a re-import without them). The
+## clips advance in physics steps, in lockstep with the body's movement, so a
+## planted paw does not jitter by a frame of travel (6 cm at 3.6 m/s).
+func _setup_locomotion() -> void:
+	_anim_player = null
+	if _model == null:
+		return
+	var found := _model.find_children("*", "AnimationPlayer", true, false)
+	if found.is_empty():
+		return
+	_anim_player = found[0] as AnimationPlayer
+	_anim_player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
+	for clip in [LOCOMOTION_IDLE, LOCOMOTION_TROT]:
+		if not _anim_player.has_animation(clip):
+			push_warning("%s: the model's AnimationPlayer has no '%s' animation" % [name, clip])
+			continue
+		var anim := _anim_player.get_animation(clip)
+		if anim.loop_mode == Animation.LOOP_NONE:
+			anim.loop_mode = Animation.LOOP_LINEAR
+
+
+func _update_locomotion_animation(delta: float) -> void:
+	if _anim_player == null or _dying or not is_alive():
+		return
+	var ground_speed := Vector2(velocity.x, velocity.z).length()
+	var wanted := LOCOMOTION_IDLE
+	var speed_scale := 1.0
+	if is_moving() and ground_speed > TROT_MIN_SPEED:
+		wanted = LOCOMOTION_TROT
+		_trot_grace_left = TROT_GRACE_SECONDS
+		speed_scale = clampf(ground_speed / TROT_REFERENCE_SPEED, TROT_SPEED_SCALE_MIN, TROT_SPEED_SCALE_MAX)
+	elif _locomotion_state == LOCOMOTION_TROT and _trot_grace_left > 0.0:
+		wanted = LOCOMOTION_TROT
+		_trot_grace_left -= delta
+		speed_scale = _locomotion_speed_scale
+	_play_locomotion(wanted, speed_scale)
+
+
+## Plays `clip` looping at `speed_scale`, cross-fading from the other clip; a
+## clip that is already playing only takes the new speed.
+func _play_locomotion(clip: StringName, speed_scale: float) -> void:
+	if _anim_player == null or not _anim_player.has_animation(clip):
+		return
+	_locomotion_state = clip
+	_locomotion_speed_scale = speed_scale
+	_anim_player.speed_scale = speed_scale
+	if StringName(_anim_player.current_animation) != clip or not _anim_player.is_playing():
+		_anim_player.play(clip, LOCOMOTION_BLEND_SECONDS)
+
+
+## Death: the topple owns the body from here, so the clip freezes where it is.
+func _stop_locomotion() -> void:
+	_locomotion_state = &""
+	_trot_grace_left = 0.0
+	if _anim_player != null:
+		_anim_player.pause()
+
+
 # --- Children ------------------------------------------------------------------------------
 
 func _setup_model() -> void:
@@ -566,6 +677,7 @@ func _setup_model() -> void:
 	_model_idle_scale = _model.scale
 	_model_meshes.clear()
 	_gather_meshes(_model)
+	_setup_locomotion()
 
 	_hover_overlay = StandardMaterial3D.new()
 	_hover_overlay.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
