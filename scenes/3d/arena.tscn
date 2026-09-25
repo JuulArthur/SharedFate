@@ -9,7 +9,7 @@
 [ext_resource type="PackedScene" path="res://assets/3d/models/crate.glb" id="7_crate"]
 [ext_resource type="PackedScene" path="res://assets/3d/models/chest.glb" id="8_chest"]
 [ext_resource type="Script" path="res://scripts/3d/arena_ground_tiles.gd" id="9_groundtiles"]
-[ext_resource type="Script" path="res://scripts/3d/tests/arena_smoke.gd" id="10_smoke"]
+[ext_resource type="Script" path="res://scripts/3d/tests/arena_integration_smoke.gd" id="10_smoke"]
 [ext_resource type="NavigationMesh" path="res://scenes/3d/arena_navmesh.tres" id="11_navmesh"]
 
 [sub_resource type="Environment" id="Environment_arena"]
@@ -158,5 +158,5 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9, 0, 0)
 [node name="GroundTiles" type="Node3D" parent="."]
 script = ExtResource("9_groundtiles")
 
-[node name="Smoke" type="Node" parent="."]
+[node name="IntegrationSmoke" type="Node" parent="."]
 script = ExtResource("10_smoke")
