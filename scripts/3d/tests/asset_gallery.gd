@@ -13,6 +13,11 @@ extends Node3D
 ## the merged AABB tells us which way the model looks. Every character must face
 ## -Z, stand on y = 0 and be between 1.7 m and 2.1 m tall.
 ##
+## WP12: every glb must hold exactly one glTF scene and no Blender default
+## `Cube` (read from the file's JSON chunk, not from the import), and the wolf
+## must carry its nine-bone rig with looping `idle` and `trot`, face -Z (its
+## nose ahead of the centre), stand on y = 0 and stay under 800 triangles.
+##
 ## Run: godot --headless --path . res://scenes/3d/tests/asset_gallery.tscn --quit-after 60
 
 const MODEL_DIR := "res://assets/3d/models"
@@ -21,6 +26,15 @@ const MIN_HEIGHT := 1.7
 const MAX_HEIGHT := 2.1
 const GROUND_TOLERANCE := 0.02
 const VISOR_SUFFIX := "_Visor"
+const GLB_MAGIC := 0x46546C67       # "glTF", little-endian
+const GLB_CHUNK_JSON := 0x4E4F534A  # "JSON", little-endian
+const WOLF_MODEL := "wolf"
+const WOLF_NOSE_SUFFIX := "_Nose"
+const WOLF_BONES: Array[String] = ["Hips", "Spine", "Neck", "Head", "Tail",
+	"FrontLeg_L", "FrontLeg_R", "HindLeg_L", "HindLeg_R"]
+const WOLF_MAX_TRIANGLES := 800
+const WOLF_ANCHOR_HEIGHT := 0.925
+const WOLF_ANCHOR_TOLERANCE := 0.01
 
 
 func _ready() -> void:
@@ -30,6 +44,7 @@ func _ready() -> void:
 		failures.append("%s: no .glb models found" % MODEL_DIR)
 	var x := -0.5 * SPACING * float(maxi(paths.size() - 1, 0))
 	for path in paths:
+		failures.append_array(_check_glb_scenes(path))
 		var packed: PackedScene = load(path) as PackedScene
 		if packed == null:
 			failures.append("%s: load() returned no PackedScene" % path)
@@ -115,6 +130,17 @@ func _describe(model: Node3D) -> PackedStringArray:
 	if not has_bounds:
 		problems.append("%s: no MeshInstance3D children" % model.name)
 		return problems
+	if String(model.name) == WOLF_MODEL:
+		var nose: Variant = _visor_centroid(model, meshes, to_model, WOLF_NOSE_SUFFIX)
+		if nose == null or (nose as Vector3).z >= bounds.get_center().z:
+			problems.append("%s: does not face -Z (nose %s, centre z=%.3f)" % [model.name, str(nose), bounds.get_center().z])
+		if absf(bounds.position.y) > GROUND_TOLERANCE:
+			problems.append("%s: lowest point y=%.3f, expected within %.2f of 0" % [model.name, bounds.position.y, GROUND_TOLERANCE])
+		if triangles >= WOLF_MAX_TRIANGLES:
+			problems.append("%s: %d triangles, limit %d" % [model.name, triangles, WOLF_MAX_TRIANGLES])
+		var anchor := model.find_child("OverheadAnchor", true, false) as Node3D
+		if anchor == null or absf((to_model * anchor.global_position).y - WOLF_ANCHOR_HEIGHT) > WOLF_ANCHOR_TOLERANCE:
+			problems.append("%s: OverheadAnchor missing or not at y=%.3f" % [model.name, WOLF_ANCHOR_HEIGHT])
 	if is_character:
 		if not faces_back:
 			problems.append("%s: does not face -Z (visor z=%.3f, centre z=%.3f)"
@@ -141,8 +167,9 @@ func _describe_rig(model: Node3D, is_character: bool) -> PackedStringArray:
 	var problems := PackedStringArray()
 	var skeletons := model.find_children("*", "Skeleton3D", true, false)
 	var players := model.find_children("*", "AnimationPlayer", true, false)
+	var is_wolf := String(model.name) == WOLF_MODEL
 	if skeletons.is_empty() and players.is_empty():
-		if is_character:
+		if is_character or is_wolf:
 			problems.append("%s: no Skeleton3D and no AnimationPlayer" % model.name)
 		return problems
 
@@ -169,6 +196,8 @@ func _describe_rig(model: Node3D, is_character: bool) -> PackedStringArray:
 		print("RIG   %-12s %-14s at %s%s" % [model.name, node_name, model.get_path_to(node),
 			(" (bone %s)" % attachment.bone_name) if attachment != null else ""])
 
+	if is_wolf:
+		problems.append_array(_check_wolf_rig(model, skeleton, player))
 	if not is_character:
 		return problems
 	if skeleton == null or skeleton.get_bone_count() < 8:
@@ -185,6 +214,75 @@ func _describe_rig(model: Node3D, is_character: bool) -> PackedStringArray:
 	var hand_attachment: BoneAttachment3D = hand.get_parent() as BoneAttachment3D if hand != null else null
 	if hand_attachment == null or hand_attachment.bone_name != "LowerArm_R":
 		problems.append("%s: HandPoint does not ride the LowerArm_R bone" % model.name)
+	return problems
+
+
+## WP12: the wolf's rig. Prints its bone count and clips and fails without the
+## nine bones, a looping `idle` and `trot`, or `Wolf_Body` under the skeleton.
+func _check_wolf_rig(model: Node3D, skeleton: Skeleton3D, player: AnimationPlayer) -> PackedStringArray:
+	var problems := PackedStringArray()
+	var clip_names := PackedStringArray()
+	if player != null:
+		for anim_name in player.get_animation_list():
+			clip_names.append("%s %.2f s" % [anim_name, player.get_animation(anim_name).length])
+	print("WOLF  bones=%d clips=[%s]" % [skeleton.get_bone_count() if skeleton != null else 0, ", ".join(clip_names)])
+	if skeleton == null:
+		problems.append("%s: no Skeleton3D" % model.name)
+	else:
+		for bone in WOLF_BONES:
+			if skeleton.find_bone(bone) < 0:
+				problems.append("%s: skeleton has no bone %s" % [model.name, bone])
+		var body := skeleton.find_child("Wolf_Body", true, false) as MeshInstance3D
+		if body == null or body.skin == null:
+			problems.append("%s: no skinned Wolf_Body under the skeleton" % model.name)
+	if player == null:
+		problems.append("%s: no AnimationPlayer" % model.name)
+	else:
+		for clip in [&"idle", &"trot"]:
+			if not player.has_animation(clip):
+				problems.append("%s: no '%s' animation" % [model.name, clip])
+			elif player.get_animation(clip).loop_mode == Animation.LOOP_NONE:
+				problems.append("%s: '%s' does not loop (import settings)" % [model.name, clip])
+	return problems
+
+
+## WP12: reads the glTF JSON chunk of `path` and prints its scene count; more
+## than one scene, or a node named `Cube`, is a stray default Blender scene
+## riding along in the export (docs/deviations/wp11.md row 10).
+func _check_glb_scenes(path: String) -> PackedStringArray:
+	var problems := PackedStringArray()
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		problems.append("%s: cannot open the file (%s)" % [path, error_string(FileAccess.get_open_error())])
+		return problems
+	var magic := file.get_32()
+	file.get_32()  # version
+	file.get_32()  # total length
+	var chunk_length := file.get_32()
+	var chunk_type := file.get_32()
+	if magic != GLB_MAGIC or chunk_type != GLB_CHUNK_JSON:
+		problems.append("%s: not a binary glTF with a JSON chunk" % path)
+		return problems
+	var parsed: Variant = JSON.parse_string(file.get_buffer(chunk_length).get_string_from_utf8())
+	if not (parsed is Dictionary):
+		problems.append("%s: the JSON chunk does not parse" % path)
+		return problems
+	var doc: Dictionary = parsed
+	var scenes: Array = doc.get("scenes", [])
+	var nodes: Array = doc.get("nodes", [])
+	var scene_names := PackedStringArray()
+	for scene: Variant in scenes:
+		scene_names.append(String((scene as Dictionary).get("name", "?")) if scene is Dictionary else "?")
+	var has_cube := false
+	for node: Variant in nodes:
+		if node is Dictionary and String((node as Dictionary).get("name", "")) == "Cube":
+			has_cube = true
+	print("GLB   %-12s scenes=%d [%s] nodes=%d%s" % [path.get_file().get_basename(), scenes.size(),
+		", ".join(scene_names), nodes.size(), " (has a Cube node)" if has_cube else ""])
+	if scenes.size() != 1:
+		problems.append("%s: %d glTF scenes, expected 1" % [path, scenes.size()])
+	if has_cube:
+		problems.append("%s: carries a node named Cube (Blender's default scene)" % path)
 	return problems
 
 
@@ -228,7 +326,7 @@ func _triangle_count(mesh: Mesh) -> int:
 
 
 func _visor_centroid(model: Node3D, meshes: Array[MeshInstance3D],
-		to_model: Transform3D) -> Variant:
+		to_model: Transform3D, suffix: String = VISOR_SUFFIX) -> Variant:
 	var sum := Vector3.ZERO
 	var count := 0
 	for mesh_instance in meshes:
@@ -237,7 +335,7 @@ func _visor_centroid(model: Node3D, meshes: Array[MeshInstance3D],
 			continue
 		var to_local := to_model * mesh_instance.global_transform
 		for surface in mesh.get_surface_count():
-			if not _surface_tag(mesh_instance, mesh, surface).ends_with(VISOR_SUFFIX):
+			if not _surface_tag(mesh_instance, mesh, surface).ends_with(suffix):
 				continue
 			var arrays: Array = mesh.surface_get_arrays(surface)
 			if arrays.is_empty():
