@@ -1108,15 +1108,17 @@ func _follow_body_hand() -> void:
 
 const LOCOMOTION_IDLE := &"idle"
 const LOCOMOTION_WALK := &"walk"
-## Ground speed (m/s) the walk clip's stride is authored for.
-const WALK_REFERENCE_SPEED := 3.5
+## Ground speed (m/s) at which the 1.0 s walk clip plays at 1.0x without the feet
+## sliding: the authored stride covers about 0.96 m per step, 1.92 m per cycle
+## (docs/deviations/wp11.md), so at the 3.5 m/s walk the clip runs at 1.82x.
+const WALK_REFERENCE_SPEED := 1.92
 ## Below this ground speed the body idles.
 const WALK_MIN_SPEED := 0.2
 ## A walk survives this long without speed while the actor still reports
 ## moving (a frame where avoidance has not answered yet), so it never flickers.
 const WALK_GRACE_SECONDS := 0.12
 const WALK_SPEED_SCALE_MIN := 0.25
-const WALK_SPEED_SCALE_MAX := 1.5
+const WALK_SPEED_SCALE_MAX := 2.5
 ## Cross-fade between idle and walk.
 const LOCOMOTION_BLEND_SECONDS := 0.15
 

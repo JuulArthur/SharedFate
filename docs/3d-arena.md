@@ -35,7 +35,7 @@ Combat starts by proximity (6 cells). The HUD buttons Melee, Throw, Block, Arcan
 ## What is placeholder
 
 - The generic enemy (`scenes/3d/enemy_3d.tscn`) is still a red box; only the wolf has a model. Each soul has its own body and weapon (knight and sword, rogue and daggers, mage and staff, swapped by `scripts/3d/soul_bodies_3d.gd` on a shift); the equipped item decides damage and range, not the mesh in the hand, so an equipped dagger as the knight still shows the sword.
-- No skeletal animation: attacks are the procedural lunge, squash and tint of the 2D game on `Model`, plus the weapon-holder animation.
+- The three souls are rigged (hips, spine, head, arms, legs; a robe bone for the mage) with `idle` and `walk` clips authored in the generator and exported in the glb; the player plays `walk` while moving with the stride matched to its speed. Attacks are still the procedural lunge, squash and tint on `Model` plus the weapon-holder swing, layered over the walk. Wolves have no clips yet.
 - No link from the 2D hub. The arena runs standalone; `LevelLoader.change_level("res://scenes/3d/arena.tscn")` works but nothing calls it, and `story_chapter_id` on the arena root is empty so no chapter opens at start.
 - Test loot drops beside the player at start (`spawn_test_loot` on the arena root); untick it in the inspector for a clean run.
 - Turn-order portraits are coloured squares; dropped items are the 2D icons as billboards.
