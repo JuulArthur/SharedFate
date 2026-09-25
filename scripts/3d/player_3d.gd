@@ -18,9 +18,10 @@ extends ActorBase3D
 ## contract's 1.2 m. The body never flips: facing is `rotation.y`.
 ##
 ## Scene children (scenes/3d/player_3d.tscn): CollisionShape3D, NavigationAgent3D,
-## OverheadAnchor, Model (placeholder capsule; WP8 swaps in the knight), HandPoint
-## with EquippedWeaponHolder and EquippedWeaponMesh, VisionLight, Inventory. The
-## attack AnimationPlayer, the overhead bars and the block ring are built in code.
+## OverheadAnchor, Model (SoulBodies3D with the knight, rogue and mage bodies;
+## WP9), HandPoint with EquippedWeaponHolder and EquippedWeaponMesh, VisionLight,
+## Inventory. The attack AnimationPlayer, the overhead bars and the block ring
+## are built in code.
 
 # Base class exports keep their 2D names: move_speed (3.5 m/s), max_health,
 # attack_damage, attack_range (1.2 m).
@@ -71,9 +72,11 @@ const DEFAULT_METER_WORLD_UNITS := GroundMath.METER_WORLD_UNITS
 # same scale is used for the hand offsets in the archetype animations and for
 # the small body lunges, so the whole "weapon and arm" layer is one scale.
 const WEAPON_RANGE_METERS_PER_PIXEL := 1.2 / 40.0
-# The held weapon mesh hangs point-down from the hand (WP1 sword convention: a
-# 180 degree X rotation on the object whose blade runs along local +Y). The
-# item's grip_rotation_deg is added on the same axis.
+# Fallback for a Model that is not a SoulBodies3D: the held weapon mesh hangs
+# point-down from the hand (WP1 sword convention: a 180 degree X rotation on
+# the object whose blade runs along local +Y) and the item's grip_rotation_deg
+# is added on the same axis. With the soul bodies the hang and the grip come
+# from the active soul's model instead (SoulBodies3D.get_weapon_fit).
 const WEAPON_HANG_ROTATION_DEG := 180.0
 # The holder rests at the hand point's origin; archetype animations move it
 # around this. The 2D WEAPON_HAND_POINT became the HandPoint node's transform.
@@ -108,10 +111,6 @@ const BLOCK_RING_COLOR := Color(0.62, 0.82, 1.0, 0.85)
 # WP5 overlays' SCREEN_SCALE.
 const FX_SCREEN_SCALE := 3.35
 const FALLBACK_SCREEN_PX_PER_METER := 64.0
-# Placeholder body: a grey capsule tinted toward the active soul's colour so a
-# shift is visible before WP8 brings the real models.
-const PLACEHOLDER_BODY_COLOR := Color(0.55, 0.56, 0.58, 1.0)
-const PLACEHOLDER_SOUL_TINT := 0.45
 const XP_BAR_OFFSET_M := 0.28
 const LEVEL_LABEL_OFFSET_M := 0.6
 const XP_BAR_COLOR := Color(0.55, 0.45, 0.95, 1.0)
@@ -127,6 +126,8 @@ var target_refresh_left := 0.0
 var blocking_active := false
 var inventory: Inventory = null
 var model: Node3D = null
+# `Model` when it carries the three soul bodies (WP9); null for a placeholder.
+var soul_bodies: SoulBodies3D = null
 var model_idle_position := Vector3.ZERO
 var hand_point: Node3D = null
 var vision_light: OmniLight3D = null
@@ -151,7 +152,6 @@ var manual_path_index := 0
 var _counter_phase := COUNTER_PHASE_NONE
 var _counter_early_pressed := false
 var _counter_perfect_pressed := false
-var _body_material: StandardMaterial3D = null
 # Set by `_apply_damage` once it has flashed the body in the hit's own colour,
 # so the base class's plain `flash_hit()` that follows does not flash twice.
 var _hit_flash_handled := false
@@ -1035,40 +1035,43 @@ func _ensure_collision_shape() -> void:
 
 
 # --- Body visuals -------------------------------------------------------------
-# The 2D player swapped SpriteFrames per soul. The 3D placeholder is one grey
-# capsule under `Model`, tinted toward the soul's colour; WP8 replaces the
-# capsule with the imported knight and its own per-soul bodies. The vision
-# light blends to the soul's light colour exactly as in 2D.
+# The 2D player swapped SpriteFrames per soul. In 3D `Model` is a SoulBodies3D
+# holding the knight, rogue and mage models (WP9): a shift shows the soul's own
+# body, moves `HandPoint` and `OverheadAnchor` to that body's empties and puts
+# the soul's own weapon on `EquippedWeaponMesh`. The equipped Item still decides
+# damage, range and the attack archetype; the soul decides the mesh in the hand.
+# The vision light blends to the soul's light colour exactly as in 2D.
 
 func _setup_body_visuals() -> void:
-	var body_mesh: MeshInstance3D = null
-	if model != null:
-		body_mesh = model.get_node_or_null("Body") as MeshInstance3D
-	if body_mesh != null:
-		_body_material = StandardMaterial3D.new()
-		_body_material.albedo_color = PLACEHOLDER_BODY_COLOR
-		body_mesh.material_override = _body_material
+	soul_bodies = model as SoulBodies3D
 	_apply_soul_visual(active_soul, false)
 
 
 func _apply_soul_visual(soul: Soul, animate: bool = true) -> void:
 	if soul == null:
 		return
-	var body_color := PLACEHOLDER_BODY_COLOR.lerp(soul.color, PLACEHOLDER_SOUL_TINT)
-	if not animate:
-		if vision_light != null:
-			vision_light.light_color = soul.light_color
-		if _body_material != null:
-			_body_material.albedo_color = body_color
+	_apply_soul_body(soul)
+	if vision_light == null:
 		return
-	if vision_light == null and _body_material == null:
+	if not animate:
+		vision_light.light_color = soul.light_color
 		return
 	var tween := create_tween()
-	tween.set_parallel(true)
-	if vision_light != null:
-		tween.tween_property(vision_light, "light_color", soul.light_color, SHIFT_LIGHT_BLEND_SECONDS)
-	if _body_material != null:
-		tween.tween_property(_body_material, "albedo_color", body_color, SHIFT_LIGHT_BLEND_SECONDS)
+	tween.tween_property(vision_light, "light_color", soul.light_color, SHIFT_LIGHT_BLEND_SECONDS)
+
+
+## Shows `soul`'s body and fits the hand, the overhead anchor and the held
+## weapon to it. The hand and the anchor stay children of the player so the
+## archetype animations' `HandPoint/EquippedWeaponHolder` paths and the bars
+## under the anchor keep working; they are moved, not re-parented.
+func _apply_soul_body(soul: Soul) -> void:
+	if soul_bodies == null or not soul_bodies.show_soul(int(soul.kind)):
+		return
+	if hand_point != null and soul_bodies.get_hand_point() != null:
+		hand_point.transform = soul_bodies.get_hand_transform()
+	if overhead_anchor != null:
+		overhead_anchor.position.y = soul_bodies.get_overhead_height()
+	_refresh_weapon_visual(get_equipped_weapon())
 
 
 # --- Manual paths and stuck detection -------------------------------------------
@@ -1313,18 +1316,16 @@ func _soul_of_kind(kind: int) -> Soul:
 
 
 # The shift reads as one body changing hands: a burst in the new soul's colour
-# at the feet, a flash, a squash-and-stretch on the body, and the name.
+# at the feet, a flash, the new body punching up from 0.85 to full size (on the
+# body itself, so `Model:scale` stays free for the attack animations), and the
+# name.
 func _play_shift_fx(_previous: Soul, soul: Soul) -> void:
 	CombatFx.ring_burst(self, global_position + Vector3(0.0, 0.05, 0.0), soul.color,
 		6.0 * FX_SCREEN_SCALE, 30.0 * FX_SCREEN_SCALE, 0.38)
 	_flash_body(Color(soul.color.r * 2.2, soul.color.g * 2.2, soul.color.b * 2.2, 1.0), 0.3)
 	CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_HIGH_M, 0.0), soul.title.to_upper(), soul.color, 20)
-	if model == null:
-		return
-	model.scale = Vector3(0.82, 1.16, 0.82)
-	var tween := create_tween()
-	tween.tween_property(model, "scale", Vector3.ONE, 0.26) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	if soul_bodies != null:
+		soul_bodies.punch_active_body()
 
 
 func _tick_spell_cooldowns() -> void:
@@ -1379,6 +1380,10 @@ func _setup_equipped_weapon_mesh() -> void:
 		equipped_weapon_mesh = MeshInstance3D.new()
 		equipped_weapon_mesh.name = "EquippedWeaponMesh"
 		equipped_weapon_holder.add_child(equipped_weapon_mesh)
+	if soul_bodies != null and soul_bodies.get_held_weapon_mesh() != null:
+		# The active soul's own weapon (WP9); refreshed on every shift.
+		SoulBodies3D.transfer_weapon(soul_bodies.get_held_weapon_mesh(), equipped_weapon_mesh)
+		equipped_weapon_mesh.transform = soul_bodies.get_weapon_fit()
 	if equipped_weapon_mesh.mesh == null:
 		# Placeholder blade: origin at the grip end, blade along local +Y (the
 		# WP1 sword convention). A scene that authors its own mesh keeps it.
@@ -1392,13 +1397,25 @@ func _setup_equipped_weapon_mesh() -> void:
 
 
 func _on_equipped_weapon_changed(weapon: Item) -> void:
+	_refresh_weapon_visual(weapon)
+
+
+## Shows `weapon` in the hand. With the soul bodies the mesh and its fit are the
+## active soul's (the knight's sword, the rogue's right dagger, the mage's
+## staff), whatever the item is; only "armed or not" comes from the item.
+## Without them the item's own 2D grip tuning goes on the mesh, as in WP3b.
+func _refresh_weapon_visual(weapon: Item) -> void:
 	if equipped_weapon_mesh == null:
 		return
 	if weapon == null:
 		equipped_weapon_mesh.visible = false
 		return
-	equipped_weapon_mesh.position = _weapon_pixels_to_local(weapon.grip_offset)
-	equipped_weapon_mesh.rotation_degrees = Vector3(WEAPON_HANG_ROTATION_DEG + weapon.grip_rotation_deg, 0.0, 0.0)
+	if soul_bodies != null and soul_bodies.get_held_weapon_mesh() != null:
+		SoulBodies3D.transfer_weapon(soul_bodies.get_held_weapon_mesh(), equipped_weapon_mesh)
+		equipped_weapon_mesh.transform = soul_bodies.get_weapon_fit()
+	else:
+		equipped_weapon_mesh.position = _weapon_pixels_to_local(weapon.grip_offset)
+		equipped_weapon_mesh.rotation_degrees = Vector3(WEAPON_HANG_ROTATION_DEG + weapon.grip_rotation_deg, 0.0, 0.0)
 	equipped_weapon_mesh.visible = true
 
 
