@@ -2,18 +2,12 @@
 
 [ext_resource type="Script" path="res://scripts/3d/player_3d.gd" id="1_player"]
 [ext_resource type="Script" path="res://scripts/inventory/inventory.gd" id="2_inventory"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/knight.glb" id="3_knight"]
+[ext_resource type="Script" path="res://scripts/3d/knight_visual_3d.gd" id="4_knight_visual"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
 radius = 0.35
 height = 1.8
-
-[sub_resource type="StandardMaterial3D" id="Mat_body"]
-albedo_color = Color(0.55, 0.56, 0.58, 1)
-
-[sub_resource type="CapsuleMesh" id="CapsuleMesh_body"]
-material = SubResource("Mat_body")
-radius = 0.35
-height = 1.9
 
 [node name="Player" type="CharacterBody3D" groups=["player"]]
 collision_layer = 2
@@ -31,16 +25,15 @@ avoidance_enabled = true
 radius = 0.4
 
 [node name="OverheadAnchor" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.15, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.25, 0)
 
 [node name="Model" type="Node3D" parent="."]
 
-[node name="Body" type="MeshInstance3D" parent="Model"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.95, 0)
-mesh = SubResource("CapsuleMesh_body")
+[node name="Knight" parent="Model" instance=ExtResource("3_knight")]
+script = ExtResource("4_knight_visual")
 
 [node name="HandPoint" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.34, 0.85, -0.08)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.335, 0.86, -0.08)
 
 [node name="EquippedWeaponHolder" type="Node3D" parent="HandPoint"]
 

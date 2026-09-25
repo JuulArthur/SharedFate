@@ -1,8 +1,8 @@
-[gd_scene load_steps=17 format=3]
+[gd_scene load_steps=14 format=3]
 
 [ext_resource type="Script" path="res://scripts/3d/main_3d.gd" id="1_main"]
-[ext_resource type="Script" path="res://scripts/3d/stubs/stub_player_3d.gd" id="2_player"]
-[ext_resource type="PackedScene" path="res://scenes/3d/stubs/stub_enemy_3d.tscn" id="3_enemy"]
+[ext_resource type="PackedScene" path="res://scenes/3d/player_3d.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://scenes/3d/wolf_3d.tscn" id="3_wolf"]
 [ext_resource type="PackedScene" path="res://scenes/3d/camera_rig_3d.tscn" id="4_camera_rig"]
 [ext_resource type="Script" path="res://scripts/3d/prop_3d.gd" id="5_prop"]
 [ext_resource type="PackedScene" path="res://assets/3d/models/tree.glb" id="6_tree"]
@@ -25,21 +25,10 @@ fog_density = 0.01
 [sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
 size = Vector3(30, 0.4, 30)
 
-[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
-radius = 0.35
-height = 1.8
-
-[sub_resource type="StandardMaterial3D" id="Mat_player"]
-albedo_color = Color(0.29, 0.31, 0.38, 1)
-
-[sub_resource type="CapsuleMesh" id="CapsuleMesh_player"]
-material = SubResource("Mat_player")
-radius = 0.35
-height = 1.8
-
 [node name="Arena" type="Node3D"]
 script = ExtResource("1_main")
 story_chapter_id = &""
+enemy_scene = ExtResource("3_wolf")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_arena")
@@ -151,36 +140,16 @@ script = ExtResource("5_prop")
 
 [node name="CameraRig" parent="." instance=ExtResource("4_camera_rig")]
 
-[node name="Player" type="CharacterBody3D" parent="." groups=["player"]]
+[node name="Player" parent="." instance=ExtResource("2_player")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9, 0, 0)
-collision_layer = 2
-collision_mask = 9
-script = ExtResource("2_player")
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Player"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
-shape = SubResource("CapsuleShape3D_player")
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Player"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
-mesh = SubResource("CapsuleMesh_player")
-
-[node name="NavigationAgent3D" type="NavigationAgent3D" parent="Player"]
-path_desired_distance = 0.3
-target_desired_distance = 0.4
-avoidance_enabled = true
-radius = 0.4
-
-[node name="OverheadAnchor" type="Node3D" parent="Player"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.15, 0)
-
-[node name="Enemy_01" parent="." instance=ExtResource("3_enemy")]
+[node name="Enemy_01" parent="." instance=ExtResource("3_wolf")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
 
-[node name="Enemy_02" parent="." instance=ExtResource("3_enemy")]
+[node name="Enemy_02" parent="." instance=ExtResource("3_wolf")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, 5)
 
-[node name="Enemy_03" parent="." instance=ExtResource("3_enemy")]
+[node name="Enemy_03" parent="." instance=ExtResource("3_wolf")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, -5)
 
 [node name="Spawn_default" type="Node3D" parent="."]

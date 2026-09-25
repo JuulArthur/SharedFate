@@ -55,6 +55,8 @@ const LAYER_PICKUPS := 4
 const LAYER_PROPS := 8
 # Grid used when the level has no NavigationRegion3D/Ground box to measure.
 const FALLBACK_MAP_REGION := Rect2i(-20, -20, 40, 40)
+# Physics frames to wait for the navigation map to sync a (baked) mesh.
+const NAV_MAP_SYNC_MAX_FRAMES := 120
 const MUSIC_CROSSFADE_SECONDS := 1.2
 const MUSIC_VOLUME_DB := -6.0
 
@@ -84,8 +86,8 @@ enum PlayerTurnAction {
 # Chapter read in the story book when this level opens (once per session).
 # Authored in StoryLibrary; leave empty for no narration.
 @export var story_chapter_id: StringName = StoryLibrary.PROLOGUE
-# Scene instanced by `_spawn_additional_enemy`. The WP0 stub until WP3c lands.
-@export var enemy_scene: PackedScene = preload("res://scenes/3d/stubs/stub_enemy_3d.tscn")
+# Scene instanced by `_spawn_additional_enemy`: the WP3c wolf by default.
+@export var enemy_scene: PackedScene = preload("res://scenes/3d/wolf_3d.tscn")
 # A level authored in the editor ships a baked NavigationMesh; a test scene may
 # not, in which case the coordinator bakes one at start.
 @export var bake_navmesh_if_empty: bool = true
@@ -155,14 +157,16 @@ func _ready() -> void:
 	_map_region = _compute_map_region()
 	_cache_blocked_cells_from_props()
 	_rebuild_navigation_grid()
-	_setup_navmesh()
 	_place_player()
 	# Spell radii are authored in meters; with 1 unit = 1 m this is 1.0.
 	if player.has_method("set_turn_meter_world_units"):
 		player.call("set_turn_meter_world_units", _get_turn_meter_world_units())
 	_spawn_test_loot()
 	_register_placed_enemies()
-	_wire_enemy_ai_targets()
+	# Enemy targets are wired once the navigation map has synced (`_setup_navmesh`):
+	# Enemy3D.set_target routes at once, and a map query before the first sync
+	# is a NavigationServer error (docs/deviations/wp3c.md, section 11).
+	_setup_navmesh()
 	_setup_camera()
 
 	_setup_path_preview()
@@ -311,12 +315,16 @@ func _cache_blocked_cells_from_props() -> void:
 func _setup_navmesh() -> void:
 	if nav_region == null:
 		push_warning("main_3d: no NavigationRegion3D; turn moves will find no paths")
+		_wire_enemy_ai_targets()
 		return
 	var mesh := nav_region.navigation_mesh
 	if mesh != null and mesh.get_polygon_count() > 0:
-		_navmesh_ready = true
+		# An editor-baked mesh (WP7) still reaches the server only on the first
+		# map sync, one physics frame away.
+		_finish_navmesh_setup(0)
 		return
 	if not bake_navmesh_if_empty:
+		_wire_enemy_ai_targets()
 		return
 	if mesh == null:
 		mesh = NavigationMesh.new()
@@ -328,12 +336,39 @@ func _setup_navmesh() -> void:
 
 
 func _on_navmesh_bake_finished() -> void:
-	# The region hands its mesh to the server on the next map sync; two physics
-	# frames later `map_get_path` sees it.
-	await get_tree().physics_frame
-	await get_tree().physics_frame
-	_navmesh_ready = true
+	# The region hands its mesh to the server on the next map sync; wait for
+	# that iteration before anyone routes.
+	_finish_navmesh_setup(NavigationServer3D.map_get_iteration_id(_level_navigation_map()))
 	print("[main_3d] navmesh baked")
+
+
+# Coroutine: waits until the navigation map has synced past `after_iteration`
+# (the mesh is then queryable), marks the level ready and wires the enemies.
+func _finish_navmesh_setup(after_iteration: int) -> void:
+	await _wait_for_navigation_map(after_iteration)
+	_navmesh_ready = true
+	_wire_enemy_ai_targets()
+
+
+# A map query made before the server's first sync is a NavigationServer error,
+# and a freshly baked mesh is only visible from the next sync on. The map's
+# iteration id counts those syncs.
+func _wait_for_navigation_map(after_iteration: int) -> void:
+	var map := _level_navigation_map()
+	if not map.is_valid():
+		return
+	for _i in range(NAV_MAP_SYNC_MAX_FRAMES):
+		if NavigationServer3D.map_get_iteration_id(map) > after_iteration:
+			return
+		await get_tree().physics_frame
+	push_warning("main_3d: the navigation map did not sync within %d physics frames" % NAV_MAP_SYNC_MAX_FRAMES)
+
+
+func _level_navigation_map() -> RID:
+	var world := get_world_3d()
+	if world == null:
+		return RID()
+	return world.navigation_map
 
 
 ## True once NavigationServer3D can answer path queries for this level.
