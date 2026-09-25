@@ -196,8 +196,17 @@ Implemented in WP4 (`scripts/3d/main_3d.gd`, smoke scene `scenes/3d/tests/main3d
 - Format `.glb`, exported from Blender with +Y up; verify after import that the character faces -Z and stands on y = 0. Files under `assets/3d/models/<name>.glb`, generator scripts under `tools/blender/`.
 - Knight, rogue and mage: about 1.9 m tall, origin at the feet, materials named `<Character>_<Part>`, low-poly flat shading, under 1,500 triangles each without the cape.
 - The sword is a separate object `Sword` with its origin at the grip; the character carries an empty named `HandPoint` at the right hand, and one named `OverheadAnchor` 0.25 m above the helm.
-- Wolf about 1.1 m long, tree 4 to 6 m, crate 0.8 m, chest 0.9 m wide; each prop with a simple collision box authored as a child named `<Name>_col` so Godot imports it as a collider (`-col` suffix convention), or added in the scene.
+- Wolf about 1.1 m long, tree 4 to 6 m, crate 0.8 m, chest 0.9 m wide; each prop with a simple collision box authored as a child named `<Name>_Col-colonly`, which Godot imports as a `StaticBody3D` named `<Name>_Col` with a concave shape and no extra mesh (`-col` would keep the box as a second visible mesh).
 - A preview sheet `assets/3d/previews/<name>.png` per model, rendered from the front three-quarter view.
+
+Implemented in WP1 (`tools/blender/sf_assets_common.py`, `generate_characters.py`, `generate_wolf.py`, `generate_props.py`; models in `assets/3d/models/`, gallery test `scenes/3d/tests/asset_gallery.tscn`). Facts for WP3b, WP7 and WP8:
+
+- Regenerate from the command line, no add-on needed: `blender --background --factory-startup --python tools/blender/<generator>.py -- --root <repo>`. The scripts also run through the MCP add-on's `execute_code` with `SF_DIR` / `SF_ROOT` pre-set (file headers say how). No `.blend` file is committed.
+- Imported tree of a character: root `<Name>` (Node3D) with `<Name>_Body`, `<Name>_Cape` (knight), the weapon mesh (`Sword`, `Dagger_L` / `Dagger_R`, `Staff`), `HandPoint` and `OverheadAnchor`. The main mesh is `<Name>_Body` because Godot renames a child that shares its parent's name.
+- Weapons: origin at the grip, blade or shaft along local +Y in Godot; the exported `Sword` and daggers carry a 180 degree rotation about X so they hang point-down at rest, the `Staff` stands upright. A weapon dropped into `EquippedWeaponHolder` with an identity transform points straight up.
+- Sizes: knight 1.995 m (988 triangles with the solidified cape, 832 without), rogue 1.890 m (720), mage 1.925 m (612), wolf 1.154 m long and 0.725 m at the ears (312) with `OverheadAnchor` at y = 0.925, tree 4.65 m, crate 0.80 m, chest 0.94 x 0.62 x 0.75 m.
+- `ground_tile.glb` holds two root objects, `GroundTile_A` and `GroundTile_B` (two greens), top face at y = 0 and 0.10 m thick.
+- Blender 4.3 prints a harmless `Draco mesh compression is not available` line on every export; `bpy.context.temp_override(scene=...)` crashes the glTF exporter, so the scripts switch `window.scene` instead.
 
 ## 11. Verification on this machine
 
@@ -240,6 +249,7 @@ Each package writes its own `docs/deviations/wp<N>.md` (date, deviation, reason)
 | 2026-09-20 | WP0 | Enemy `try_attack` returns `bool` instead of the 2D `void`, because GDScript overrides must match the base signature | yes (5.3) |
 | 2026-09-20 | WP0 | Branch is `feat/3d-test`, not `3d-test`, to follow the `type/description` branch convention; package branches are `feat/3d-wp<N>` in worktrees under `.claude/worktrees/` | yes (1) |
 | 2026-09-20 | WP2 | Rig adds `set_shake_offset`, `snap_to_target`, default blend 0.6, look-at height 1.0 m; headless viewport is 1600x1600; picking test asserts ground tolerance at the ray/plane point (full text in `docs/deviations/wp2.md`) | yes (6, 11) |
+| 2026-09-20 | WP1 | Models built with `blender --background` because the add-on server was not started; `-colonly` instead of `-col`; `<Name>_Body` mesh naming; weapon axis +Y with a 180 degree X rotation on blades; wolf anchor above the ears; two ground tile variants in one file (full text in `docs/deviations/wp1.md`) | yes (10) |
 | 2026-09-20 | WP4 | Pixel constants to metres (section 2); `Spawn_default` preferred; runtime bake when the mesh is empty; `enemy_scene` export and a new `_spawn_additional_enemy` (the 2D helper the guide describes no longer exists); placeholder overlay classes suffixed `Stub`; `acquire_counter_prompt`; enemy click marks input handled; `LevelLoader.apply_spawn` needs widening to `Node3D` in WP8 (full text in `docs/deviations/wp4.md`) | yes (2, 9) |
 | 2026-09-20 | WP3a | `path_height_offset` from the measured navmesh height and ground-plane `target_position`; wait for the navigation map after a runtime bake; `is_in_turn_based_combat()` added; `_apply_damage` / `_on_died` virtuals; `end_turn` does not stop movement; headless tests cap `Engine.max_fps` (full text in `docs/deviations/wp3a.md`) | yes (5.1, 11) |
 | 2026-09-20 | WP5 | `HitFlash3D` added; overlays scale 2D pixel sizes by 3.35; bars colours are exports; `ring_burst` in 3D draws on the FX layer at a fixed screen point; `PathPreview3D` drops the glow strip; `--check-only` cannot see autoloads (full text in `docs/deviations/wp5.md`) | yes (7, 11) |
