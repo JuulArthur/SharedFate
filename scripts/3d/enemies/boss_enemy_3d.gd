@@ -56,9 +56,10 @@ const ACCENT_MATERIAL_KEYS: Array[String] = ["Visor", "Steel"]
 const DEATH_TOPPLE_SECONDS := 1.1
 const DEATH_TEXT := "THE WARDEN FALLS"
 
-## Screen-top bar layout (pixels on a 1600 px wide window; the layer is above
-## the popups and under the counter prompt).
-const BAR_CANVAS_LAYER := 4
+## Screen-top bar layout (pixels; the bar is centred on the window's top edge).
+## Same CanvasLayer as the overhead bars, under the popups (4) and the counter
+## prompt (5).
+const BAR_CANVAS_LAYER := 3
 const BAR_WIDTH_PX := 620.0
 const BAR_HEIGHT_PX := 18.0
 const BAR_TOP_PX := 24.0

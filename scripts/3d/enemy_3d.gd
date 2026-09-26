@@ -136,6 +136,10 @@ const BURN_COLOR := Color(1.0, 0.58, 0.18, 1.0)
 const WEAKEN_COLOR := Color(0.75, 0.7, 0.95, 1.0)
 const EXPOSE_COLOR := Color(1.0, 0.45, 0.65, 1.0)
 const POPUP_STATUS_OFFSET := Vector3(0.0, 1.0, 0.0)
+## Out of turn mode (a player-placed trap roots an unaware enemy) one status
+## turn melts every this many seconds, as ability cooldowns do in exploration
+## (docs/gameplay-expansion.md section 1). Poison and burn do not tick then.
+const EXPLORATION_STATUS_TURN_SECONDS := 3.0
 ## Burn's tick popup sits above poison's so both read on the same turn.
 const POPUP_BURN_TICK_OFFSET := Vector3(0.0, 0.85, 0.0)
 
@@ -234,6 +238,7 @@ var _last_applied_damage := 0
 
 ## status id -> {"turns": int, "power": int}
 var _statuses: Dictionary = {}
+var _exploration_status_clock := 0.0
 ## True for the turn a stun is skipping.
 var _skipping_turn := false
 ## Set around a hit that must not provoke (traps) or must not be scaled (a
@@ -308,6 +313,7 @@ func _physics_process(delta: float) -> void:
 		super(delta)
 		return
 
+	_melt_statuses_in_exploration(delta)
 	_attack_cooldown_left = maxf(0.0, _attack_cooldown_left - delta)
 	_target_refresh_left -= delta
 
@@ -1272,7 +1278,19 @@ func _tick_down_statuses() -> void:
 	_update_status_display()
 
 
+## See EXPLORATION_STATUS_TURN_SECONDS.
+func _melt_statuses_in_exploration(delta: float) -> void:
+	if _statuses.is_empty():
+		_exploration_status_clock = 0.0
+		return
+	_exploration_status_clock += delta
+	if _exploration_status_clock >= EXPLORATION_STATUS_TURN_SECONDS:
+		_exploration_status_clock -= EXPLORATION_STATUS_TURN_SECONDS
+		_tick_down_statuses()
+
+
 func _clear_statuses() -> void:
+	_exploration_status_clock = 0.0
 	_statuses.clear()
 	_skipping_turn = false
 	_update_root_visual()

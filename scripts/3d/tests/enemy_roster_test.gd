@@ -12,7 +12,7 @@ extends Node3D
 ## is heavy and the brute shrugs off 20 %; knockback slides away and stops at
 ## the wall; `is_back_turned_to`; the detection multiplier shrinks `can_spot`
 ## and the ring (with the 2 cm rebuild rule); environment damage never
-## provokes; wandering stays inside its radius at the calm pace, investigate
+## provokes and a root applied in exploration melts; wandering stays inside its radius at the calm pace, investigate
 ## walks, looks and returns, and a survivor walks home after a fight; the
 ## cultist fires a bolt from range and backs off a close player first; the
 ## boss's slam hits a player still inside and misses one who left, phase 2
@@ -483,6 +483,14 @@ func _step_environment_damage() -> String:
 		return "environment damage emitted provoked_by_hit"
 	if not wolf.is_unaware() or wolf.is_alerted():
 		return "environment damage alerted the wolf (unaware %s)" % str(wolf.is_unaware())
+	# A trap's root on an unaware enemy melts in exploration (one turn per 3 s).
+	wolf.apply_status(Enemy3D.STATUS_ROOT, 1)
+	if not wolf.is_rooted():
+		return "apply_status(root, 1) in exploration did not root the wolf"
+	var melted := await _wait_until(func() -> bool: return not wolf.is_rooted(),
+		Enemy3D.EXPLORATION_STATUS_TURN_SECONDS + 1.0)
+	if not melted:
+		return "a 1-turn root applied in exploration still holds after %.1f s" % (Enemy3D.EXPLORATION_STATUS_TURN_SECONDS + 1.0)
 	wolf.receive_damage(1)
 	if provoked[0] != 1 or wolf.is_unaware():
 		return "a normal hit did not provoke (%d signals, unaware %s)" % [provoked[0], str(wolf.is_unaware())]
