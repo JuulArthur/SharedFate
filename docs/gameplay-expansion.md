@@ -90,3 +90,11 @@ Per-soul movement per turn: knight 6 m, rogue 8 m, mage 5 m (plus progression bo
 ## Open requests
 
 (each track appends here: date, track, request)
+
+- 2026-09-26, track B (details in `docs/enemy-roster.md`):
+  1. Turn-order strip: read `get_display_name()`, `get_portrait_color()` and `is_boss()` from each enemy (all roster scenes set them; the wolf is "Wolf").
+  2. Enemy turn in `main_3d.gd`: skip the camera beat and `ENEMY_ACTION_GAP_SECONDS` for an enemy whose `is_skipping_turn()` is true after `start_turn` (stunned: it has 0 m and `try_attack` refuses), and for one that `start_turn` killed (poison or burn tick). Both are already harmless today; this is pacing only. The `is_alive` check after the gap is skipped for the first actor, so a first actor killed by poison still gets its (empty) move, attack and `end_turn` calls.
+  3. `register_spawned_enemy(enemy)`: `Enemy3D.set_target` no longer routes the agent while the enemy is in turn mode, so the coordinator must not rely on it to move a summon; engage it, connect `provoked_by_hit`, and let the normal enemy turn move it. The warden already puts its summons in turn mode, gives them the player as target and calls `alert()` on them.
+  4. `Player3D.get_detection_multiplier()` (section 4) is what `can_spot` and the ring read; without it the multiplier is 1.0.
+  5. Optional: if the HUD draws its own boss bar, set `show_boss_bar = false` on `BossEnemy3D` and read `get_display_name()`, `health` / `max_health` and `get_phase()`.
+  6. Optional: a player knockback API (for example `knockback(from_point, distance_m)` like the enemy's) would let the brute and the warden's slam shove the player; skipped for now.
