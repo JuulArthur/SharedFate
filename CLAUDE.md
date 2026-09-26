@@ -10,6 +10,7 @@ The 3D version was built on branch `feat/3d-test` and merged into `main` on 2026
 - 1 unit = 1 m, +Y up, ground at y = 0, characters face local -Z. 2D y becomes 3D z. All conversions go through `GroundMath`; never inline them.
 - Actors are called duck-typed from the coordinator; keep the method names in the actor contract exactly.
 - Before finishing: run the headless checks in the contracts document (section 11) and the arena acceptance test in `docs/3d-arena.md` (prints `INTEGRATION OK`).
+- Art direction and the process for maps and characters (pre-rendered painted scenes, real-time characters): `docs/art-pipeline.md`; the Claude Design brief and reference boards: `docs/design-brief/`.
 - A work package stays inside the files it owns. If another file needs a change, write it in the deviations log of the contracts document and stop.
 
 ## The 2D game: reference only
