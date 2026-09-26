@@ -59,6 +59,7 @@ func _run() -> void:
 		["escape_by_distance", _step_escape_by_distance],
 		["escape_by_smoke", _step_escape_by_smoke],
 		["respawn", _step_respawn],
+		["set_snare", _step_set_snare],
 	]
 	for entry in steps:
 		_step = String(entry[0])
@@ -331,6 +332,30 @@ func _step_respawn() -> String:
 	if _player.collision_layer != 2:
 		return "revived body is on collision layer %d" % _player.collision_layer
 	return ""
+
+
+## The rogue's Set Snare places track A's Trap3D through the class lookup.
+func _step_set_snare() -> String:
+	var progression := _player.get_progression()
+	progression.set_level(3)
+	progression.skill_points += 1
+	if not progression.learn(AbilityCatalog3D.SET_SNARE):
+		return "Set Snare refused at level 3: %s" % progression.learn_block_reason(AbilityCatalog3D.SET_SNARE)
+	_main._request_shift(int(Soul.Kind.ROGUE))
+	var before := _count_traps()
+	var point := _player.global_position + Vector3(2.0, 0.0, 0.0)
+	await _main._execute_ability(AbilityCatalog3D.get_ability(AbilityCatalog3D.SET_SNARE), null, point)
+	if _count_traps() != before + 1:
+		return "no trap placed (%d before, %d after)" % [before, _count_traps()]
+	return ""
+
+
+func _count_traps() -> int:
+	var count := 0
+	for node in _main.find_children("*", "Area3D", true, false):
+		if node.get_script() != null and (node.get_script() as Script).get_global_name() == &"Trap3D":
+			count += 1
+	return count
 
 
 # --- Helpers ---------------------------------------------------------------------------

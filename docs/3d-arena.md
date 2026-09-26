@@ -1,6 +1,6 @@
 # The 3D arena: how to run it
 
-The playable 3D slice is `scenes/3d/arena.tscn`: one clearing ringed by trees, the knight with the three souls, three wolves, a crate and a chest, on the coordinator `scripts/3d/main_3d.gd`. Since 2026-09-26 it is the game's main scene; the original 2D game stays in the repository, untouched, as reference.
+The game's main scene is the Wilds, `scenes/3d/wilds.tscn` (since 2026-09-26, gameplay expansion): a 104 x 104 m forest with five camps and the Grave Warden, described in `docs/wilds-map.md`. The small test slice is `scenes/3d/arena.tscn`: one clearing ringed by trees, the knight with the three souls, three wolves, a crate and a chest, on the same coordinator `scripts/3d/main_3d.gd`; the acceptance test runs there. The original 2D game stays in the repository, untouched, as reference.
 
 ## Open and run
 

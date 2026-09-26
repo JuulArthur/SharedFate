@@ -519,6 +519,7 @@ func _on_navmesh_bake_finished() -> void:
 # (the mesh is then queryable), marks the level ready and wires the enemies.
 func _finish_navmesh_setup(after_iteration: int) -> void:
 	await _wait_for_navigation_map(after_iteration)
+	await _wait_for_map_to_answer_near_player()
 	_navmesh_ready = true
 	_wire_enemy_ai_targets()
 
@@ -535,6 +536,21 @@ func _wait_for_navigation_map(after_iteration: int) -> void:
 			return
 		await get_tree().physics_frame
 	push_warning("main_3d: the navigation map did not sync within %d physics frames" % NAV_MAP_SYNC_MAX_FRAMES)
+
+
+## On a big map the first synced iteration can still answer (0, 0, 0) for a
+## closest-point query (seen on the Wilds, docs/wilds-map.md). Wait until the
+## map answers with a point near the player before anyone routes.
+func _wait_for_map_to_answer_near_player() -> void:
+	var map := _level_navigation_map()
+	if not map.is_valid() or player == null:
+		return
+	for _i in range(NAV_MAP_SYNC_MAX_FRAMES):
+		var here := GroundMath.flatten(player.global_position)
+		var answer := NavigationServer3D.map_get_closest_point(map, here)
+		if GroundMath.ground_distance(answer, here) <= 3.0 or here.length() < 0.5:
+			return
+		await get_tree().physics_frame
 
 
 func _level_navigation_map() -> RID:

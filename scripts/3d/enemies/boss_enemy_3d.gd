@@ -65,7 +65,8 @@ const DEATH_TEXT := "THE WARDEN FALLS"
 const BAR_CANVAS_LAYER := 3
 const BAR_WIDTH_PX := 620.0
 const BAR_HEIGHT_PX := 18.0
-const BAR_TOP_PX := 24.0
+# Below the coordinator's turn-order strip (top centre, 18 to 112 px).
+const BAR_TOP_PX := 124.0
 const BAR_BACK_COLOR := Color(0.08, 0.07, 0.07, 0.9)
 const BAR_FILL_COLOR := Color(0.78, 0.16, 0.14, 1.0)
 const BAR_NAME_COLOR := Color(1.0, 0.9, 0.75, 1.0)
