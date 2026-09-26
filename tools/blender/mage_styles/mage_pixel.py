@@ -1533,7 +1533,13 @@ def main():
         view_rig_for_blend(coll, objects)
         armature.animation_data.action = walk
         os.makedirs(os.path.dirname(BLEND_PATH), exist_ok=True)
-        bpy.ops.wm.save_as_mainfile(filepath=BLEND_PATH, copy=True)
+        paths = bpy.context.preferences.filepaths
+        versions = paths.save_version
+        paths.save_version = 0            # no mage_pixel.blend1 beside the file
+        try:
+            bpy.ops.wm.save_as_mainfile(filepath=BLEND_PATH, copy=True)
+        finally:
+            paths.save_version = versions
         print("SF_PIXEL_BLEND %s" % BLEND_PATH)
     restore_scene(prev)
     print("SF_PIXEL DONE stride_per_cycle=%.3f m in %.1f s" % (stride, time.time() - T_START))
