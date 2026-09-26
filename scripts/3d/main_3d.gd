@@ -178,13 +178,16 @@ var turn_ui_player_icon: TextureRect
 var turn_ui_player_label: Label
 var turn_ui_enemy_icons_container: HBoxContainer
 var turn_ui_enemy_icon_entries: Array[Dictionary] = []
+# One icon bar for every action (scripts/3d/ui/action_bar_3d.gd): attacks,
+# spells, learned skills, utility and the turn buttons, each group captioned.
+var action_bar: ActionBar3D
 var turn_ui_actions_panel: PanelContainer
-var turn_ui_attack_button: Button
-var turn_ui_ranged_button: Button
-var turn_ui_block_button: Button
-var turn_ui_wait_button: Button
-var turn_ui_end_turn_button: Button
-# Mage spell buttons keyed by spell id. Built once; only shown for the mage.
+var turn_ui_attack_button: ActionSlot3D
+var turn_ui_ranged_button: ActionSlot3D
+var turn_ui_block_button: ActionSlot3D
+var turn_ui_wait_button: ActionSlot3D
+var turn_ui_end_turn_button: ActionSlot3D
+# Mage spell slots keyed by spell id. Built once; only shown for the mage.
 var turn_ui_spell_buttons: Dictionary = {}
 var turn_ui_soul_label: Label
 var selected_player_turn_action: PlayerTurnAction = PlayerTurnAction.MOVE
@@ -212,13 +215,11 @@ var story_book: StoryBook3D
 var ability_runner: AbilityRunner3D
 var selected_ability_id: StringName = &""
 var skill_tree_screen: SkillTreeScreen3D
-var ability_bar_panel: PanelContainer
-var ability_bar_row: HBoxContainer
 var ability_bar_buttons: Dictionary = {}
 var ability_bar_order: Array[Ability3D] = []
 var _ability_bar_signature := ""
-var sneak_button: Button
-var skills_button: Button
+var sneak_button: ActionSlot3D
+var skills_button: ActionSlot3D
 var stealth_label: Label
 var hover_hint_label: Label
 var hovered_prop_target: Node3D
@@ -2376,77 +2377,46 @@ func _setup_turn_ui() -> void:
 	turn_ui_level_xp_label.add_theme_color_override("font_color", Color(0.82, 0.78, 0.95, 1.0))
 	vbox.add_child(turn_ui_level_xp_label)
 
-	turn_ui_actions_panel = PanelContainer.new()
-	turn_ui_actions_panel.name = "TurnActionsUI"
-	turn_ui_actions_panel.visible = false
-	turn_ui_actions_panel.anchor_left = 0.5
-	turn_ui_actions_panel.anchor_top = 1.0
-	turn_ui_actions_panel.anchor_right = 0.5
-	turn_ui_actions_panel.anchor_bottom = 1.0
-	turn_ui_actions_panel.offset_left = -410.0
-	turn_ui_actions_panel.offset_top = -82.0
-	turn_ui_actions_panel.offset_right = 410.0
-	turn_ui_actions_panel.offset_bottom = -18.0
-	turn_ui_actions_panel.add_theme_stylebox_override("panel", panel_style.duplicate())
-	turn_ui_layer.add_child(turn_ui_actions_panel)
+	# The action bar. Soul-specific slots are built once and shown for the
+	# soul that has them: the rogue's throw, the knight's Block stance, the
+	# mage's spells. The learned abilities, Sneak and the skill tree slot are
+	# added by `_setup_ability_bar`.
+	action_bar = ActionBar3D.new()
+	turn_ui_layer.add_child(action_bar)
+	turn_ui_actions_panel = action_bar.panel
 
-	var actions_margin := MarginContainer.new()
-	actions_margin.add_theme_constant_override("margin_left", 12)
-	actions_margin.add_theme_constant_override("margin_top", 8)
-	actions_margin.add_theme_constant_override("margin_right", 12)
-	actions_margin.add_theme_constant_override("margin_bottom", 8)
-	turn_ui_actions_panel.add_child(actions_margin)
-
-	var actions_hbox := HBoxContainer.new()
-	actions_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	actions_hbox.add_theme_constant_override("separation", 10)
-	actions_margin.add_child(actions_hbox)
-
-	turn_ui_attack_button = Button.new()
-	turn_ui_attack_button.text = "Attack"
-	turn_ui_attack_button.toggle_mode = true
-	turn_ui_attack_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_attack_button = action_bar.add_slot(ActionBar3D.GROUP_ATTACKS, &"melee", "Melee", Color(0.88, 0.86, 0.80, 1.0), true)
+	turn_ui_attack_button.cost_mark = ActionSlot3D.CostMark.ACTION
+	turn_ui_attack_button.detail = "Action  |  weapon reach"
+	turn_ui_attack_button.tooltip_text = "Melee\nStrike an enemy within reach of your weapon."
 	turn_ui_attack_button.pressed.connect(_on_turn_attack_button_pressed)
-	actions_hbox.add_child(turn_ui_attack_button)
 
-	# Soul-specific actions share the row: the rogue's throw, the knight's
-	# Block stance, the mage's spells. `_update_turn_ui` shows the ones the
-	# active soul can use and hides the rest.
-	turn_ui_ranged_button = Button.new()
-	turn_ui_ranged_button.text = "Throw"
-	turn_ui_ranged_button.toggle_mode = true
-	turn_ui_ranged_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_ranged_button = action_bar.add_slot(ActionBar3D.GROUP_ATTACKS, &"throw", "Throw", Soul.COLOR_ROGUE, true)
+	turn_ui_ranged_button.cost_mark = ActionSlot3D.CostMark.ACTION
 	turn_ui_ranged_button.pressed.connect(_on_turn_ranged_button_pressed)
-	actions_hbox.add_child(turn_ui_ranged_button)
-
-	turn_ui_block_button = Button.new()
-	turn_ui_block_button.text = "Block"
-	turn_ui_block_button.custom_minimum_size = Vector2(128, 36)
-	turn_ui_block_button.pressed.connect(_on_turn_block_button_pressed)
-	actions_hbox.add_child(turn_ui_block_button)
 
 	turn_ui_spell_buttons.clear()
 	for spell in Soul.mage().spells:
-		var spell_button := Button.new()
-		spell_button.text = spell.display_name
-		spell_button.toggle_mode = true
-		spell_button.custom_minimum_size = Vector2(150, 36)
-		spell_button.tooltip_text = spell.description
+		var spell_button := action_bar.add_slot(ActionBar3D.GROUP_SPELLS, spell.id, spell.display_name, spell.color, true)
+		spell_button.cost_mark = ActionSlot3D.CostMark.ACTION
+		spell_button.tooltip_text = "%s\n%s" % [spell.display_name, spell.description]
 		spell_button.pressed.connect(_on_turn_spell_button_pressed.bind(spell.id))
-		actions_hbox.add_child(spell_button)
 		turn_ui_spell_buttons[spell.id] = spell_button
 
-	turn_ui_wait_button = Button.new()
-	turn_ui_wait_button.text = "Wait"
-	turn_ui_wait_button.custom_minimum_size = Vector2(128, 36)
-	turn_ui_wait_button.pressed.connect(_on_turn_wait_button_pressed)
-	actions_hbox.add_child(turn_ui_wait_button)
+	turn_ui_block_button = action_bar.add_slot(ActionBar3D.GROUP_TURN, &"block", "Block", Soul.COLOR_KNIGHT)
+	turn_ui_block_button.detail = "Ends the turn  |  halves every hit until your next turn"
+	turn_ui_block_button.tooltip_text = "Block\nSpend the turn to halve every hit until your next one."
+	turn_ui_block_button.pressed.connect(_on_turn_block_button_pressed)
 
-	turn_ui_end_turn_button = Button.new()
-	turn_ui_end_turn_button.text = "End Turn"
-	turn_ui_end_turn_button.custom_minimum_size = Vector2(128, 36)
+	turn_ui_wait_button = action_bar.add_slot(ActionBar3D.GROUP_TURN, &"wait", "Wait", UiTheme.TEXT)
+	turn_ui_wait_button.detail = "Ends the turn"
+	turn_ui_wait_button.tooltip_text = "Wait\nPass the rest of the turn."
+	turn_ui_wait_button.pressed.connect(_on_turn_wait_button_pressed)
+
+	turn_ui_end_turn_button = action_bar.add_slot(ActionBar3D.GROUP_TURN, &"end_turn", "End Turn", UiTheme.TITLE)
+	turn_ui_end_turn_button.hotkey = "Spc"
+	turn_ui_end_turn_button.tooltip_text = "End Turn (Space)"
 	turn_ui_end_turn_button.pressed.connect(_on_turn_end_turn_button_pressed)
-	actions_hbox.add_child(turn_ui_end_turn_button)
 
 	_rebuild_turn_enemy_icons()
 
@@ -2511,23 +2481,23 @@ func _update_turn_ui() -> void:
 	if turn_ui_attack_button != null:
 		turn_ui_attack_button.disabled = not can_player_use_actions or not can_attack
 		turn_ui_attack_button.button_pressed = selected_player_turn_action == PlayerTurnAction.ATTACK
-		turn_ui_attack_button.text = "Melee (Select Target)" if selected_player_turn_action == PlayerTurnAction.ATTACK else "Melee"
 	if turn_ui_ranged_button != null:
 		var has_ranged := soul != null and soul.has_ranged()
 		turn_ui_ranged_button.visible = has_ranged
 		turn_ui_ranged_button.disabled = not can_player_use_actions or not can_attack
 		turn_ui_ranged_button.button_pressed = selected_player_turn_action == PlayerTurnAction.RANGED
 		if has_ranged:
-			var ranged_label := "%s %dm" % [soul.ranged_name, int(round(soul.ranged_range_meters))]
-			if selected_player_turn_action == PlayerTurnAction.RANGED:
-				ranged_label += " (Select)"
-			turn_ui_ranged_button.text = ranged_label
+			var range_m := int(round(soul.ranged_range_meters))
+			turn_ui_ranged_button.caption = soul.ranged_name
+			turn_ui_ranged_button.detail = "Action  |  %d m" % range_m
+			turn_ui_ranged_button.tooltip_text = "%s\nA ranged attack, up to %d m." % [soul.ranged_name, range_m]
 	if turn_ui_block_button != null:
 		turn_ui_block_button.visible = in_turn_mode and (soul == null or soul.can_block_stance)
 		turn_ui_block_button.disabled = not can_player_use_turn_actions
-		turn_ui_block_button.text = "Block (Active)" if is_blocking else "Block"
+		turn_ui_block_button.active = is_blocking
+		turn_ui_block_button.caption = "Block (active)" if is_blocking else "Block"
 	for spell_id in turn_ui_spell_buttons:
-		var spell_button := turn_ui_spell_buttons[spell_id] as Button
+		var spell_button := turn_ui_spell_buttons[spell_id] as ActionSlot3D
 		var spell: Soul.Spell = soul.get_spell(spell_id) if soul != null else null
 		spell_button.visible = spell != null
 		if spell == null:
@@ -2538,12 +2508,10 @@ func _update_turn_ui() -> void:
 		spell_button.disabled = not can_player_use_actions or not can_attack or cooldown > 0
 		var aiming: bool = selected_player_turn_action == PlayerTurnAction.SPELL and selected_spell_id == spell_id
 		spell_button.button_pressed = aiming
-		var spell_label := "%s %dm" % [spell.display_name, int(round(spell.range_meters))]
+		spell_button.cooldown = cooldown
+		spell_button.detail = "Action  |  %d m" % int(round(spell.range_meters))
 		if cooldown > 0:
-			spell_label = "%s (%d)" % [spell.display_name, cooldown]
-		elif aiming:
-			spell_label += " (Select)"
-		spell_button.text = spell_label
+			spell_button.detail += "  |  ready in %d" % cooldown
 	if turn_ui_wait_button != null:
 		turn_ui_wait_button.visible = in_turn_mode
 		turn_ui_wait_button.disabled = not can_player_use_turn_actions
@@ -3252,51 +3220,23 @@ func _approach_for_melee(target: Node3D, reach: float) -> void:
 			return
 
 
+## The learned abilities go into the action bar's Skills group (the active
+## soul's) and Utility group (any soul's, like Toss Pebble), numbered 4-9 in
+## `ability_bar_order`. The skill tree slot closes the Skills group and Sneak
+## closes Utility; `_rebuild_ability_bar` inserts the abilities before them.
 func _setup_ability_bar() -> void:
-	ability_bar_panel = PanelContainer.new()
-	ability_bar_panel.name = "AbilityBar"
-	ability_bar_panel.anchor_left = 0.5
-	ability_bar_panel.anchor_right = 0.5
-	ability_bar_panel.anchor_top = 1.0
-	ability_bar_panel.anchor_bottom = 1.0
-	ability_bar_panel.offset_left = -300.0
-	ability_bar_panel.offset_right = 300.0
-	ability_bar_panel.offset_top = -142.0
-	ability_bar_panel.offset_bottom = -90.0
-	ability_bar_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	ability_bar_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	ability_bar_panel.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.PANEL_BG, UiTheme.PANEL_BORDER, 2, 10, 6))
-	turn_ui_layer.add_child(ability_bar_panel)
-
-	var outer := HBoxContainer.new()
-	outer.alignment = BoxContainer.ALIGNMENT_CENTER
-	outer.add_theme_constant_override("separation", 14)
-	ability_bar_panel.add_child(outer)
-
-	ability_bar_row = HBoxContainer.new()
-	ability_bar_row.add_theme_constant_override("separation", 8)
-	outer.add_child(ability_bar_row)
-
-	var divider := ColorRect.new()
-	divider.color = UiTheme.RULE
-	divider.custom_minimum_size = Vector2(1, 30)
-	outer.add_child(divider)
-
-	sneak_button = Button.new()
-	sneak_button.toggle_mode = true
-	sneak_button.text = "Sneak (C)"
-	sneak_button.tooltip_text = "Crouch and move quietly: slower, and enemies must come much closer to spot you. In a bush, or as the rogue, even closer. A hit on an unaware enemy while sneaking is a sneak attack (x2, the rogue x3)."
-	sneak_button.custom_minimum_size = Vector2(104, 36)
-	UiTheme.style_button(sneak_button, 13)
-	sneak_button.pressed.connect(_toggle_sneak)
-	outer.add_child(sneak_button)
-
-	skills_button = Button.new()
-	skills_button.text = "Skills (K)"
-	skills_button.custom_minimum_size = Vector2(104, 36)
-	UiTheme.style_button(skills_button, 13)
+	skills_button = action_bar.add_slot(ActionBar3D.GROUP_SKILLS, &"skill_tree", "Skill Tree", UiTheme.TITLE)
+	skills_button.hotkey = "K"
+	skills_button.detail = "Learn new abilities with skill points"
+	skills_button.tooltip_text = "Skill Tree (K)\nSpend skill points on new abilities."
 	skills_button.pressed.connect(_toggle_skill_tree)
-	outer.add_child(skills_button)
+
+	sneak_button = action_bar.add_slot(ActionBar3D.GROUP_UTILITY, &"sneak", "Sneak", Color(0.8, 0.7, 1.0, 1.0), true)
+	sneak_button.aims = false
+	sneak_button.hotkey = "C"
+	sneak_button.detail = "Slower, and much harder to spot"
+	sneak_button.tooltip_text = "Sneak (C)\nCrouch and move quietly: slower, and enemies must come much closer to spot you. In a bush, or as the rogue, even closer. A hit on an unaware enemy while sneaking is a sneak attack (x2, the rogue x3)."
+	sneak_button.pressed.connect(_toggle_sneak)
 
 	stealth_label = UiTheme.label("", Color(0.8, 0.7, 1.0, 1.0), 14)
 	stealth_label.position = Vector2(22.0, 150.0)
@@ -3312,25 +3252,32 @@ func _setup_ability_bar() -> void:
 
 
 func _rebuild_ability_bar(abilities: Array[Ability3D]) -> void:
-	for child in ability_bar_row.get_children():
-		child.queue_free()
+	for slot in ability_bar_buttons.values():
+		action_bar.remove_slot(slot as ActionSlot3D)
 	ability_bar_buttons.clear()
 	ability_bar_order = abilities
+	var skills_index := 0
+	var utility_index := 0
 	for i in range(abilities.size()):
 		var ability := abilities[i]
-		var button := Button.new()
-		button.toggle_mode = true
-		button.custom_minimum_size = Vector2(118, 36)
-		button.tooltip_text = "%s\n%s\n%s" % [ability.display_name, ability.summary(), ability.description]
-		UiTheme.style_button(button, 13)
-		button.add_theme_color_override("font_color", ability.color)
-		button.pressed.connect(_on_ability_button_pressed.bind(ability.id))
-		ability_bar_row.add_child(button)
-		ability_bar_buttons[ability.id] = button
+		var any_soul := ability.soul_kind == Ability3D.ANY_SOUL
+		var group := ActionBar3D.GROUP_UTILITY if any_soul else ActionBar3D.GROUP_SKILLS
+		var index := utility_index if any_soul else skills_index
+		var slot := action_bar.add_slot(group, ability.id, ability.display_name, ability.color, true, index)
+		if any_soul:
+			utility_index += 1
+		else:
+			skills_index += 1
+		slot.hotkey = str(i + 4)
+		slot.cost_mark = ActionSlot3D.CostMark.BONUS if ability.cost == Ability3D.Cost.BONUS else ActionSlot3D.CostMark.ACTION
+		slot.detail = ability.summary()
+		slot.tooltip_text = "%s (%d)\n%s\n%s" % [ability.display_name, i + 4, ability.summary(), ability.description]
+		slot.pressed.connect(_on_ability_button_pressed.bind(ability.id))
+		ability_bar_buttons[ability.id] = slot
 
 
 func _update_ability_bar() -> void:
-	if ability_bar_panel == null:
+	if action_bar == null or skills_button == null:
 		return
 	var abilities := _bar_abilities()
 	var signature := ""
@@ -3344,32 +3291,29 @@ func _update_ability_bar() -> void:
 		can_pick = not bool(player.call("is_moving"))
 	for i in range(ability_bar_order.size()):
 		var ability := ability_bar_order[i]
-		var button := ability_bar_buttons.get(ability.id) as Button
+		var button := ability_bar_buttons.get(ability.id) as ActionSlot3D
 		if button == null:
 			continue
 		var reason := ability_runner.block_reason(ability) if ability_runner != null else "No body"
 		var cooldown := ability_runner.get_cooldown(ability.id) if ability_runner != null else 0
-		var hotkey := str(i + 4)
-		var label := "%s %s" % [hotkey, ability.display_name]
-		if cooldown > 0:
-			label = "%s %s (%d)" % [hotkey, ability.display_name, cooldown]
-		elif ability.cost == Ability3D.Cost.BONUS:
-			label += " +"
-		button.text = label
+		# An exploration-only ability (the pebble) has no place in a fight.
+		button.visible = not (ability.exploration_only and combat_state != CombatState.EXPLORATION)
+		button.cooldown = cooldown
+		button.detail = ability.summary() + ("  |  ready in %d" % cooldown if cooldown > 0 else "")
 		button.disabled = not can_pick or not reason.is_empty()
 		button.button_pressed = selected_player_turn_action == PlayerTurnAction.ABILITY and selected_ability_id == ability.id
 	if sneak_button != null:
 		var sneaking := player.has_method("is_sneaking") and bool(player.call("is_sneaking"))
 		sneak_button.visible = combat_state == CombatState.EXPLORATION
 		sneak_button.button_pressed = sneaking
-		sneak_button.text = "Sneaking (C)" if sneaking else "Sneak (C)"
-	if skills_button != null:
-		var points := 0
-		var player_3d := player as Player3D
-		if player_3d != null and player_3d.get_progression() != null:
-			points = player_3d.get_progression().skill_points
-		skills_button.text = "Skills (K)  %d pt" % points if points > 0 else "Skills (K)"
-		skills_button.modulate = Color(1.25, 1.15, 0.8, 1.0) if points > 0 else Color.WHITE
+		sneak_button.caption = "Sneaking" if sneaking else "Sneak"
+	var points := 0
+	var player_3d := player as Player3D
+	if player_3d != null and player_3d.get_progression() != null:
+		points = player_3d.get_progression().skill_points
+	skills_button.badge = str(points) if points > 0 else ""
+	skills_button.caption = "Skill Tree  (%d point%s to spend)" % [points, "" if points == 1 else "s"] if points > 0 else "Skill Tree"
+	action_bar.refresh()
 
 
 func _update_stealth_label() -> void:
