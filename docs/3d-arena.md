@@ -42,7 +42,27 @@ Headless runs always skip the intro; the acceptance test opens the book itself.
 | 1 / 2 / 3, Q | shift to knight / rogue / mage, cycle | one shift per turn (two after a perfect reaction) |
 | F | - | counter during the wolf's strike: block, parry or ward, by soul |
 | I | inventory screen | same |
-| Esc | close a panel, close the story book | same |
+| 4 to 9 | aim or fire the ability bar's abilities (the soul in control's learned ones) | same; each costs the turn's action or its bonus action (marked `+`) |
+| C | sneak on / off | - |
+| K | skill tree (pauses the world) | same |
+| Left click on a barrel, waystone or chest | strike the barrel; walk over and use the waystone or chest | strike the barrel |
+| Esc | close a panel, close the story book, drop an ability aim | same |
+
+### Abilities, stealth and levels (gameplay expansion)
+
+Rules and balance: `docs/gameplay-expansion.md` (interfaces) and `scripts/3d/abilities/ability_catalog_3d.gd` (every number). In short:
+
+- A turn is movement (knight 6 m, rogue 8 m, mage 5 m), one action (melee, throw, spell or an action ability), one bonus action and one shift. A perfect knight block ripostes for half a sword blow; a kill in the rogue's hands refunds the action once a turn.
+- Sneaking (C) slows the walk and shrinks every enemy's detection ring (to 55 %, 30 % for the rogue, nothing inside a bush). A hit on an unaware enemy while sneaking is a sneak attack (x2, the rogue x3), and it only wakes enemies within 4 m of the victim or who can see you: a silent kill starts no fight.
+- End your turn more than 11 m from every enemy in the fight and out of their sight (or in a Smoke Bomb with nobody within 3 m) and you slip away: the fight ends.
+- Defeat is no longer the end: the body rises at the last waystone used (or the start) after 3 s.
+- XP levels grant a skill point and 8 health each; the body starts with one point. Spend them in the skill tree on abilities (level 2 to 4) and passives (Vitality, Might, Fleet Foot, Soul Bond).
+
+Headless check (prints `GAMEPLAY OK`):
+
+```powershell
+& $godot --headless --path . res://scenes/3d/tests/gameplay_test.tscn --quit-after 4000
+```
 
 ### How a fight starts (WP13)
 
