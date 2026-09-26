@@ -10,6 +10,7 @@ extends CanvasLayer
 signal visibility_changed_to(open: bool)
 
 const COLUMN_WIDTH := 300.0
+const SCROLL_HEIGHT := 640.0
 
 var _progression: Progression3D = null
 var _root: Control = null
@@ -106,9 +107,14 @@ func _build_frame() -> void:
 	hint.custom_minimum_size = Vector2(COLUMN_WIDTH * 4.0, 0.0)
 	vbox.add_child(hint)
 
+	# The four columns scroll when the tallest one outgrows the screen.
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.custom_minimum_size = Vector2(COLUMN_WIDTH * 4.0 + 50.0, SCROLL_HEIGHT)
+	vbox.add_child(scroll)
 	_columns = HBoxContainer.new()
 	_columns.add_theme_constant_override("separation", 14)
-	vbox.add_child(_columns)
+	scroll.add_child(_columns)
 
 
 func _rebuild() -> void:

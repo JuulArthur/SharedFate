@@ -2485,8 +2485,10 @@ func _update_turn_ui() -> void:
 			_:
 				attack_mode_text = "Move"
 		var bonus_ready := player != null and player.has_method("has_bonus_action") and bool(player.call("has_bonus_action"))
-		attack_text = "Action: %s | Bonus: %s | %s" % [("Ready" if can_attack_now else "Used"),
-			("Ready" if bonus_ready else "Used"), attack_mode_text]
+		attack_text = "Action: %s | Bonus: %s" % [("Ready" if can_attack_now else "Used"),
+			("Ready" if bonus_ready else "Used")]
+		if selected_player_turn_action != PlayerTurnAction.MOVE:
+			phase_text = "Phase: %s (click a target)" % attack_mode_text
 		turn_ui_phase_label.add_theme_color_override("font_color", Color(0.62, 0.84, 0.66, 1.0))
 		turn_ui_move_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
 		turn_ui_attack_label.add_theme_color_override("font_color", Color(0.65, 0.88, 0.67, 1.0) if can_attack_now else Color(0.88, 0.57, 0.57, 1.0))
