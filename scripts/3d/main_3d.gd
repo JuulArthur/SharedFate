@@ -106,6 +106,21 @@ const RESPAWN_DELAY_SECONDS := 3.0
 const INTERACT_RANGE_SLACK_M := 0.3
 const INTERACT_WALK_TIMEOUT_SECONDS := 8.0
 const MELEE_APPROACH_TIMEOUT_SECONDS := 5.0
+# Attack spots (`_find_free_attack_spot`): candidates every 15 degrees around
+# the target, kept this far apart beyond the two avoidance radii, on the
+# navmesh within ATTACK_SPOT_MAX_OFFMESH_M. The outer ring stays inside the reach
+# by the agents' arrival slack. When all are taken the mover queues on rings
+# this far outside its reach.
+const ATTACK_SPOT_ANGLE_STEPS := 24
+const ATTACK_SPOT_GAP_M := 0.1
+const ATTACK_SPOT_MAX_OFFMESH_M := 0.3
+const ATTACK_SPOT_REACH_SLACK_M := 0.12
+const ATTACK_SPOT_QUEUE_RINGS_M: Array[float] = [0.9, 1.8]
+# Turn-move watchdog (`_await_turn_move`): no 5 cm of progress toward the goal
+# for this long stops the walk; so does the path time plus this grace.
+const TURN_MOVE_STALL_SECONDS := 0.6
+const TURN_MOVE_STALL_PROGRESS_M := 0.05
+const TURN_MOVE_GRACE_SECONDS := 1.5
 
 @onready var player: CharacterBody3D = $Player
 @onready var nav_region: NavigationRegion3D = get_node_or_null("NavigationRegion3D")
@@ -1142,7 +1157,7 @@ func _request_player_turn_engage_enemy(target_enemy: Node3D = null) -> void:
 		_fx_popup(_popup_anchor(target_enemy), "Out of reach", CombatFx.COLOR_WARNING, 16)
 	if remaining_meters > 0.0:
 		var player_approach_distance := approach_distance_for(player, target_enemy, _get_player_melee_range())
-		var approach_point := _compute_approach_world_point(player.global_position, target_enemy.global_position, player_approach_distance)
+		var approach_point := _find_free_attack_spot(player, target_enemy, player_approach_distance, _get_player_melee_range())
 		var used_meters := _request_player_turn_move_by_distance(approach_point, remaining_meters)
 		if used_meters > 0.0:
 			if player.has_method("consume_turn_movement_meters"):
@@ -1151,12 +1166,10 @@ func _request_player_turn_engage_enemy(target_enemy: Node3D = null) -> void:
 				player.call("consume_turn_movement", int(round(used_meters)))
 
 		# Wait for movement to complete before checking attack range.
-		if player.has_method("is_moving"):
-			while player.call("is_moving"):
-				await get_tree().physics_frame
-				if combat_state != CombatState.PLAYER_TURN:
-					player_turn_action_running = false
-					return
+		await _await_turn_move(player, CombatState.PLAYER_TURN)
+		if combat_state != CombatState.PLAYER_TURN:
+			player_turn_action_running = false
+			return
 
 	if _player_can_attack_enemy_now(target_enemy):
 		await _request_player_turn_attack(target_enemy)
@@ -1250,14 +1263,10 @@ func _run_enemy_turn() -> void:
 		if used_meters > 0.0 and enemy_actor.has_method("consume_turn_movement_meters"):
 			enemy_actor.call("consume_turn_movement_meters", used_meters)
 
-		if enemy_actor.has_method("is_moving"):
-			while enemy_actor.call("is_moving"):
-				await get_tree().physics_frame
-				if combat_state != CombatState.ENEMY_TURN:
-					enemy_turn_running = false
-					return
-				if not is_instance_valid(enemy_actor):
-					break
+		await _await_turn_move(enemy_actor, CombatState.ENEMY_TURN)
+		if combat_state != CombatState.ENEMY_TURN:
+			enemy_turn_running = false
+			return
 
 		if is_instance_valid(enemy_actor) and enemy_actor.has_method("try_attack"):
 			await enemy_actor.try_attack(player)
@@ -1466,7 +1475,10 @@ func _request_enemy_turn_move_by_distance(enemy_actor: CharacterBody3D, max_mete
 
 	var enemy_attack_range := float(enemy_actor.get("attack_range"))
 	var stop_distance := approach_distance_for(enemy_actor, player, enemy_attack_range)
-	var approach_point := _compute_approach_world_point(enemy_actor.global_position, player.global_position, stop_distance)
+	# A free spot around the player, not the one on the straight line that
+	# another enemy may already stand on (a blocked spot kept the walk pushing
+	# against its neighbour and the turn never ended).
+	var approach_point := _find_free_attack_spot(enemy_actor, player, stop_distance, enemy_attack_range)
 	var world_path := _build_world_path_from_navigation(enemy_actor.global_position, approach_point, enemy_actor)
 	if world_path.size() <= 1:
 		return 0.0
@@ -1584,6 +1596,121 @@ func _compute_approach_world_point(mover_world: Vector3, target_world: Vector3, 
 		return target_world
 	var away := GroundMath.ground_direction(target_world, mover_world)
 	return GroundMath.flatten(target_world) + away * stop_distance
+
+
+## Where `mover` should stand to hit `target`: the free spot around the target
+## that is cheapest to walk to. Candidates sit on two rings between
+## `stop_distance` and the farthest point that still attacks with `reach`, every
+## ATTACK_SPOT_ANGLE_STEP; a spot is free when no other living actor's footprint
+## (its avoidance radius) overlaps the mover's there, and it lies on the navmesh.
+## When every spot is taken the mover queues on a wider ring; when even that is
+## full it stays put. The mover's own position wins when it is already in reach.
+func _find_free_attack_spot(mover: Node3D, target: Node3D, stop_distance: float, reach: float) -> Vector3:
+	var here := GroundMath.flatten(mover.global_position)
+	var center := GroundMath.flatten(target.global_position)
+	if GroundMath.ground_distance(here, center) <= reach and _is_spot_free(mover, target, here):
+		return here
+	var farthest := maxf(stop_distance, reach - ATTACK_SPOT_REACH_SLACK_M)
+	var rings: Array[float] = [stop_distance, (stop_distance + farthest) * 0.5]
+	var best: Variant = _cheapest_free_spot_on_rings(mover, target, center, rings)
+	if best != null:
+		return best
+	# Surrounded: wait one step back instead of pushing into the crowd.
+	var queue_rings: Array[float] = []
+	for extra in ATTACK_SPOT_QUEUE_RINGS_M:
+		queue_rings.append(farthest + extra)
+	best = _cheapest_free_spot_on_rings(mover, target, center, queue_rings)
+	if best != null:
+		return best
+	return here
+
+
+func _cheapest_free_spot_on_rings(mover: Node3D, target: Node3D, center: Vector3, rings: Array[float]) -> Variant:
+	var nav_map := _get_navigation_map_for(mover)
+	var best: Variant = null
+	var best_length := INF
+	for radius in rings:
+		for step in range(ATTACK_SPOT_ANGLE_STEPS):
+			var angle := TAU * float(step) / float(ATTACK_SPOT_ANGLE_STEPS)
+			var candidate := center + Vector3(cos(angle), 0.0, sin(angle)) * radius
+			if nav_map.is_valid():
+				var on_mesh := NavigationServer3D.map_get_closest_point(nav_map, candidate)
+				if GroundMath.ground_distance(on_mesh, candidate) > ATTACK_SPOT_MAX_OFFMESH_M:
+					continue
+			if not _is_spot_free(mover, target, candidate):
+				continue
+			# Straight-line distance first: a path query only for spots that
+			# could beat the best one found so far.
+			if GroundMath.ground_distance(mover.global_position, candidate) >= best_length:
+				continue
+			var path := _build_world_path_from_navigation(mover.global_position, candidate, mover as CharacterBody3D)
+			if path.size() <= 1 and GroundMath.ground_distance(mover.global_position, candidate) > 0.05:
+				continue
+			var length := _path_length(path)
+			if length < best_length:
+				best_length = length
+				best = candidate
+	return best
+
+
+## True when `spot` keeps `mover` clear of every other living actor except
+## `target` (the one it is attacking, which the ring already keeps apart).
+func _is_spot_free(mover: Node3D, target: Node3D, spot: Vector3) -> bool:
+	var mover_radius := _spacing_radius(mover)
+	var others: Array[Node3D] = []
+	for enemy_actor in _get_all_alive_enemies_unfiltered():
+		others.append(enemy_actor)
+	if player != null and is_instance_valid(player):
+		others.append(player)
+	for other in others:
+		if other == mover or other == target:
+			continue
+		if other.has_method("is_alive") and not bool(other.call("is_alive")):
+			continue
+		var clearance := mover_radius + _spacing_radius(other) + ATTACK_SPOT_GAP_M
+		if GroundMath.ground_distance(spot, other.global_position) < clearance:
+			return false
+	return true
+
+
+## The footprint the avoidance simulation keeps free around an actor: its
+## NavigationAgent3D radius, else its collision radius.
+func _spacing_radius(actor: Node) -> float:
+	var agent := actor.get_node_or_null("NavigationAgent3D") as NavigationAgent3D
+	if agent != null and agent.radius > 0.0:
+		return agent.radius
+	return _get_character_collision_radius(actor)
+
+
+## Waits for a turn move to end, with a watchdog: a walk that stops getting
+## closer to its goal for TURN_MOVE_STALL_SECONDS (pushing against another body)
+## or overruns its expected time is stopped, so a blocked walk can never hold
+## the turn. Returns early when the combat state leaves `state`.
+func _await_turn_move(actor: Node3D, state: CombatState) -> void:
+	if actor == null or not is_instance_valid(actor) or not actor.has_method("is_moving"):
+		return
+	var agent := actor.get_node_or_null("NavigationAgent3D") as NavigationAgent3D
+	var speed := maxf(0.5, float(actor.get("move_speed")) if actor.get("move_speed") != null else 3.0)
+	var goal := actor.global_position
+	if agent != null:
+		goal = agent.target_position
+	var expected := GroundMath.ground_distance(actor.global_position, goal) * 1.6 / speed
+	var deadline := Time.get_ticks_msec() + int((expected + TURN_MOVE_GRACE_SECONDS) * 1000.0)
+	var best_remaining := GroundMath.ground_distance(actor.global_position, goal)
+	var last_progress_msec := Time.get_ticks_msec()
+	while is_instance_valid(actor) and bool(actor.call("is_moving")):
+		await get_tree().physics_frame
+		if combat_state != state or not is_instance_valid(actor):
+			return
+		var remaining := GroundMath.ground_distance(actor.global_position, goal)
+		if remaining < best_remaining - TURN_MOVE_STALL_PROGRESS_M:
+			best_remaining = remaining
+			last_progress_msec = Time.get_ticks_msec()
+		var stalled := Time.get_ticks_msec() - last_progress_msec > int(TURN_MOVE_STALL_SECONDS * 1000.0)
+		if stalled or Time.get_ticks_msec() > deadline:
+			if actor.has_method("stop_movement_immediately"):
+				actor.call("stop_movement_immediately")
+			return
 
 
 func _request_player_turn_move_by_distance(target_world_position: Vector3, max_meters: float) -> float:
@@ -3100,7 +3227,7 @@ func _execute_ability(ability: Ability3D, target: Node3D, point: Variant) -> voi
 ## fight and cancels the ability).
 func _approach_for_melee(target: Node3D, reach: float) -> void:
 	var stop := approach_distance_for(player, target, reach)
-	var approach_point := _compute_approach_world_point(player.global_position, target.global_position, stop)
+	var approach_point := _find_free_attack_spot(player, target, stop, reach)
 	var state_at_start := combat_state
 	if combat_state == CombatState.PLAYER_TURN:
 		var remaining := float(player.call("get_turn_remaining_move_meters")) if player.has_method("get_turn_remaining_move_meters") else 0.0
@@ -3111,6 +3238,9 @@ func _approach_for_melee(target: Node3D, reach: float) -> void:
 			player.call("consume_turn_movement_meters", used)
 	else:
 		_request_player_move(approach_point)
+	if combat_state == CombatState.PLAYER_TURN:
+		await _await_turn_move(player, CombatState.PLAYER_TURN)
+		return
 	var deadline := Time.get_ticks_msec() + int(MELEE_APPROACH_TIMEOUT_SECONDS * 1000.0)
 	while player.has_method("is_moving") and bool(player.call("is_moving")):
 		await get_tree().physics_frame
