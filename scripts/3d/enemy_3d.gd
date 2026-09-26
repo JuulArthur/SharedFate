@@ -359,9 +359,13 @@ func _live_target() -> Node3D:
 	return _target
 
 
+## Who to chase and bite. In turn mode only the target changes: the coordinator
+## owns every step then, so a target handed over mid-fight (a summon being
+## registered) must not start a free walk.
 func set_target(target: Node3D) -> void:
 	_target = target
-	_refresh_target_position()
+	if not is_in_turn_based_combat():
+		_refresh_target_position()
 
 
 ## The target set by `set_target` or the last `try_attack`, or null.
