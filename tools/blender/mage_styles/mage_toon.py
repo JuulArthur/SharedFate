@@ -1241,7 +1241,16 @@ def viewport_to_rendered():
                 continue
             for space in area.spaces:
                 if space.type == "VIEW_3D":
-                    space.shading.type = "RENDERED"
+                    sh = space.shading
+                    # Solid mode ignores material culling: cull there too, so
+                    # the black shell only shows as a rim.
+                    sh.show_backface_culling = True
+                    sh.color_type = "MATERIAL"
+                    # Material preview lit by the scene's sun and world is the
+                    # render; RENDERED does not survive a background save.
+                    sh.use_scene_lights = True
+                    sh.use_scene_world = True
+                    sh.type = "MATERIAL"
                     if space.region_3d is not None:
                         space.region_3d.view_perspective = "CAMERA"
 
