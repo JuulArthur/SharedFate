@@ -1,0 +1,12 @@
+[gd_resource type="StandardMaterial3D" format=3]
+
+; Sash, knot, ribbon tails and brooch of mage_soft.glb (vertex coloured gold).
+; Replaces the imported Mage_Gold through mage_soft.glb.import.
+[resource]
+resource_name = "Mage_Gold"
+vertex_color_use_as_albedo = true
+metallic = 0.55
+roughness = 0.38
+rim_enabled = true
+rim = 0.2
+rim_tint = 0.5
