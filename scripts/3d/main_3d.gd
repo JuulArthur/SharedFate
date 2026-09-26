@@ -1198,6 +1198,14 @@ func _run_enemy_turn() -> void:
 		active_enemy_turn_actor = enemy_actor
 		if enemy_actor.has_method("start_turn"):
 			enemy_actor.call("start_turn", TURN_MOVE_METERS)
+		# Poison or burn may have killed it at the start of its turn, or a stun
+		# skips the whole turn: no camera beat for either (the enemy says why).
+		if not is_instance_valid(enemy_actor) or (enemy_actor.has_method("is_alive") and not bool(enemy_actor.call("is_alive"))):
+			continue
+		if enemy_actor.has_method("is_skipping_turn") and bool(enemy_actor.call("is_skipping_turn")):
+			if enemy_actor.has_method("end_turn"):
+				enemy_actor.call("end_turn")
+			continue
 
 		# Let the camera arrive on this enemy before it does anything.
 		if not first_actor:
