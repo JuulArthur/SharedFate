@@ -18,6 +18,8 @@ attack_cooldown = 0.7
 experience_reward = 35
 loot_drop_chance = 0.5
 detection_range = 5.0
+display_name = "Wolf"
+portrait_color = Color(0.62, 0.6, 0.56, 1)
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)

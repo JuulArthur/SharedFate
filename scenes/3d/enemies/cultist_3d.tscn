@@ -1,0 +1,49 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/enemies/ranged_enemy_3d.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/mage.glb" id="2_model"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_cultist"]
+radius = 0.35
+height = 1.8
+
+[node name="Cultist" type="CharacterBody3D" groups=["enemies"]]
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("1_script")
+move_speed = 3.0
+max_health = 32
+attack_damage = 11
+attack_range = 7.0
+attack_cooldown = 1.4
+experience_reward = 55
+loot_drop_chance = 0.65
+detection_range = 6.5
+attack_wind_up_duration = 0.35
+attack_strike_duration = 0.25
+turn_attack_wind_up_duration = 0.6
+turn_attack_strike_duration = 0.32
+display_name = "Cultist"
+portrait_color = Color(0.6, 0.36, 0.8, 1)
+move_clip = &"walk"
+move_clip_reference_speed = 1.92
+model_tint = Color(0.72, 0.5, 0.9, 1)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_cultist")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="."]
+path_desired_distance = 0.3
+target_desired_distance = 0.1
+avoidance_enabled = true
+time_horizon_agents = 0.25
+radius = 0.4
+max_speed = 3.0
+
+[node name="OverheadAnchor" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.15, 0)
+
+[node name="Model" type="Node3D" parent="."]
+
+[node name="MageModel" parent="Model" instance=ExtResource("2_model")]

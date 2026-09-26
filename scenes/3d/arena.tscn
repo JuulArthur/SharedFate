@@ -27,7 +27,6 @@ size = Vector3(30, 0.4, 30)
 
 [node name="Arena" type="Node3D"]
 script = ExtResource("1_main")
-story_chapter_id = &""
 enemy_scene = ExtResource("3_wolf")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]

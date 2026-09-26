@@ -277,8 +277,10 @@ func _step_throw_ambush() -> String:
 		return "the throw aim is still selected after the ambush started"
 	if not await _wait_until(func() -> bool: return _main.combat_state == Main3D.CombatState.PLAYER_TURN, ENEMY_TURN_TIMEOUT_SECONDS):
 		return "the ambush enemy turn did not hand back within %.1f s (state %d)" % [ENEMY_TURN_TIMEOUT_SECONDS, _main.combat_state]
-	if absf(_player.get_turn_remaining_move_meters() - Main3D.TURN_MOVE_METERS) > 0.001:
-		return "the player's first turn after the ambush has %.2f m, expected %.2f m" % [_player.get_turn_remaining_move_meters(), Main3D.TURN_MOVE_METERS]
+	# Gameplay expansion: the budget is per soul (the rogue who threw moves 8 m).
+	var expected_budget := Main3D.TURN_MOVE_METERS + float(Player3D.SOUL_MOVE_DELTA_M.get(_player.get_active_soul().kind, 0.0))
+	if absf(_player.get_turn_remaining_move_meters() - expected_budget) > 0.001:
+		return "the player's first turn after the ambush has %.2f m, expected %.2f m" % [_player.get_turn_remaining_move_meters(), expected_budget]
 	print("[detection] throw from %.2f m: WolfA %d -> %d, enemy turn first, then the player's" % [distance, before, _wolf_a.health])
 	return ""
 
