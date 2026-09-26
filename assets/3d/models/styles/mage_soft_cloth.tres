@@ -1,0 +1,13 @@
+[gd_resource type="StandardMaterial3D" format=3]
+
+; Body cloth, skin, hair and eyes of mage_soft.glb. The albedo is the baked
+; vertex colour (palette, fold paint and ambient occlusion); replaces the
+; imported Mage_Cloth through mage_soft.glb.import, because Godot 4.7.2 leaves
+; vertex_color_use_as_albedo off on the first vertex-coloured surface.
+[resource]
+resource_name = "Mage_Cloth"
+vertex_color_use_as_albedo = true
+roughness = 0.74
+rim_enabled = true
+rim = 0.25
+rim_tint = 0.6
