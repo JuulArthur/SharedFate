@@ -1,0 +1,162 @@
+[gd_scene load_steps=14 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/main_3d.gd" id="1_main"]
+[ext_resource type="PackedScene" path="res://scenes/3d/player_3d.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://scenes/3d/wolf_3d.tscn" id="3_wolf"]
+[ext_resource type="PackedScene" path="res://scenes/3d/camera_rig_3d.tscn" id="4_camera_rig"]
+[ext_resource type="Script" path="res://scripts/3d/prop_3d.gd" id="5_prop"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/tree.glb" id="6_tree"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/crate.glb" id="7_crate"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/chest.glb" id="8_chest"]
+[ext_resource type="Script" path="res://scripts/3d/arena_ground_tiles.gd" id="9_groundtiles"]
+[ext_resource type="Script" path="res://scripts/3d/tests/arena_integration_smoke.gd" id="10_smoke"]
+[ext_resource type="NavigationMesh" path="res://scenes/3d/arena_navmesh.tres" id="11_navmesh"]
+
+[sub_resource type="Environment" id="Environment_arena"]
+background_mode = 1
+background_color = Color(0.09, 0.10, 0.15, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.5, 0.55, 0.65, 1)
+ambient_light_energy = 0.9
+fog_enabled = true
+fog_light_color = Color(0.45, 0.5, 0.6, 1)
+fog_density = 0.01
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(30, 0.4, 30)
+
+[node name="Arena" type="Node3D"]
+script = ExtResource("1_main")
+story_chapter_id = &""
+enemy_scene = ExtResource("3_wolf")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_arena")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(0, 10, 0)
+rotation_degrees = Vector3(-55, 30, 0)
+light_energy = 1.3
+shadow_enabled = true
+
+[node name="NavigationRegion3D" type="NavigationRegion3D" parent="."]
+navigation_mesh = ExtResource("11_navmesh")
+
+[node name="Ground" type="StaticBody3D" parent="NavigationRegion3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 0)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="NavigationRegion3D/Ground"]
+shape = SubResource("BoxShape3D_ground")
+
+[node name="Tree_01" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0, 0, 13.0)
+script = ExtResource("5_prop")
+
+[node name="Tree_02" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.017, 0, 12.363)
+script = ExtResource("5_prop")
+
+[node name="Tree_03" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.644, 0, 10.517)
+script = ExtResource("5_prop")
+
+[node name="Tree_04" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10.517, 0, 7.644)
+script = ExtResource("5_prop")
+
+[node name="Tree_05" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12.363, 0, 4.017)
+script = ExtResource("5_prop")
+
+[node name="Tree_06" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 13.0, 0, 0.0)
+script = ExtResource("5_prop")
+
+[node name="Tree_07" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12.363, 0, -4.017)
+script = ExtResource("5_prop")
+
+[node name="Tree_08" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10.517, 0, -7.644)
+script = ExtResource("5_prop")
+
+[node name="Tree_09" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.644, 0, -10.517)
+script = ExtResource("5_prop")
+
+[node name="Tree_10" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.017, 0, -12.363)
+script = ExtResource("5_prop")
+
+[node name="Tree_11" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0, 0, -13.0)
+script = ExtResource("5_prop")
+
+[node name="Tree_12" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.017, 0, -12.363)
+script = ExtResource("5_prop")
+
+[node name="Tree_13" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.644, 0, -10.517)
+script = ExtResource("5_prop")
+
+[node name="Tree_14" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.517, 0, -7.644)
+script = ExtResource("5_prop")
+
+[node name="Tree_15" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12.363, 0, -4.017)
+script = ExtResource("5_prop")
+
+[node name="Tree_16" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -13.0, 0, 0.0)
+script = ExtResource("5_prop")
+
+[node name="Tree_17" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12.363, 0, 4.017)
+script = ExtResource("5_prop")
+
+[node name="Tree_18" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.517, 0, 7.644)
+script = ExtResource("5_prop")
+
+[node name="Tree_19" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.644, 0, 10.517)
+script = ExtResource("5_prop")
+
+[node name="Tree_20" parent="NavigationRegion3D" instance=ExtResource("6_tree")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.017, 0, 12.363)
+script = ExtResource("5_prop")
+
+[node name="Crate" parent="NavigationRegion3D" instance=ExtResource("7_crate")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0, 3)
+script = ExtResource("5_prop")
+
+[node name="TreasureChest" parent="NavigationRegion3D" instance=ExtResource("8_chest")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0, -3)
+script = ExtResource("5_prop")
+
+[node name="CameraRig" parent="." instance=ExtResource("4_camera_rig")]
+
+[node name="Player" parent="." instance=ExtResource("2_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9, 0, 0)
+
+[node name="Enemy_01" parent="." instance=ExtResource("3_wolf")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+
+[node name="Enemy_02" parent="." instance=ExtResource("3_wolf")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, 5)
+
+[node name="Enemy_03" parent="." instance=ExtResource("3_wolf")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, -5)
+
+[node name="Spawn_default" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9, 0, 0)
+
+[node name="GroundTiles" type="Node3D" parent="."]
+script = ExtResource("9_groundtiles")
+
+[node name="IntegrationSmoke" type="Node" parent="."]
+script = ExtResource("10_smoke")

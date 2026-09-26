@@ -53,6 +53,13 @@ var _shaken_camera: Camera2D
 
 var _hit_stop_until_msec := 0
 
+# --- 3D adapters (WP5, docs/3d-port-contracts.md section 7) --------------------
+# Both are inert until a 3D scene sets them, so the 2D game is unaffected.
+# `_world_projector` turns a world position (Vector3 in 3D) into a screen point;
+# `_shake_target` receives the shake offset per frame instead of a Camera2D.
+var _world_projector: Callable = Callable()
+var _shake_target: Variant = null
+
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -73,7 +80,7 @@ func _process(delta: float) -> void:
 # Spawns a short-lived label anchored to `world_position` that drifts up and
 # fades. It is projected through the current camera every frame, so it stays
 # crisp at any zoom and follows camera shake like everything else on screen.
-func popup_text(world_position: Vector2, text: String, color: Color = Color.WHITE,
+func popup_text(world_position: Variant, text: String, color: Color = Color.WHITE,
 		font_size: int = POPUP_FONT_SIZE) -> void:
 	if _layer == null:
 		return
@@ -98,7 +105,7 @@ func popup_text(world_position: Vector2, text: String, color: Color = Color.WHIT
 	_place_popup(_popups[_popups.size() - 1])
 
 
-func popup_damage(world_position: Vector2, amount: int, color: Color = COLOR_DAMAGE_DEALT) -> void:
+func popup_damage(world_position: Variant, amount: int, color: Color = COLOR_DAMAGE_DEALT) -> void:
 	popup_text(world_position, str(amount), color)
 
 
@@ -133,17 +140,36 @@ func _place_popup(entry: Dictionary) -> void:
 	var t := float(entry["t"])
 	var progress := clampf(t / POPUP_DURATION, 0.0, 1.0)
 	var rise := POPUP_RISE_PX * (1.0 - pow(1.0 - progress, 2.0))
-	var screen := _world_to_screen(entry["world"] as Vector2)
+	# The rise and the jitter are pixel offsets applied after the projection, so
+	# they read the same whether the world position was 2D or 3D.
+	var screen := _world_to_screen(entry["world"])
 	var size := label.get_combined_minimum_size()
 	label.pivot_offset = size * 0.5
 	label.position = screen + (entry["jitter"] as Vector2) - size * 0.5 - Vector2(0.0, rise)
 
 
-func _world_to_screen(world_position: Vector2) -> Vector2:
+# Installs the 3D projection used by every world position below. The callable
+# takes the world position and returns a Vector2 screen point (WP2's
+# `camera.unproject_position`). An invalid or empty Callable clears it and the
+# 2D canvas-transform path takes over again.
+func set_world_projector(projector: Callable) -> void:
+	_world_projector = projector if projector.is_valid() else Callable()
+
+
+func _world_to_screen(world_position: Variant) -> Vector2:
+	if _world_projector.is_valid():
+		var projected: Variant = _world_projector.call(world_position)
+		if projected is Vector2:
+			var screen_point: Vector2 = projected
+			return screen_point
+		return Vector2.ZERO
+	if not (world_position is Vector2):
+		return Vector2.ZERO
+	var world_2d: Vector2 = world_position
 	var viewport := get_viewport()
 	if viewport == null:
-		return world_position
-	return viewport.get_canvas_transform() * world_position
+		return world_2d
+	return viewport.get_canvas_transform() * world_2d
 
 
 # --- Banner -------------------------------------------------------------------
@@ -201,6 +227,12 @@ func shake(strength: float = 5.0, duration: float = 0.16) -> void:
 	strength *= SHAKE_SCALE
 	if strength <= 0.0 or duration <= 0.0:
 		return
+	if _shake_target is Callable:
+		# 3D: the camera rig owns the offset, so only the numbers are kept here.
+		_shake_strength = maxf(_shake_strength, strength)
+		_shake_time_left = maxf(_shake_time_left, duration)
+		_shake_duration = maxf(_shake_duration, duration)
+		return
 	var camera := get_viewport().get_camera_2d()
 	if camera == null:
 		return
@@ -212,8 +244,25 @@ func shake(strength: float = 5.0, duration: float = 0.16) -> void:
 	_shake_duration = maxf(_shake_duration, duration)
 
 
+# Routes the shake to a callable instead of a Camera2D. It receives the current
+# offset every frame and Vector2.ZERO once when the shake ends, so a 3D camera rig
+# can add it to its own position. Pass null to go back to the Camera2D path.
+func set_shake_target(target: Variant) -> void:
+	if target is Callable and (target as Callable).is_valid():
+		_shake_target = target
+		return
+	if _shake_target is Callable:
+		var previous: Callable = _shake_target
+		if previous.is_valid():
+			previous.call(Vector2.ZERO)
+	_shake_target = null
+
+
 func _update_shake(delta: float) -> void:
 	if _shake_time_left <= 0.0:
+		return
+	if _shake_target is Callable:
+		_update_shake_target(delta)
 		return
 	if _shaken_camera == null or not is_instance_valid(_shaken_camera):
 		_shake_time_left = 0.0
@@ -228,6 +277,25 @@ func _update_shake(delta: float) -> void:
 	var falloff := _shake_time_left / maxf(_shake_duration, 0.001)
 	var amount := _shake_strength * falloff * falloff
 	_shaken_camera.offset = Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * amount
+
+
+# Same decay curve as the Camera2D path, handed to the callable instead.
+func _update_shake_target(delta: float) -> void:
+	var target: Callable = _shake_target
+	if not target.is_valid():
+		_shake_time_left = 0.0
+		_shake_strength = 0.0
+		_shake_duration = 0.0
+		return
+	_shake_time_left -= delta
+	if _shake_time_left <= 0.0:
+		_shake_strength = 0.0
+		_shake_duration = 0.0
+		target.call(Vector2.ZERO)
+		return
+	var falloff := _shake_time_left / maxf(_shake_duration, 0.001)
+	var amount := _shake_strength * falloff * falloff
+	target.call(Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * amount)
 
 
 # --- Hit-stop -----------------------------------------------------------------
@@ -255,10 +323,15 @@ func _update_hit_stop() -> void:
 # Flashes a sprite via `self_modulate` and eases it back. Using self_modulate
 # (not modulate) means it never fights the attack tweens and archetype
 # animations that key `modulate` on the same node.
-func flash(item: CanvasItem, color: Color = Color(2.6, 2.6, 2.6, 1.0), duration: float = 0.16) -> void:
+func flash(item: Node, color: Color = Color(2.6, 2.6, 2.6, 1.0), duration: float = 0.16) -> void:
 	if item == null or not is_instance_valid(item):
 		return
-	item.self_modulate = color
+	if not (item is CanvasItem):
+		# 3D bodies tint their meshes themselves through the actor contract hook.
+		if item.has_method("flash_hit"):
+			item.call("flash_hit")
+		return
+	(item as CanvasItem).self_modulate = color
 	var tween := item.create_tween()
 	tween.tween_property(item, "self_modulate", Color.WHITE, duration) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
@@ -318,7 +391,7 @@ var _burst_ring_texture: Texture2D
 # not on the FX CanvasLayer, so it sits in the world and flattens like the
 # other floor rings. `flatten` is the y scale relative to x; 1.0 is a true
 # circle for effects drawn on the body rather than the floor.
-func ring_burst(parent: Node, world_position: Vector2, color: Color,
+func ring_burst(parent: Node, world_position: Variant, color: Color,
 		start_radius: float = 8.0, end_radius: float = 30.0,
 		duration: float = 0.35, flatten: float = 0.6) -> void:
 	if parent == null or not is_instance_valid(parent):
@@ -326,12 +399,46 @@ func ring_burst(parent: Node, world_position: Vector2, color: Color,
 	if _burst_ring_texture == null:
 		_burst_ring_texture = create_ring_texture(BURST_RING_SIZE, BURST_RING_INNER, BURST_RING_OUTER, Color.WHITE)
 
+	if world_position is Vector3:
+		_ring_burst_projected(world_position as Vector3, color, start_radius, end_radius, duration, flatten)
+		return
+
 	var ring := Sprite2D.new()
 	ring.texture = _burst_ring_texture
 	ring.modulate = color
 	ring.z_index = 20
 	parent.add_child(ring)
-	ring.global_position = world_position
+	ring.global_position = world_position as Vector2
+
+	var texture_radius := (BURST_RING_INNER + BURST_RING_OUTER) * 0.5
+	var start_scale := start_radius / texture_radius
+	var end_scale := end_radius / texture_radius
+	ring.scale = Vector2(start_scale, start_scale * flatten)
+
+	var tween := ring.create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(ring, "scale", Vector2(end_scale, end_scale * flatten), duration) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(ring, "modulate:a", 0.0, duration) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.chain().tween_callback(ring.queue_free)
+
+
+# 3D burst: the same sprite, the same radii and the same tween, but drawn on the
+# FX CanvasLayer at the projection of the world point instead of under `parent`
+# (a Node3D has no 2D children). The screen point is taken once; the burst is
+# short enough that camera movement during it does not read as a slide.
+func _ring_burst_projected(world_position: Vector3, color: Color,
+		start_radius: float, end_radius: float,
+		duration: float, flatten: float) -> void:
+	if _layer == null:
+		return
+	var ring := Sprite2D.new()
+	ring.texture = _burst_ring_texture
+	ring.modulate = color
+	ring.z_index = 20
+	_layer.add_child(ring)
+	ring.position = _world_to_screen(world_position)
 
 	var texture_radius := (BURST_RING_INNER + BURST_RING_OUTER) * 0.5
 	var start_scale := start_radius / texture_radius

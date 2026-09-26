@@ -11,13 +11,20 @@ extends RefCounted
 # node that frees itself on death (see `enemy.gd`) still leaves its loot behind.
 
 const PICKUP_SCENE_PATH := "res://scenes/item_pickup.tscn"
+# Loaded lazily like the 2D scene, so the 2D game never depends on 3D files.
+const PICKUP_SCENE_3D_PATH := "res://scenes/3d/item_pickup_3d.tscn"
 const DEFAULT_SPREAD := 18.0
 
 static var _pickup_scene: PackedScene
+static var _pickup_scene_3d: PackedScene
 
 
-static func drop_items(source: Node2D, items: Array[Item], spread: float = DEFAULT_SPREAD) -> void:
+static func drop_items(source: Node, items: Array[Item], spread: float = DEFAULT_SPREAD) -> void:
 	if source == null or items.is_empty():
+		return
+
+	if source is Node3D:
+		_drop_items_3d(source as Node3D, items, spread)
 		return
 
 	var parent := source.get_parent()
@@ -25,6 +32,36 @@ static func drop_items(source: Node2D, items: Array[Item], spread: float = DEFAU
 		return
 
 	var scene := _get_pickup_scene()
+	if scene == null:
+		return
+
+	# Read the origin now: `source` may queue_free() itself immediately after
+	# calling us, and the deferred spawns below run after it is gone.
+	var origin := (source as Node2D).global_position
+
+	for i in items.size():
+		var item := items[i]
+		if item == null:
+			continue
+
+		var pickup := scene.instantiate()
+		parent.call_deferred("add_child", pickup)
+
+		var offset_angle := TAU * float(i) / float(items.size())
+		var offset := Vector2.RIGHT.rotated(offset_angle) * spread
+		pickup.set_deferred("global_position", origin + offset)
+		pickup.call_deferred("setup", item)
+
+
+# 3D twin of the block above: same ring-spread, deferred-spawn behaviour, but
+# on the ground plane (XZ) and instancing `ItemPickup3D` instead. `spread` is
+# interpreted in metres, matching every other 3D range in the port.
+static func _drop_items_3d(source: Node3D, items: Array[Item], spread: float) -> void:
+	var parent := source.get_parent()
+	if parent == null:
+		return
+
+	var scene := _get_pickup_scene_3d()
 	if scene == null:
 		return
 
@@ -41,8 +78,8 @@ static func drop_items(source: Node2D, items: Array[Item], spread: float = DEFAU
 		parent.call_deferred("add_child", pickup)
 
 		var offset_angle := TAU * float(i) / float(items.size())
-		var offset := Vector2.RIGHT.rotated(offset_angle) * spread
-		pickup.set_deferred("global_position", origin + offset)
+		var ring_offset := GroundMath.from_ground(Vector2.RIGHT.rotated(offset_angle) * spread)
+		pickup.set_deferred("global_position", origin + ring_offset)
 		pickup.call_deferred("setup", item)
 
 
@@ -52,3 +89,11 @@ static func _get_pickup_scene() -> PackedScene:
 		if _pickup_scene == null:
 			push_warning("LootDropper: missing item pickup scene at %s" % PICKUP_SCENE_PATH)
 	return _pickup_scene
+
+
+static func _get_pickup_scene_3d() -> PackedScene:
+	if _pickup_scene_3d == null:
+		_pickup_scene_3d = load(PICKUP_SCENE_3D_PATH) as PackedScene
+		if _pickup_scene_3d == null:
+			push_warning("LootDropper: missing 3D item pickup scene at %s" % PICKUP_SCENE_3D_PATH)
+	return _pickup_scene_3d

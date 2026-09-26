@@ -1,0 +1,187 @@
+[gd_scene load_steps=21 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/tests/actor_base_test.gd" id="1_test"]
+[ext_resource type="Script" path="res://scripts/3d/actor_3d_base.gd" id="2_actor"]
+
+[sub_resource type="Environment" id="Environment_test"]
+background_mode = 1
+background_color = Color(0.16, 0.18, 0.2, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.58, 0.62, 1)
+ambient_light_energy = 0.8
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(40, 0.2, 40)
+
+[sub_resource type="StandardMaterial3D" id="Mat_ground"]
+albedo_color = Color(0.36, 0.44, 0.34, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ground"]
+material = SubResource("Mat_ground")
+size = Vector3(40, 0.2, 40)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_obstacle"]
+size = Vector3(3, 2, 1)
+
+[sub_resource type="StandardMaterial3D" id="Mat_obstacle"]
+albedo_color = Color(0.45, 0.4, 0.35, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_obstacle"]
+material = SubResource("Mat_obstacle")
+size = Vector3(3, 2, 1)
+
+[sub_resource type="StandardMaterial3D" id="Mat_wall"]
+albedo_color = Color(0.32, 0.3, 0.3, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wall_x"]
+size = Vector3(0.4, 2, 2.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_x"]
+material = SubResource("Mat_wall")
+size = Vector3(0.4, 2, 2.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wall_z"]
+size = Vector3(2.4, 2, 0.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wall_z"]
+material = SubResource("Mat_wall")
+size = Vector3(2.4, 2, 0.4)
+
+[sub_resource type="NavigationMesh" id="NavigationMesh_test"]
+geometry_parsed_geometry_type = 1
+geometry_collision_mask = 9
+cell_size = 0.25
+agent_height = 2.0
+agent_radius = 0.5
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_actor"]
+radius = 0.35
+height = 1.8
+
+[sub_resource type="StandardMaterial3D" id="Mat_actor_a"]
+albedo_color = Color(0.29, 0.31, 0.38, 1)
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_actor_a"]
+material = SubResource("Mat_actor_a")
+radius = 0.35
+height = 1.8
+
+[sub_resource type="StandardMaterial3D" id="Mat_actor_b"]
+albedo_color = Color(0.55, 0.2, 0.18, 1)
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_actor_b"]
+material = SubResource("Mat_actor_b")
+radius = 0.35
+height = 1.8
+
+[node name="ActorBaseTest" type="Node3D"]
+script = ExtResource("1_test")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_test")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+light_energy = 1.4
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 18, 18)
+
+[node name="NavigationRegion3D" type="NavigationRegion3D" parent="."]
+navigation_mesh = SubResource("NavigationMesh_test")
+
+[node name="Ground" type="StaticBody3D" parent="NavigationRegion3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="NavigationRegion3D/Ground"]
+shape = SubResource("BoxShape3D_ground")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="NavigationRegion3D/Ground"]
+mesh = SubResource("BoxMesh_ground")
+
+[node name="Obstacle" type="StaticBody3D" parent="NavigationRegion3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+collision_layer = 8
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="NavigationRegion3D/Obstacle"]
+shape = SubResource("BoxShape3D_obstacle")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="NavigationRegion3D/Obstacle"]
+mesh = SubResource("BoxMesh_obstacle")
+
+[node name="Pocket" type="StaticBody3D" parent="."]
+collision_layer = 8
+collision_mask = 0
+
+[node name="Front" type="CollisionShape3D" parent="Pocket"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7, 1, 0)
+shape = SubResource("BoxShape3D_wall_x")
+
+[node name="FrontMesh" type="MeshInstance3D" parent="Pocket"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7, 1, 0)
+mesh = SubResource("BoxMesh_wall_x")
+
+[node name="Left" type="CollisionShape3D" parent="Pocket"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1, 1.2)
+shape = SubResource("BoxShape3D_wall_z")
+
+[node name="LeftMesh" type="MeshInstance3D" parent="Pocket"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1, 1.2)
+mesh = SubResource("BoxMesh_wall_z")
+
+[node name="Right" type="CollisionShape3D" parent="Pocket"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1, -1.2)
+shape = SubResource("BoxShape3D_wall_z")
+
+[node name="RightMesh" type="MeshInstance3D" parent="Pocket"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1, -1.2)
+mesh = SubResource("BoxMesh_wall_z")
+
+[node name="ActorA" type="CharacterBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -2.5)
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("2_actor")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="ActorA"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_actor")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="ActorA"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+mesh = SubResource("CapsuleMesh_actor_a")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="ActorA"]
+path_desired_distance = 0.3
+target_desired_distance = 0.3
+avoidance_enabled = true
+radius = 0.4
+
+[node name="OverheadAnchor" type="Node3D" parent="ActorA"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.15, 0)
+
+[node name="ActorB" type="CharacterBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 0, 0)
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("2_actor")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="ActorB"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_actor")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="ActorB"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+mesh = SubResource("CapsuleMesh_actor_b")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="ActorB"]
+path_desired_distance = 0.3
+target_desired_distance = 0.3
+avoidance_enabled = true
+radius = 0.4
+
+[node name="OverheadAnchor" type="Node3D" parent="ActorB"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.15, 0)

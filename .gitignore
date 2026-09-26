@@ -14,3 +14,6 @@ mono_crash.*.json
 # OS/editor noise
 .DS_Store
 *.swp
+
+# Claude Code agent worktrees (Godot ignores .claude via .claude/.gdignore)
+.claude/worktrees/

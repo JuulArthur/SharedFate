@@ -1,0 +1,61 @@
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/player_3d.gd" id="1_player"]
+[ext_resource type="Script" path="res://scripts/inventory/inventory.gd" id="2_inventory"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/knight.glb" id="3_knight"]
+[ext_resource type="Script" path="res://scripts/3d/soul_bodies_3d.gd" id="4_soul_bodies"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/rogue.glb" id="5_rogue"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/mage.glb" id="6_mage"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
+radius = 0.35
+height = 1.8
+
+[node name="Player" type="CharacterBody3D" groups=["player"]]
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("1_player")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_player")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="."]
+path_desired_distance = 0.3
+target_desired_distance = 0.1
+avoidance_enabled = true
+time_horizon_agents = 0.25
+radius = 0.4
+max_speed = 3.5
+
+[node name="OverheadAnchor" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.245, 0)
+
+[node name="Model" type="Node3D" parent="."]
+script = ExtResource("4_soul_bodies")
+
+[node name="Knight" parent="Model" instance=ExtResource("3_knight")]
+
+[node name="Rogue" parent="Model" instance=ExtResource("5_rogue")]
+visible = false
+
+[node name="Mage" parent="Model" instance=ExtResource("6_mage")]
+visible = false
+
+[node name="HandPoint" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.335, 0.86, -0.08)
+
+[node name="EquippedWeaponHolder" type="Node3D" parent="HandPoint"]
+
+[node name="EquippedWeaponMesh" type="MeshInstance3D" parent="HandPoint/EquippedWeaponHolder"]
+transform = Transform3D(1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0)
+visible = false
+
+[node name="VisionLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+light_color = Color(1, 0.96, 0.88, 1)
+light_energy = 1.2
+omni_range = 6.0
+
+[node name="Inventory" type="Node" parent="."]
+script = ExtResource("2_inventory")

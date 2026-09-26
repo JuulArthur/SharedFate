@@ -40,11 +40,15 @@ func apply_spawn(scene_root: Node) -> void:
 		return
 
 	var spawn_node_name := SPAWN_NODE_PREFIX + String(pending_spawn_name)
-	var spawn := scene_root.find_child(spawn_node_name, true, false) as Node2D
+	var spawn_node := scene_root.find_child(spawn_node_name, true, false)
+	var spawn := spawn_node as Node2D
+	# 3D levels (docs/3d-port-contracts.md, section 9) author their spawn
+	# points as Node3D; the branch below moves a Node3D player onto one.
+	var spawn_3d := spawn_node as Node3D
 	var requested_spawn_name := pending_spawn_name
 	pending_spawn_name = &""
 
-	if spawn == null:
+	if spawn == null and spawn_3d == null:
 		push_warning("LevelLoader: no node named %s found for spawn %s" % [spawn_node_name, requested_spawn_name])
 		return
 
@@ -52,17 +56,32 @@ func apply_spawn(scene_root: Node) -> void:
 	if player == null:
 		return
 
-	if player.has_method("snap_to"):
-		player.call("snap_to", spawn.global_position)
+	if spawn_3d != null:
+		if player.has_method("snap_to"):
+			player.call("snap_to", spawn_3d.global_position)
+		elif player is Node3D:
+			(player as Node3D).global_position = spawn_3d.global_position
+		else:
+			push_warning("LevelLoader: spawn %s is a Node3D but the player is not" % spawn_node_name)
+		return
+
+	var player_2d := player as Node2D
+	if player_2d == null:
+		return
+
+	if player_2d.has_method("snap_to"):
+		player_2d.call("snap_to", spawn.global_position)
 	else:
-		(player as Node2D).global_position = spawn.global_position
+		player_2d.global_position = spawn.global_position
 
 
-func _find_player(scene_root: Node) -> Node2D:
+# The first node in the player group: a Node2D in the 2D levels, a Node3D in
+# the 3D port. Callers cast to the dimension they need.
+func _find_player(scene_root: Node) -> Node:
 	var tree := scene_root.get_tree()
 	if tree == null:
 		return null
 	var players := tree.get_nodes_in_group(PLAYER_GROUP)
 	if players.is_empty():
 		return null
-	return players[0] as Node2D
+	return players[0] as Node

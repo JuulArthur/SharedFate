@@ -1,0 +1,25 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/item_pickup_3d.gd" id="1_pickup_script"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_click"]
+size = Vector3(0.5, 0.6, 0.5)
+
+[node name="ItemPickup3D" type="Node3D"]
+script = ExtResource("1_pickup_script")
+
+[node name="Icon" type="Sprite3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0)
+billboard = 1
+texture_filter = 0
+pixel_size = 0.028125
+
+[node name="ClickArea" type="Area3D" parent="."]
+collision_layer = 4
+collision_mask = 0
+monitoring = false
+monitorable = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="ClickArea"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0)
+shape = SubResource("BoxShape3D_click")
