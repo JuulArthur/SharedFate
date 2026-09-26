@@ -14,6 +14,8 @@ A track never edits another track's files. If it needs something from another tr
 
 A player turn is: movement (per soul, see 4), one **action** (melee, throw, spell, or an action ability), one **bonus action** (bonus abilities), one soul shift (two after a perfect reaction). Enemies keep move + one attack. Abilities have cooldowns in the player's own turns; in exploration one turn of cooldown melts every 3 s (as the spells do today).
 
+Since 2026-09-26 the soul abilities, skill points and body passives are replaced by per-soul attributes, mana and stamina, and skills forged from skill cards: `docs/cards-and-attributes.md`. Card skills also cost mana (mage) or stamina (knight, rogue). The interfaces below are unchanged.
+
 ## 2. Enemy interface (track B implements on `Enemy3D`, everyone calls it duck-typed)
 
 | Method | Meaning |

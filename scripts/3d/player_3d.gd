@@ -208,6 +208,11 @@ var _smoke_turns := 0
 var _smoke_time_left := 0.0
 var _bonus_action_available := false
 var _kill_refund_used := false
+# Buffs from card skills (docs/cards-and-attributes.md): id -> {turns, power}.
+# They count the player's own turns; in exploration one turn melts every
+# EXPLORATION_SECONDS_PER_TURN, which also refills mana and stamina.
+var _buffs: Dictionary = {}
+var _exploration_upkeep_left := EXPLORATION_SECONDS_PER_TURN
 
 
 func _ready() -> void:
@@ -252,6 +257,25 @@ func _process(delta: float) -> void:
 		if _smoke_time_left <= 0.0:
 			CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_M, 0.0), "Smoke clears", SNEAK_RING_COLOR, 14)
 			_update_sneak_visual()
+	_exploration_upkeep(delta)
+
+
+## Outside a fight, one "turn" of refill and buff time passes every
+## EXPLORATION_SECONDS_PER_TURN, and only while something needs it.
+func _exploration_upkeep(delta: float) -> void:
+	if _turn_mode or not _alive:
+		return
+	var pools_waiting := progression != null and not progression.pools_full()
+	if not pools_waiting and _buffs.is_empty():
+		_exploration_upkeep_left = EXPLORATION_SECONDS_PER_TURN
+		return
+	_exploration_upkeep_left -= delta
+	if _exploration_upkeep_left > 0.0:
+		return
+	_exploration_upkeep_left = EXPLORATION_SECONDS_PER_TURN
+	if progression != null:
+		progression.regen_pools()
+	_tick_buffs()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -357,7 +381,12 @@ func _apply_damage(amount: int) -> int:
 	_hit_flash_handled = false
 	var final_amount := maxi(amount, 0)
 	if final_amount > 0 and active_soul != null:
-		final_amount = maxi(1, int(ceil(float(final_amount) * active_soul.defence_mult)))
+		var defence := active_soul.defence_mult
+		if progression != null:
+			defence *= progression.defence_multiplier(int(active_soul.kind))
+		final_amount = maxi(1, int(ceil(float(final_amount) * defence)))
+	if final_amount > 0 and has_buff(&"ward"):
+		final_amount = maxi(1, int(ceil(float(final_amount) * (1.0 - get_buff_power(&"ward") / 100.0))))
 	var blocked := blocking_active and final_amount > 0
 	if blocked:
 		final_amount = maxi(1, int(ceil(float(final_amount) * 0.5)))
@@ -579,6 +608,7 @@ func try_attack(target: Node3D = null) -> bool:
 		await _swing_melee(func() -> void:
 			if is_instance_valid(victim) and victim.has_method("receive_damage"):
 				victim.call("receive_damage", damage)
+				apply_on_hit_effects(victim)
 				CombatFx.hit_stop()
 		)
 		return true
@@ -614,6 +644,7 @@ func try_ranged_attack(target: Node3D = null) -> bool:
 	await _launch_bolt(target)
 	if is_instance_valid(target) and target.has_method("receive_damage"):
 		target.call("receive_damage", damage)
+		apply_on_hit_effects(target)
 		CombatFx.hit_stop(0.04, 0.3)
 	return true
 
@@ -924,12 +955,17 @@ func _apply_attack_damage() -> void:
 		var dealt := damage
 		if collider is Node3D:
 			dealt = apply_stealth_bonus(collider as Node3D, damage)
+		var hit_this := false
 		if collider.has_method("take_damage"):
 			collider.call("take_damage", dealt)
-			landed = true
+			hit_this = true
 		elif collider.has_method("receive_damage"):
 			collider.call("receive_damage", dealt)
+			hit_this = true
+		if hit_this:
 			landed = true
+			if collider is Node3D:
+				apply_on_hit_effects(collider as Node3D)
 	if landed:
 		CombatFx.hit_stop()
 
@@ -1342,10 +1378,15 @@ func set_turn_based_combat(enabled: bool) -> void:
 
 
 func start_turn(max_move_meters: float = 6.0) -> void:
-	super(maxf(0.0, max_move_meters + _soul_move_delta(active_soul) + _progression_move_bonus()))
+	# Buffs count the player's turns: one melts as each turn begins.
+	_tick_buffs()
+	var haste := float(get_buff_power(&"haste")) if has_buff(&"haste") else 0.0
+	super(maxf(0.0, max_move_meters + _soul_move_delta(active_soul) + haste))
 	set_blocking(false)
+	if progression != null:
+		progression.regen_pools()
 	# One shift a turn, plus the one Resonance earned during the enemy turn.
-	shifts_left_this_turn = SHIFTS_PER_TURN + _progression_bonus_shifts() + (1 if _resonance_pending else 0)
+	shifts_left_this_turn = SHIFTS_PER_TURN + (1 if _resonance_pending else 0)
 	_resonance_pending = false
 	_bonus_action_available = true
 	_kill_refund_used = false
@@ -1558,10 +1599,11 @@ func _tick_exploration_spell_cooldowns(delta: float) -> void:
 	_tick_spell_cooldowns()
 
 
-# --- Progression (gameplay expansion) ---------------------------------------------
-# Progression3D (child "Progression") owns skill points, learned abilities and
-# passive ranks; the body reads its numbers here. Levels add HEALTH_PER_LEVEL
-# each, Vitality its ranks.
+# --- Progression (docs/cards-and-attributes.md) -----------------------------------
+# Progression3D (child "Progression") owns the per-soul attributes, the mana and
+# stamina pools and the skill cards; the body reads its numbers here: Power
+# scales the soul in control's damage, the knight's Finesse its defence, the
+# rogue's Finesse its movement. Levels add HEALTH_PER_LEVEL each.
 
 func _setup_progression() -> void:
 	progression = get_node_or_null("Progression") as Progression3D
@@ -1578,12 +1620,10 @@ func get_progression() -> Progression3D:
 	return progression
 
 
-## Recomputes maximum health from the base, the levels and Vitality. A raise
-## also raises current health by the same amount.
+## Recomputes maximum health from the base and the levels. A raise also raises
+## current health by the same amount.
 func _apply_progression_stats() -> void:
 	var wanted := _base_max_health + (player_level - 1) * Progression3D.HEALTH_PER_LEVEL
-	if progression != null:
-		wanted += progression.bonus_max_health()
 	if wanted == max_health:
 		return
 	var gained := wanted - max_health
@@ -1593,28 +1633,87 @@ func _apply_progression_stats() -> void:
 	_update_health_bar()
 
 
-## Outgoing damage through the Might passive; exact at rank 0.
+## Outgoing damage through the soul in control's Power and an Empower buff;
+## exact with neither.
 func scale_damage(amount: int) -> int:
-	if progression == null or amount <= 0:
+	if amount <= 0:
 		return amount
-	var mult := progression.damage_multiplier()
+	var mult := 1.0
+	if progression != null and active_soul != null:
+		mult = progression.damage_multiplier(int(active_soul.kind))
+	if has_buff(&"empower"):
+		mult *= 1.0 + get_buff_power(&"empower") / 100.0
 	if is_equal_approx(mult, 1.0):
 		return amount
 	return maxi(1, int(round(float(amount) * mult)))
 
 
-func _progression_move_bonus() -> float:
-	return progression.bonus_move_meters() if progression != null else 0.0
-
-
-func _progression_bonus_shifts() -> int:
-	return progression.bonus_shifts() if progression != null else 0
-
-
+## The soul's movement relative to the coordinator's 6 m, with the rogue's
+## Finesse. A shift mid-turn moves the remaining budget by the difference.
 func _soul_move_delta(soul: Soul) -> float:
 	if soul == null:
 		return 0.0
-	return float(SOUL_MOVE_DELTA_M.get(soul.kind, 0.0))
+	var delta := float(SOUL_MOVE_DELTA_M.get(soul.kind, 0.0))
+	if progression != null:
+		delta += progression.bonus_move_meters(int(soul.kind))
+	return delta
+
+
+# --- Buffs (card skills) -------------------------------------------------------------
+# ward: `power` % less damage taken. empower: `power` % more damage. haste:
+# `power` m more movement each turn (and at once when cast mid-turn). envenom:
+# hits poison for `power` a turn. vanish: the Smoke Bomb cover, at once.
+
+func apply_buff(buff_id: StringName, turns: int, power: int) -> void:
+	if buff_id == &"vanish":
+		apply_smoke_cover()
+		return
+	var had := get_buff_power(buff_id) if has_buff(buff_id) else 0
+	var entry: Dictionary = _buffs.get(buff_id, {"turns": 0, "power": 0})
+	entry["turns"] = maxi(int(entry["turns"]), turns)
+	entry["power"] = maxi(int(entry["power"]), power)
+	_buffs[buff_id] = entry
+	if buff_id == &"haste" and _turn_mode and _turn_active:
+		_turn_move_left += float(maxi(0, int(entry["power"]) - had))
+
+
+func has_buff(buff_id: StringName) -> bool:
+	return _buffs.has(buff_id)
+
+
+func get_buff_power(buff_id: StringName) -> int:
+	var entry: Dictionary = _buffs.get(buff_id, {})
+	return int(entry.get("power", 0))
+
+
+func get_buff_turns(buff_id: StringName) -> int:
+	var entry: Dictionary = _buffs.get(buff_id, {})
+	return int(entry.get("turns", 0))
+
+
+## id -> {turns, power}, a copy.
+func get_buffs() -> Dictionary:
+	return _buffs.duplicate(true)
+
+
+func _tick_buffs() -> void:
+	for buff_id in _buffs.keys():
+		var entry: Dictionary = _buffs[buff_id]
+		var left := int(entry["turns"]) - 1
+		if left <= 0:
+			_buffs.erase(buff_id)
+		else:
+			entry["turns"] = left
+
+
+## What a landed hit carries besides its damage: an Envenom buff poisons.
+func apply_on_hit_effects(target: Node3D) -> void:
+	if target == null or not is_instance_valid(target) or not has_buff(&"envenom"):
+		return
+	if target.has_method("is_alive") and not bool(target.call("is_alive")):
+		return
+	if target.has_method("apply_status"):
+		target.call("apply_status", &"poison", 2, get_buff_power(&"envenom"))
 
 
 # --- Action economy (gameplay expansion) --------------------------------------------

@@ -59,6 +59,8 @@ static func draw_icon(ci: CanvasItem, rect: Rect2, key: StringName, color: Color
 			_nova(g)
 		&"distract":
 			_pebble(g)
+		&"summon":
+			_summon(g)
 		_:
 			_letter(ci, rect, color, fallback)
 
@@ -315,6 +317,17 @@ static func _pebble(g: _Glyph) -> void:
 	g.circle(Vector2(0.58, 0.40), 0.11)
 	g.ring(Vector2(0.62, 0.74), 0.08, 0.035, faint, PI, TAU)
 	g.ring(Vector2(0.62, 0.74), 0.16, 0.035, Color(g.color, 0.35), PI, TAU)
+
+
+static func _summon(g: _Glyph) -> void:
+	# A standing stone with a spirit light hovering over it.
+	g.poly(PackedVector2Array([Vector2(0.40, 0.90), Vector2(0.60, 0.90), Vector2(0.56, 0.56), Vector2(0.44, 0.56)]),
+		Color(0.55, 0.53, 0.55, 1.0))
+	g.circle(Vector2(0.50, 0.32), 0.14)
+	g.ring(Vector2(0.50, 0.32), 0.24, 0.035, Color(g.color, 0.5))
+	for angle in [0.0, PI * 0.5, PI, PI * 1.5]:
+		var dir := Vector2(cos(angle), sin(angle))
+		g.line(Vector2(0.50, 0.32) + dir * 0.29, Vector2(0.50, 0.32) + dir * 0.36, 0.035, Color(g.color, 0.7))
 
 
 static func _letter(ci: CanvasItem, rect: Rect2, color: Color, text: String) -> void:

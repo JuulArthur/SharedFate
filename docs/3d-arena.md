@@ -42,26 +42,28 @@ Headless runs always skip the intro; the acceptance test opens the book itself.
 | 1 / 2 / 3, Q | shift to knight / rogue / mage, cycle | one shift per turn (two after a perfect reaction) |
 | F | - | counter during the wolf's strike: block, parry or ward, by soul |
 | I | inventory screen | same |
-| 4 to 9 | aim or fire the learned abilities on the action bar (the soul in control's, then Toss Pebble) | same; each costs the turn's action (green disc) or its bonus action (orange triangle) |
+| 4 to 6 | aim or fire the soul in control's forged skills | same; each costs mana or stamina plus the turn's action (green disc) or bonus action (orange triangle) |
+| 7 | Toss Pebble | - |
 | C | sneak on / off | - |
-| K | skill tree (pauses the world) | same |
+| K | character screen: attributes, and the card forge by a campfire or waystone (pauses the world) | same, but no forging in a fight |
 | Left click on a barrel, waystone or chest | strike the barrel; walk over and use the waystone or chest | strike the barrel |
 | Esc | close a panel, close the story book, drop an ability aim | same |
 
-### Abilities, stealth and levels (gameplay expansion)
+### Skills, stealth and levels (gameplay expansion)
 
-Rules and balance: `docs/gameplay-expansion.md` (interfaces) and `scripts/3d/abilities/ability_catalog_3d.gd` (every number). In short:
+Rules and balance: `docs/gameplay-expansion.md` (interfaces) and `docs/cards-and-attributes.md` (attributes, mana and stamina, skill cards and every number). In short:
 
-- A turn is movement (knight 6 m, rogue 8 m, mage 5 m), one action (melee, throw, spell or an action ability), one bonus action and one shift. A perfect knight block ripostes for half a sword blow; a kill in the rogue's hands refunds the action once a turn.
+- A turn is movement (knight 6 m, rogue 8 m, mage 5 m), one action (melee, throw, spell or an action skill), one bonus action and one shift. A perfect knight block ripostes for half a sword blow; a kill in the rogue's hands refunds the action once a turn.
 - Sneaking (C) slows the walk and shrinks every enemy's detection ring (to 55 %, 30 % for the rogue, nothing inside a bush). A hit on an unaware enemy while sneaking is a sneak attack (x2, the rogue x3), and it only wakes enemies within 4 m of the victim or who can see you: a silent kill starts no fight.
 - End your turn more than 11 m from every enemy in the fight and out of their sight (or in a Smoke Bomb with nobody within 3 m) and you slip away: the fight ends.
 - Defeat is no longer the end: the body rises at the last waystone used (or the start) after 3 s.
-- XP levels grant a skill point and 8 health each; the body starts with one point. Spend them in the skill tree on abilities (level 2 to 4) and passives (Vitality, Might, Fleet Foot, Soul Bond).
+- XP levels grant 3 attribute points and 8 health each; the body starts with 3 points. Each point goes to one soul's Power, Energy or Finesse (K).
+- Skills are forged from skill cards found on enemies and in chests: a type card (Damage, Affliction, Control, Buff, Heal, Summon), elements (Fire, Frost, Lightning, Poison) and modifiers (Ranged, Close, Area), up to 5 cards and 3 skills per soul. The soul decides the delivery: Damage + Fire + Ranged + Area is a Fireball for the mage, a Fire Trap for the rogue and a flaming leap slam for the knight. Forging needs a campfire or waystone within 4 m.
 
 Headless check (prints `GAMEPLAY OK`):
 
 ```powershell
-& $godot --headless --path . res://scenes/3d/tests/gameplay_test.tscn --quit-after 4000
+& $godot --headless --path . res://scenes/3d/tests/gameplay_test.tscn --quit-after 6000
 ```
 
 ### How a fight starts (WP13)
@@ -70,7 +72,7 @@ Every wolf shows a faint dashed ring on the ground while you explore: its detect
 
 You can also strike first. In exploration the action bar shows Melee and, for the soul in control, Throw or the two spells. Pick Throw or a spell and click a wolf: the same range ring, targeting and refusals as in a turn (`Out of range`, `Recharging (n)`), and the player stands still to throw or cast. A plain click on a wolf, or Space next to one, is the melee. Any hit that lands on a wolf outside combat starts it as an ambush (`AMBUSH!`): the hit resolves fully first, the struck wolf and everyone within 12 m of you engage, the wolves take the first turn, and your turn follows as usual. A refused or out-of-range attack starts nothing. Outside combat the attacks are spaced by the realtime 0.35 s cooldown, and a spell's cooldown melts one turn every 3 s of real time (spells still start every fight fresh).
 
-Every action sits on one icon bar at the bottom of the screen (`scripts/3d/ui/action_bar_3d.gd`), in captioned groups: Attacks (Melee, Throw), Spells (the mage's Arcane Burst and Frost Snare), Skills (the learned abilities and the skill tree, which shows a badge while points are unspent), Utility (Toss Pebble and Sneak, exploration only) and Turn (Block, Wait, End Turn, combat only; Block and Wait hand the turn over). A group with nothing for the soul in control is hidden. Each slot shows its hotkey top left, its cost bottom right (green disc: action, orange triangle: bonus action) and a darkened count while recharging; the line above the bar names the hovered slot, or the aimed one with "click a target". Icons are vector glyphs drawn in code (`scripts/3d/ui/action_icons_3d.gd`). Hovering a wolf or an item highlights it. The Sound button (top right) unmutes the music.
+Every action sits on one icon bar at the bottom of the screen (`scripts/3d/ui/action_bar_3d.gd`), in captioned groups: Attacks (Melee, Throw), Spells (the mage's Arcane Burst and Frost Snare), Skills (the soul in control's forged skills and the character screen, which shows a badge while attribute points are unspent), Utility (Toss Pebble and Sneak, exploration only) and Turn (Block, Wait, End Turn, combat only; Block and Wait hand the turn over). A group with nothing for the soul in control is hidden. Each slot shows its hotkey top left, its cost bottom right (green disc: action, orange triangle: bonus action) and a darkened count while recharging; the line above the bar names the hovered slot, or the aimed one with "click a target". Icons are vector glyphs drawn in code (`scripts/3d/ui/action_icons_3d.gd`). Hovering a wolf or an item highlights it. The Sound button (top right) unmutes the music.
 
 Headless check of the detection and ambush rules (prints `DETECTION OK`):
 
