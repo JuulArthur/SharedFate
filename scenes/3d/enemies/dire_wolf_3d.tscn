@@ -1,0 +1,47 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/enemies/dire_wolf_3d.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/wolf.glb" id="2_model"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_dire_wolf"]
+size = Vector3(1.2, 1.35, 1.75)
+
+[node name="DireWolf" type="CharacterBody3D" groups=["enemies"]]
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("1_script")
+move_speed = 3.4
+max_health = 70
+attack_damage = 14
+attack_range = 1.6
+attack_cooldown = 0.9
+experience_reward = 70
+loot_drop_chance = 0.7
+detection_range = 5.5
+attack_wind_up_duration = 0.3
+turn_attack_wind_up_duration = 0.7
+turn_attack_strike_duration = 0.2
+display_name = "Dire Wolf"
+portrait_color = Color(0.34, 0.31, 0.38, 1)
+move_clip_reference_speed = 2.536
+model_tint = Color(0.42, 0.4, 0.46, 1)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.675, 0)
+shape = SubResource("BoxShape3D_dire_wolf")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="."]
+path_desired_distance = 0.3
+target_desired_distance = 0.1
+avoidance_enabled = true
+time_horizon_agents = 0.25
+radius = 0.6
+max_speed = 3.4
+
+[node name="OverheadAnchor" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.3, 0)
+
+[node name="Model" type="Node3D" parent="."]
+
+[node name="WolfModel" parent="Model" instance=ExtResource("2_model")]
+transform = Transform3D(1.35, 0, 0, 0, 1.35, 0, 0, 0, 1.35, 0, 0, 0)

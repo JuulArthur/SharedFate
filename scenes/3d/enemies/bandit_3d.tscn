@@ -1,0 +1,48 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/enemy_3d.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/rogue.glb" id="2_model"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_bandit"]
+radius = 0.35
+height = 1.8
+
+[node name="Bandit" type="CharacterBody3D" groups=["enemies"]]
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("1_script")
+move_speed = 4.0
+max_health = 45
+attack_damage = 9
+attack_range = 1.2
+attack_cooldown = 0.6
+experience_reward = 50
+loot_drop_chance = 0.65
+detection_range = 6.0
+attack_wind_up_duration = 0.18
+turn_attack_wind_up_duration = 0.5
+display_name = "Bandit"
+portrait_color = Color(0.72, 0.46, 0.3, 1)
+turn_move_override_m = 7.0
+move_clip = &"walk"
+move_clip_reference_speed = 1.92
+model_tint = Color(0.86, 0.62, 0.5, 1)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_bandit")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="."]
+path_desired_distance = 0.3
+target_desired_distance = 0.1
+avoidance_enabled = true
+time_horizon_agents = 0.25
+radius = 0.4
+max_speed = 4.0
+
+[node name="OverheadAnchor" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.15, 0)
+
+[node name="Model" type="Node3D" parent="."]
+
+[node name="RogueModel" parent="Model" instance=ExtResource("2_model")]
