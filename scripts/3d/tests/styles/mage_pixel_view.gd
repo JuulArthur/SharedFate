@@ -49,11 +49,41 @@ func _ready() -> void:
 			_errors.append("no %s" % node_name)
 		else:
 			print("MAGE_PIXEL %s under %s at %s" % [node_name, found.get_parent().name, _fmt(found.global_position)])
+	_check_drop_in(packed)
 	if _player == null or not _player.has_animation(&"walk"):
 		_finish()
 		return
 	_player.play(&"walk")
 	_frames = 0
+
+
+## The player's SoulBodies3D reads a body by node names only; a second instance
+## under one proves this model would replace mage.glb as it is.
+func _check_drop_in(packed: PackedScene) -> void:
+	var bodies := SoulBodies3D.new()
+	bodies.name = "Model"
+	bodies.position = Vector3(2.0, 0.0, 0.0)
+	var copy := packed.instantiate() as Node3D
+	copy.name = "Mage"
+	bodies.add_child(copy)
+	bodies.body_paths = [^"Mage"]
+	bodies.held_weapon_names = PackedStringArray(["Staff"])
+	bodies.extra_weapon_names = PackedStringArray([""])
+	bodies.grip_tilt_degrees = PackedFloat32Array([0.0])
+	bodies.grip_offsets = PackedVector3Array([Vector3.ZERO])
+	add_child(bodies)
+	var weapon := bodies.get_held_weapon_mesh()
+	var anims := bodies.get_animation_player()
+	print("MAGE_PIXEL drop-in: body=%s hand=%s overhead=%.3f m weapon=%s fit_origin=%s clips=%s"
+		% [bodies.get_active_body(), _fmt(bodies.get_hand_transform().origin), bodies.get_overhead_height(),
+			weapon.name if weapon != null else "none", _fmt(bodies.get_weapon_fit().origin),
+			anims.get_animation_list() if anims != null else PackedStringArray()])
+	if bodies.get_active_body() == null or bodies.get_hand_point() == null:
+		_errors.append("SoulBodies3D did not take the model")
+	if weapon == null or weapon.name != "Staff":
+		_errors.append("SoulBodies3D found no Staff")
+	if anims == null or not anims.has_animation(&"idle") or not anims.has_animation(&"walk"):
+		_errors.append("SoulBodies3D found no idle / walk")
 
 
 func _process(_delta: float) -> void:

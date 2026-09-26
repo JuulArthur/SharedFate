@@ -4,8 +4,10 @@
 # a 25-colour palette taken from SoulArt.MAGE_* and Soul.COLOR_MAGE). Every
 # texel is drawn by this file: robe folds, trim, the face, hair and the staff
 # runes are texture, not geometry. A 1 cm inverted hull gives the sprites'
-# dark outline. The rig is the WP11 mage contract plus two hidden leg bones
-# that plant the feet and push the robe hem, skinned with smooth weights.
+# dark outline. The rig is the WP11 mage contract plus hidden leg bones that
+# plant the boots and four robe bones through which the knees and heels push
+# the hem (smooth weights on the skirt, rigid elsewhere).
+# Design notes and numbers: docs/style-study/mage_pixel.md.
 #
 # Command line (deterministic):
 #     blender --background --factory-startup --python tools/blender/mage_styles/mage_pixel.py -- --root <repo>
@@ -709,9 +711,10 @@ HIP_Z = 0.95          # hip joints of the hidden legs
 LEG_LEN = 0.95        # hip joint to sole
 SASH_Z = 1.02
 HEM_Z = 0.03
-LEG_PULL = 0.42       # share of the hem that follows the legs
+LEG_PULL = 0.34       # share of the hem the knee / heel push bones carry
 GRIP = (0.26, 0.262, 1.068)
-STAFF_TILT_Y = -6.0   # degrees about Y: the ferrule stands out, clear of the hem
+STAFF_TILT_X = 6.0    # degrees about X: the ferrule stands forward, like a walking staff
+STAFF_TILT_Y = -6.0   # degrees about Y: and out to the side, 7 cm clear of the hem
 
 # (bone, head, tail, parent, connected). The WP11 mage bones plus Leg_L / Leg_R:
 # hidden legs under the robe that plant the feet and push the hem.
@@ -726,16 +729,31 @@ BONES = [
     ("Robe", (0.0, 0.0, 1.02), (0.0, 0.0, 0.10), "Hips", False),
     ("Leg_L", (-0.11, 0.0, HIP_Z), (-0.11, 0.0, 0.0), "Hips", False),
     ("Leg_R", (0.11, 0.0, HIP_Z), (0.11, 0.0, 0.0), "Hips", False),
+    # the cloth in front of each knee and behind each heel: pushed, never pulled
+    ("RobeFront_L", (-0.11, 0.0, HIP_Z), (-0.11, 0.0, 0.05), "Hips", False),
+    ("RobeFront_R", (0.11, 0.0, HIP_Z), (0.11, 0.0, 0.05), "Hips", False),
+    ("RobeBack_L", (-0.11, 0.0, HIP_Z), (-0.11, 0.0, 0.05), "Hips", False),
+    ("RobeBack_R", (0.11, 0.0, HIP_Z), (0.11, 0.0, 0.05), "Hips", False),
 ]
 
 
+def _smooth01(a, b, v):
+    u = min(1.0, max(0.0, (v - a) / (b - a)))
+    return u * u * (3.0 - 2.0 * u)
+
+
 def skirt_weights(p):
-    """Smooth skin: the robe bone at the sash, up to LEG_PULL of the legs at
-    the hem, split between the legs by side."""
+    """Smooth skin: the robe bone at the sash, up to LEG_PULL of the robe push
+    bones at the hem, front cloth on RobeFront_*, back cloth on RobeBack_*,
+    left / right by x. The pull fades toward the sides, which keeps the hem
+    clear of the staff."""
     t = min(1.0, max(0.0, (SASH_Z - 0.02 - p.z) / (SASH_Z - 0.02 - HEM_Z)))
-    k = LEG_PULL * t ** 1.4
-    right = min(1.0, max(0.0, 0.5 + p.x / 0.44))
-    return {"Robe": 1.0 - k, "Leg_R": k * right, "Leg_L": k * (1.0 - right)}
+    k = LEG_PULL * t ** 1.4 * (1.0 - 0.8 * _smooth01(0.06, 0.46, abs(p.x)))
+    right = _smooth01(-0.20, 0.20, p.x)
+    front = _smooth01(-0.10, 0.10, p.y - 0.012)
+    return {"Robe": 1.0 - k,
+            "RobeFront_R": k * right * front, "RobeBack_R": k * right * (1.0 - front),
+            "RobeFront_L": k * (1.0 - right) * front, "RobeBack_L": k * (1.0 - right) * (1.0 - front)}
 
 
 def build_body():
@@ -935,6 +953,16 @@ def leg_pose(forward, lift, hip_dz, hip_dy=0.0):
     return {"rot": (math.degrees(theta), 0.0, 0.0), "loc": (0.0, slide, 0.0)}
 
 
+def robe_push(side, leg, lift=0.0):
+    """The front cloth follows a leg swinging forward (and the knee rising in
+    the swing), the back cloth a leg swinging back; soft-clamped at zero so the
+    hand-over between them has no kink."""
+    theta = leg["rot"][0]
+    soft = math.sqrt(theta * theta + 16.0)
+    return {"RobeFront_" + side: {"rot": (0.5 * (theta + soft) + 6.0 * lift / LIFT, 0.0, 0.0)},
+            "RobeBack_" + side: {"rot": (0.5 * (theta - soft), 0.0, 0.0)}}
+
+
 def foot_track(q):
     """(forward, lift) of a sole at leg phase q: planted and sweeping back at
     constant speed for DUTY of the cycle, then swinging forward."""
@@ -952,13 +980,14 @@ def pose_walk(p):
     dz = -BOB * (0.5 + 0.5 * c2)
     f_r, l_r = foot_track((p - 0.25) % 1.0)
     f_l, l_l = foot_track((p - 0.75) % 1.0)
-    return {
+    leg_r, leg_l = leg_pose(f_r, l_r, dz), leg_pose(f_l, l_l, dz)
+    pose = {
         "Hips": {"loc": (0.0, dz, 0.0)},
-        "Leg_R": leg_pose(f_r, l_r, dz),
-        "Leg_L": leg_pose(f_l, l_l, dz),
+        "Leg_R": leg_r,
+        "Leg_L": leg_l,
         # the skirt twists with the leading leg (a hanging bone: -Y twist brings +X forward),
         # trails a little and rolls once per stride
-        "Robe": {"rot": (-2.5 - 1.5 * c2, -5.0 * c, 2.5 * s)},
+        "Robe": {"rot": (-2.5 - 1.5 * c2, -3.0 * c, 2.5 * s)},
         "Spine": {"rot": (-4.0, -5.0 * c, 0.0)},
         "Head": {"rot": (3.0, 3.0 * c, 0.0)},
         "UpperArm_L": {"rot": (4.0 + 18.0 * c, 0.0, 0.0)},
@@ -967,6 +996,9 @@ def pose_walk(p):
         "UpperArm_R": {"rot": (4.0 - 7.0 * c, 0.0, 0.0)},
         "LowerArm_R": {"rot": (-4.0 + 5.0 * c, 0.0, 0.0)},
     }
+    pose.update(robe_push("R", leg_r, l_r))
+    pose.update(robe_push("L", leg_l, l_l))
+    return pose
 
 
 def pose_idle(p):
@@ -1032,6 +1064,8 @@ def pose_cast(t):
     pose["Hips"] = {"loc": (0.0, -down, -fwd)}   # upright bone: local Y up, local Z backward
     pose["Leg_R"] = leg_pose(0.0, 0.0, -down, fwd)
     pose["Leg_L"] = leg_pose(0.0, 0.0, -down, fwd)
+    pose.update(robe_push("R", pose["Leg_R"]))
+    pose.update(robe_push("L", pose["Leg_L"]))
     return pose
 
 
@@ -1101,6 +1135,50 @@ def measure_walk(armature, walk):
           "reference_speed=%.3f m/s planted_height<=%.4f m planted_speed_error<=%.4f m lift=%.2f m"
           % (sweep, DUTY, stride, stride / 1.0, planted, slide, LIFT))
     return stride
+
+
+def measure_stretch(body, armature, clips):
+    """Worst length change of a textured skirt edge over each clip: how far the
+    smooth skin stretches or shears the robe's texels."""
+    robe = body.vertex_groups["Robe"].index
+    skirt = {v.index for v in body.data.vertices if any(g.group == robe for g in v.groups)}
+    edges = set()
+    for poly in body.data.polygons:
+        vs = list(poly.vertices)
+        if poly.material_index == MAT_ATLAS and len(vs) == 4 and all(v in skirt for v in vs):
+            for a, b in zip(vs, vs[1:] + vs[:1]):
+                edges.add((min(a, b), max(a, b)))
+    edges = sorted(edges)
+    scene = assets_scene()
+    prev = enter_assets_scene()
+
+    def lengths():
+        ev = body.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        me = ev.to_mesh()
+        out = [(me.vertices[a].co - me.vertices[b].co).length for a, b in edges]
+        ev.to_mesh_clear()
+        return out
+
+    armature.animation_data.action = None
+    reset_pose(armature)
+    scene.frame_set(0)
+    bpy.context.view_layer.update()
+    rest = lengths()
+    worst = {}
+    for act, frames in clips:
+        armature.animation_data.action = act
+        w = 0.0
+        for frame in range(frames + 1):
+            scene.frame_set(frame)
+            w = max([w] + [abs(n / r - 1.0) for n, r in zip(lengths(), rest) if r > 1e-4])
+        worst[act.name] = w
+    armature.animation_data.action = None
+    reset_pose(armature)
+    scene.frame_set(0)
+    restore_scene(prev)
+    print("SF_PIXEL_STRETCH skirt_edges=%d %s" % (len(edges), " ".join(
+        "%s<=%.1f%%" % (name, 100.0 * w) for name, w in worst.items())))
+    return worst
 
 
 # --------------------------------------------------------------------------
@@ -1282,7 +1360,11 @@ def render_shot(path, objects, res=(600, 800), yaw_deg=35.0, elev_deg=16.0, iso=
             ob.hide_render = False
     clear_collection(rig)
     restore_scene(prev)
-    print("SF_PIXEL_RENDER %s %dx%d" % (os.path.relpath(path, SF_ROOT), res[0], res[1]))
+    try:
+        shown = os.path.relpath(path, SF_ROOT)
+    except ValueError:            # another drive
+        shown = path
+    print("SF_PIXEL_RENDER %s %dx%d" % (shown, res[0], res[1]))
     return path
 
 
@@ -1390,7 +1472,8 @@ def main():
     update_depsgraph()
     link(coll, staff)
     parent_to_bone(staff, armature, "LowerArm_R",
-                   world=Matrix.LocRotScale(Vector(GRIP), Euler((0.0, math.radians(STAFF_TILT_Y), 0.0)), None))
+                   world=Matrix.LocRotScale(Vector(GRIP), Euler((math.radians(STAFF_TILT_X),
+                                                                 math.radians(STAFF_TILT_Y), 0.0)), None))
     update_depsgraph()
     lo, hi = world_bounds([body])
     hand = add_empty("HandPoint", GRIP, collection=coll)
@@ -1403,6 +1486,7 @@ def main():
     walk = author_clip(armature, "walk", WALK_FRAMES, pose_walk, loop=True)
     cast = author_clip(armature, "cast", CAST_FRAMES, pose_cast, loop=False)
     stride = measure_walk(armature, walk)
+    measure_stretch(body, armature, [(idle, IDLE_FRAMES), (walk, WALK_FRAMES), (cast, CAST_FRAMES)])
 
     hull_tris = sum(len(f[0]) - 2 for f in body_b.faces if f[2] == MAT_OUTLINE)
     staff_hull = sum(len(f[0]) - 2 for f in staff_b.faces if f[2] == MAT_OUTLINE)
