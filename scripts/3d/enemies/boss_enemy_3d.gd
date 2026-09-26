@@ -38,6 +38,9 @@ extends Enemy3D
 @export var summon_offset_m := 1.9
 ## The boss bar shows while the player is at most this far away.
 @export var bar_show_distance_m := 16.0
+## Off when a HUD draws its own boss bar from `get_display_name()`,
+## `health` / `max_health` and `get_phase()`.
+@export var show_boss_bar := true
 
 const SLAM_COLOR := Color(1.0, 0.18, 0.12, 0.95)
 const SLAM_FILL_COLOR := Color(1.0, 0.12, 0.08, 0.2)
@@ -461,7 +464,7 @@ func _make_bar_label(label_name: String, text: String, color: Color, font_size: 
 func _update_boss_bar() -> void:
 	if _bar_root == null:
 		return
-	var shown := is_alive() and not _dying and is_in_turn_based_combat()
+	var shown := show_boss_bar and is_alive() and not _dying and is_in_turn_based_combat()
 	if shown:
 		var watcher := _live_target()
 		if watcher == null:
