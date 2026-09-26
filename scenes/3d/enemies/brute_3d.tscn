@@ -1,0 +1,53 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/enemy_3d.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/knight.glb" id="2_model"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_brute"]
+radius = 0.45
+height = 2.2
+
+[node name="Brute" type="CharacterBody3D" groups=["enemies"]]
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("1_script")
+move_speed = 2.6
+max_health = 95
+attack_damage = 18
+attack_range = 1.5
+attack_cooldown = 1.2
+experience_reward = 90
+loot_drop_chance = 0.8
+detection_range = 4.5
+attack_wind_up_duration = 0.4
+attack_strike_duration = 0.16
+turn_attack_wind_up_duration = 0.95
+turn_attack_strike_duration = 0.26
+attack_recovery_duration = 0.3
+display_name = "Brute"
+portrait_color = Color(0.56, 0.5, 0.42, 1)
+turn_move_override_m = 5.0
+damage_taken_multiplier = 0.8
+move_clip = &"walk"
+move_clip_reference_speed = 2.304
+model_tint = Color(0.7, 0.62, 0.55, 1)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+shape = SubResource("CapsuleShape3D_brute")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="."]
+path_desired_distance = 0.3
+target_desired_distance = 0.1
+avoidance_enabled = true
+time_horizon_agents = 0.25
+radius = 0.5
+max_speed = 2.6
+
+[node name="OverheadAnchor" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.7, 0)
+
+[node name="Model" type="Node3D" parent="."]
+
+[node name="KnightModel" parent="Model" instance=ExtResource("2_model")]
+transform = Transform3D(1.2, 0, 0, 0, 1.2, 0, 0, 0, 1.2, 0, 0, 0)
