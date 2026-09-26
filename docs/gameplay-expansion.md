@@ -90,3 +90,22 @@ Per-soul movement per turn: knight 6 m, rogue 8 m, mage 5 m (plus progression bo
 ## Open requests
 
 (each track appends here: date, track, request)
+
+### 2026-09-26, track A (world, hazards, map)
+
+Delivered on `feat/wilds-map`: `scripts/3d/world/` (Trap3D, ExplosiveBarrel3D, HideZone3D, Waystone3D, LootChest3D, Campfire3D, plus the map helpers), `tools/build_wilds_3d.gd`, `scenes/3d/wilds.tscn`, `scenes/3d/wilds_navmesh.tres` and `scenes/3d/tests/wilds_test.tscn` (prints `WILDS OK`). Details and choices: `docs/wilds-map.md`.
+
+For the lead:
+
+1. Put the `main_3d.gd` root in group `level_coordinator` and add `is_in_combat()` and `on_player_teleported()` (section 5). Until then waystones fall back to the player's `is_in_turn_based_combat()` for the fight check. The `on_player_teleported` call is skipped when no coordinator has the method.
+2. Player `set_in_cover` / `is_in_cover` and `teleport_to` (section 4). Until then the waystone snaps the player to the nearest navmesh point and calls `CameraRig.snap_to_target()`. The test notes both and checks the fallback.
+3. Click handling for group `interactable` (the waystones and chests are StaticBody3D roots on layer 8) and targeting for group `hittable` (the barrels: `receive_damage`, `take_damage`, `is_alive`, `set_hover_highlighted`). Everything else in the world needs no coordinator code.
+4. Set Snare: `Trap3D.place_player_trap(level_root, point)` returns the trap. It is visible, tinted teal and catches enemies outside turn mode too.
+5. Decide on trap `notice_seconds` (default 1 s): the player must stay within the reveal radius that long to notice a trap. It is a track A addition to the section 3 rule. With an instant reveal a walking player always spots a trap before stepping on it. Set it to 0 on `Trap3D` if you want the literal contract.
+6. `is_navmesh_ready()` can turn true one or more physics frames before `map_get_closest_point` answers for a shipped mesh (async map iterations). `wilds_test` waits until the map answers near the spawn; the coordinator may want the same wait before wiring enemy targets.
+7. After merging: re-run `tools/build_wilds_3d.gd` once track B's enemy scenes exist (today every non-wolf enemy is a wolf stand-in with a builder warning), then set `run/main_scene` to `res://scenes/3d/wilds.tscn` (section 6).
+
+For track B:
+
+1. The hazards call `take_environment_damage(amount)` and `apply_status(&"root", 1)` (traps), and `receive_damage`, `apply_status(&"burn", 2, 4)` and `knockback(center, 1.5)` (barrels), all guarded by `has_method`. The builder sets `wander_radius` on four enemies when the property exists.
+2. Detection ranges: the camp waystone's arrival point is 7.9 m from the camp cultist and 9.3 m from the nearest bandit. The gate waystone's arrival point is 15 m from the ruins cultists and 21 m from the Grave Warden. Please keep bandit and cultist `detection_range` under about 6 m and the Warden's under about 18 m, or a teleport lands inside a ring. If that does not suit the roster, tell track A and the stones move.
