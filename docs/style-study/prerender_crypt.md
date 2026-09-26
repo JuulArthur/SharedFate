@@ -55,7 +55,7 @@ Left click walks, C or right click casts, 1 to 8 jump to the test spots (spawn, 
 ## What looks good, what does not
 
 - Good: the scene reads as one painted place, with light, shadow and fog no real-time scene of this cost would have. Occlusion is exact, and the mage's shadow, the flicker and the spell light make the mage look like he is in the painting, not pasted on top of it.
-- The mage is the weak part: the chibi, vinyl-toy proportions of the soft mage clash with the painted realism. A dark fantasy cast needs taller, more realistic proportions and textured cloth to match.
+- The mage is the weak part: the chibi, vinyl-toy proportions of the soft mage clash with the painted realism. A dark fantasy cast needs taller, more realistic proportions and textured cloth to match. Update: the scene now shows the realistic dark mage (`docs/style-study/mage_dark.md`), and the screenshots were retaken with it.
 - Softness when zoomed in: at 96 px/m the painting is sharp at the game's 14 m zoom on 1080p (64 px/m on screen) but soft at 5.5 m or on a 4K screen. 128 to 160 px/m would fix it: about 1.8 to 2.8 times the render time and a 4096 to 5120 px wide image.
 - Seams: at silhouettes a pixel or two of the neighbouring surface can show, because the painting's antialiasing blends edges while the proxy edge is exact. It is barely visible here and only matters on thin objects in front of bright ones.
 - The fog is subtle; it can be pushed further in the generator (`mat_fog` density).

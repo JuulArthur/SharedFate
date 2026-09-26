@@ -1,0 +1,9 @@
+[gd_resource type="StandardMaterial3D" format=3]
+
+; Tarnished buckle of mage_dark.glb, vertex coloured like the cloth (see
+; mage_dark_cloth.tres for why this replaces the imported material).
+[resource]
+resource_name = "Mage_Metal"
+vertex_color_use_as_albedo = true
+metallic = 0.6
+roughness = 0.45

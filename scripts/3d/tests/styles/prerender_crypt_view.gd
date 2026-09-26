@@ -20,7 +20,11 @@ extends Node3D
 const DATA_DIR := "res://assets/3d/prerender/crypt/"
 const SCENE_JSON := DATA_DIR + "crypt_scene.json"
 const PROXY_GLB := DATA_DIR + "crypt_proxy.glb"
-const MAGE_GLB := "res://assets/3d/models/styles/mage_soft.glb"
+const MAGE_SOFT_GLB := "res://assets/3d/models/styles/mage_soft.glb"
+const MAGE_DARK_GLB := "res://assets/3d/models/styles/mage_dark.glb"
+## The realistic dark mage (docs/style-study/mage_dark.md); MAGE_SOFT_GLB still
+## works and gets the dark retint shader.
+const MAGE_GLB := MAGE_DARK_GLB
 const CAMERA_RIG := "res://scenes/3d/camera_rig_3d.tscn"
 const PROJECTION_SHADER := "res://shaders/3d/prerender_projection.gdshader"
 const FLAME_SHADER := "res://shaders/3d/prerender_flame.gdshader"
@@ -35,9 +39,10 @@ const LAYER_PROXY := 2
 const PHYS_FLOOR := 1
 const PHYS_OCCLUDER := 8
 
-const WALK_SPEED := 1.9
-## One walk cycle of mage_soft covers 0.886 m (docs/style-study/mage_soft.md).
-const WALK_CYCLE_METERS := 0.886
+const WALK_SPEED := 1.5
+## Ground covered by one walk cycle of mage_dark (docs/style-study/mage_dark.md);
+## set 0.886 for mage_soft.
+const WALK_CYCLE_METERS := 1.002
 const ZOOM_DEFAULT := 14.0
 const ZOOM_MIN := 5.0
 const ZOOM_MAX := 17.4
@@ -57,6 +62,7 @@ var _nav_ready := false
 var _mage: Node3D = null
 var _anim: AnimationPlayer = null
 var _gem_materials: Array[ShaderMaterial] = []
+var _glow_materials: Array[BaseMaterial3D] = []
 var _staff_tip: Node3D = null
 var _rig: CameraRig3D = null
 var _follow: Node3D = null
@@ -193,24 +199,39 @@ func _build_mage() -> void:
 	add_child(_mage)
 	var model := packed.instantiate() as Node3D
 	_mage.add_child(model)
+	var retint := MAGE_GLB == MAGE_SOFT_GLB
 	var shader := load(MAGE_SHADER) as Shader
 	for node in model.find_children("*", "MeshInstance3D", true, false):
 		var mi := node as MeshInstance3D
 		mi.layers = 1 << (LAYER_MAGE - 1)
 		for s in range(mi.mesh.get_surface_count()):
 			var original := mi.get_active_material(s) as BaseMaterial3D
+			if original == null:
+				continue
+			var gem := original.resource_name.contains("Gem") or original.resource_name.contains("Glow") \
+				or original.emission_enabled
+			if not retint:
+				# The dark mage brings its own look; only the glowing surfaces get
+				# their own copy so the eyes and the crystal can pulse.
+				if gem:
+					var glow := original.duplicate() as BaseMaterial3D
+					mi.set_surface_override_material(s, glow)
+					_glow_materials.append(glow)
+				continue
 			var mat := ShaderMaterial.new()
 			mat.shader = shader
-			if original != null:
-				mat.set_shader_parameter("base_color", original.albedo_color)
-				mat.set_shader_parameter("use_vertex_color", original.vertex_color_use_as_albedo)
-				var gem := original.resource_name.contains("Gem") or original.emission_enabled
-				mat.set_shader_parameter("is_gem", gem)
-				if gem:
-					_gem_materials.append(mat)
+			mat.set_shader_parameter("base_color", original.albedo_color)
+			mat.set_shader_parameter("use_vertex_color", original.vertex_color_use_as_albedo)
+			mat.set_shader_parameter("is_gem", gem)
+			if gem:
+				_gem_materials.append(mat)
 			mi.set_surface_override_material(s, mat)
 	_anim = model.find_children("*", "AnimationPlayer", true, false).front() as AnimationPlayer
 	if _anim != null:
+		# The style-study glbs carry no loop flags; idle and walk must repeat.
+		for clip in [&"idle", &"walk"]:
+			if _anim.has_animation(clip):
+				_anim.get_animation(clip).loop_mode = Animation.LOOP_LINEAR
 		_anim.play(&"idle")
 		_anim.animation_finished.connect(func(clip: StringName) -> void:
 			if clip == &"cast":
@@ -505,6 +526,8 @@ func _process(delta: float) -> void:
 		spell = exp(-pow((t - CAST_PEAK) / 0.12, 2.0))
 	if _spell_light != null:
 		_spell_light.light_energy = 7.0 * spell
+	for glow in _glow_materials:
+		glow.emission_energy_multiplier = 1.2 + 1.0 * sigil + 6.0 * spell
 	for mat in _gem_materials:
 		mat.set_shader_parameter("gem_energy", 2.0 + 2.0 * sigil + 10.0 * spell)
 	_update_follow()
