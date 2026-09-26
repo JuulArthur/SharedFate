@@ -527,8 +527,12 @@ func _step_throw() -> String:
 	var expected := maxi(0, before - Soul.ROGUE_RANGED_DAMAGE)
 	if wolf.health != expected:
 		return "wolf health %d -> %d after the throw, expected %d" % [before, wolf.health, expected]
-	if _player.can_turn_attack():
-		return "can_turn_attack() still true after the throw"
+	# Gameplay expansion: a kill in the rogue's hands refunds the action once a
+	# turn (Killing Spree); a throw that leaves the wolf standing spends it.
+	if expected > 0 and _player.can_turn_attack():
+		return "can_turn_attack() still true after a throw that did not kill"
+	if expected == 0 and not _player.can_turn_attack():
+		return "the rogue's killing throw did not refund the action"
 	print("[integration] throw: wolf %d -> %d" % [before, wolf.health])
 	return ""
 
@@ -649,14 +653,24 @@ func _step_inventory() -> String:
 	return ""
 
 
-## The prologue opens (pausing the tree) and Esc closes it; a second
-## show_chapter_once is a no-op.
+## The arena's intro: the prologue is set but skipped headless (so this run was
+## not paused at boot). Then the coordinator's StoryBook3D opens it (pausing the tree), Esc closes it, and a
+## second show_chapter_once is a no-op.
 func _step_story_book() -> String:
+	if _main.story_chapter_id != StoryLibrary.PROLOGUE:
+		return "the arena's story_chapter_id is '%s', expected the prologue" % _main.story_chapter_id
+	if _main.should_play_intro():
+		return "should_play_intro() is true in a headless run"
+	var book := _main.story_book
+	if book == null:
+		return "the coordinator created no StoryBook3D"
+	if StoryBook3D.has_read(StoryLibrary.PROLOGUE):
+		return "the prologue counts as read although the intro was skipped"
 	var chapter := StoryLibrary.chapter(StoryLibrary.PROLOGUE)
 	if chapter == null:
 		return "StoryLibrary has no prologue"
-	StoryBook.show_chapter_once(chapter)
-	if not StoryBook.is_open():
+	book.show_chapter_once(chapter)
+	if not book.is_open():
 		return "show_chapter_once did not open the book"
 	if not get_tree().paused:
 		return "the open book did not pause the tree"
@@ -667,12 +681,12 @@ func _step_story_book() -> String:
 	Input.parse_input_event(cancel)
 	await get_tree().process_frame
 	await get_tree().process_frame
-	if StoryBook.is_open():
+	if book.is_open():
 		return "ui_cancel did not close the book"
 	if get_tree().paused:
 		return "the tree is still paused after the book closed"
-	StoryBook.show_chapter_once(chapter)
-	if StoryBook.is_open():
+	book.show_chapter_once(chapter)
+	if book.is_open():
 		return "show_chapter_once reopened a chapter already read this session"
 	return ""
 

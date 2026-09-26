@@ -69,6 +69,9 @@ const FALLBACK_MAP_REGION := Rect2i(-20, -20, 40, 40)
 const NAV_MAP_SYNC_MAX_FRAMES := 120
 const MUSIC_CROSSFADE_SECONDS := 1.2
 const MUSIC_VOLUME_DB := -6.0
+# User arguments (after `--`) that skip the intro book or silence its narrator.
+const NO_INTRO_ARGUMENT := "--no-intro"
+const SILENT_INTRO_ARGUMENT := "--silent-intro"
 
 enum CombatState {
 	EXPLORATION,
@@ -80,8 +83,29 @@ enum PlayerTurnAction {
 	MOVE,
 	ATTACK,
 	RANGED,
-	SPELL
+	SPELL,
+	ABILITY
 }
+
+# --- Gameplay expansion (docs/gameplay-expansion.md) --------------------------
+# Ability bar hotkeys: 4 to 9 pick the bar's abilities in order (1-3 shift).
+const ABILITY_HOTKEYS: Array[Key] = [KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9]
+const SNEAK_KEY := KEY_C
+const SKILL_TREE_KEY := KEY_K
+# A hit from stealth only wakes the struck enemy's close neighbours and anyone
+# who can actually see the body, not the whole 12 m around it.
+const STEALTH_ALERT_RADIUS_M := 4.0
+# Slipping away: at the end of the player's turn every engaged enemy is this far
+# away and cannot see the body (or farther than ESCAPE_ANY_SIGHT_M), or the body
+# is in smoke with nobody within ESCAPE_SMOKE_MIN_M. The fight then ends.
+const ESCAPE_DISTANCE_M := 11.0
+const ESCAPE_ANY_SIGHT_M := 15.0
+const ESCAPE_SMOKE_MIN_M := 3.0
+const ANNOUNCE_ESCAPED := "SLIPPED AWAY"
+const RESPAWN_DELAY_SECONDS := 3.0
+const INTERACT_RANGE_SLACK_M := 0.3
+const INTERACT_WALK_TIMEOUT_SECONDS := 8.0
+const MELEE_APPROACH_TIMEOUT_SECONDS := 5.0
 
 @onready var player: CharacterBody3D = $Player
 @onready var nav_region: NavigationRegion3D = get_node_or_null("NavigationRegion3D")
@@ -92,14 +116,23 @@ enum PlayerTurnAction {
 # menu can be tested without hunting down a crate. Untick in the inspector once
 # the level has its own loot worth testing against.
 @export var spawn_test_loot: bool = true
-# Chapter read in the story book when this level opens (once per session).
-# Authored in StoryLibrary; leave empty for no narration.
-@export var story_chapter_id: StringName = StoryLibrary.PROLOGUE
 # Scene instanced by `_spawn_additional_enemy`: the WP3c wolf by default.
 @export var enemy_scene: PackedScene = preload("res://scenes/3d/wolf_3d.tscn")
 # A level authored in the editor ships a baked NavigationMesh; a test scene may
 # not, in which case the coordinator bakes one at start.
 @export var bake_navmesh_if_empty: bool = true
+
+@export_group("Intro")
+# Chapter read in the 3D story book (StoryBook3D) when this level opens, once
+# per session. Authored in StoryLibrary; leave empty for no narration.
+@export var story_chapter_id: StringName = StoryLibrary.PROLOGUE
+# Untick to test the level without the intro. The user argument `--no-intro`
+# does the same without touching the scene; headless runs always skip it.
+@export var intro_enabled: bool = true
+# Untick for a silent book (still written on screen). `--silent-intro` does the
+# same from the command line.
+@export var intro_voice_enabled: bool = true
+@export_group("")
 
 var blocked_cells: Dictionary = {}
 var enemy_blocked_cells: Dictionary = {}
@@ -158,17 +191,42 @@ var music_exploration: AudioStreamPlayer
 var music_combat: AudioStreamPlayer
 var music_muted := true
 var mute_button: Button
+# The dark-fantasy story book; replaces the 2D StoryBook autoload in 3D levels.
+var story_book: StoryBook3D
+# Gameplay expansion: abilities, the skill tree, stealth, the world objects.
+var ability_runner: AbilityRunner3D
+var selected_ability_id: StringName = &""
+var skill_tree_screen: SkillTreeScreen3D
+var ability_bar_panel: PanelContainer
+var ability_bar_row: HBoxContainer
+var ability_bar_buttons: Dictionary = {}
+var ability_bar_order: Array[Ability3D] = []
+var _ability_bar_signature := ""
+var sneak_button: Button
+var skills_button: Button
+var stealth_label: Label
+var hover_hint_label: Label
+var hovered_prop_target: Node3D
+var _pending_interactable: Node3D
+var _pending_interact_deadline_msec := 0
+var _respawn_scheduled := false
+var _respawn_point := Vector3.ZERO
+var _has_respawn_point := false
 
 
 func _ready() -> void:
+	add_to_group("level_coordinator")
 	_setup_turn_ui()
 	_setup_soul_ui()
 	_setup_music()
+	_setup_gameplay_expansion()
 
 	_map_region = _compute_map_region()
 	_cache_blocked_cells_from_props()
 	_rebuild_navigation_grid()
 	_place_player()
+	_respawn_point = GroundMath.flatten(player.global_position)
+	_has_respawn_point = true
 	# Spell radii are authored in meters; with 1 unit = 1 m this is 1.0.
 	if player.has_method("set_turn_meter_world_units"):
 		player.call("set_turn_meter_world_units", _get_turn_meter_world_units())
@@ -185,7 +243,28 @@ func _ready() -> void:
 	_setup_combat_fx_adapters()
 
 	# Last, so the world is fully placed under the book before it opens.
-	StoryBook.show_chapter_once(StoryLibrary.chapter(story_chapter_id))
+	_setup_story_book()
+	if should_play_intro():
+		story_book.show_chapter_once(StoryLibrary.chapter(story_chapter_id))
+
+
+func _setup_story_book() -> void:
+	story_book = StoryBook3D.new()
+	story_book.name = "StoryBook3D"
+	story_book.voice_enabled = intro_voice_enabled \
+			and not OS.get_cmdline_user_args().has(SILENT_INTRO_ARGUMENT)
+	add_child(story_book)
+
+
+## Whether the intro chapter opens at start: on unless the inspector switch,
+## an empty chapter id or `--no-intro` turns it off. Headless runs skip it so
+## the acceptance tests stay deterministic; they open the book themselves.
+func should_play_intro() -> bool:
+	if not intro_enabled or story_chapter_id == &"":
+		return false
+	if DisplayServer.get_name() == "headless":
+		return false
+	return not OS.get_cmdline_user_args().has(NO_INTRO_ARGUMENT)
 
 
 func _exit_tree() -> void:
@@ -202,9 +281,15 @@ func _process(_delta: float) -> void:
 	_update_turn_ui()
 	_update_path_preview()
 	_update_range_rings()
+	_update_pending_interaction()
+	_update_ability_bar()
+	_update_stealth_label()
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if _handle_expansion_keys(event):
+		get_viewport().set_input_as_handled()
+		return
 	if combat_state != CombatState.EXPLORATION:
 		_handle_turn_input(event)
 		return
@@ -216,6 +301,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		if _try_click_pickup(screen_pos):
 			get_viewport().set_input_as_handled()
 			return
+		if selected_player_turn_action == PlayerTurnAction.ABILITY:
+			_handle_ability_click(screen_pos)
+			get_viewport().set_input_as_handled()
+			return
+		_pending_interactable = null
 		var clicked_enemy := _pick_enemy(screen_pos)
 		if clicked_enemy != null:
 			# WP13: the HUD's Throw and spell aims work in exploration too; a
@@ -228,6 +318,22 @@ func _unhandled_input(event: InputEvent) -> void:
 				# attack_target system handles navigation internally via _refresh_attack_target_position
 				player.call("set_attack_target", clicked_enemy)
 				_set_player_turn_action(PlayerTurnAction.MOVE)
+			get_viewport().set_input_as_handled()
+			return
+		var hittable := _pick_prop_in_group(screen_pos, &"hittable")
+		if hittable != null:
+			if selected_player_turn_action == PlayerTurnAction.RANGED:
+				_request_exploration_ranged_attack(hittable)
+			elif selected_player_turn_action == PlayerTurnAction.SPELL:
+				_request_exploration_spell(hittable)
+			elif player.has_method("set_attack_target"):
+				player.call("set_attack_target", hittable)
+				_set_player_turn_action(PlayerTurnAction.MOVE)
+			get_viewport().set_input_as_handled()
+			return
+		var interactable := _pick_prop_in_group(screen_pos, &"interactable")
+		if interactable != null:
+			_request_interaction(interactable)
 			get_viewport().set_input_as_handled()
 			return
 		var ground: Variant = _pick_ground(screen_pos)
@@ -502,14 +608,24 @@ func _handle_turn_input(event: InputEvent) -> void:
 		if _try_click_pickup(screen_pos):
 			get_viewport().set_input_as_handled()
 			return
-		var clicked_enemy := _pick_enemy(screen_pos)
+		if selected_player_turn_action == PlayerTurnAction.ABILITY:
+			_handle_ability_click(screen_pos)
+			get_viewport().set_input_as_handled()
+			return
+		var clicked_enemy: Node3D = _pick_enemy(screen_pos)
+		if clicked_enemy == null:
+			clicked_enemy = _pick_prop_in_group(screen_pos, &"hittable")
 		if clicked_enemy != null:
 			if selected_player_turn_action == PlayerTurnAction.RANGED:
-				_request_player_turn_ranged_attack(clicked_enemy as CharacterBody3D)
+				_request_player_turn_ranged_attack(clicked_enemy)
 			elif selected_player_turn_action == PlayerTurnAction.SPELL:
-				_request_player_turn_spell(clicked_enemy as CharacterBody3D)
+				_request_player_turn_spell(clicked_enemy)
 			else:
-				_request_player_turn_engage_enemy(clicked_enemy as CharacterBody3D)
+				_request_player_turn_engage_enemy(clicked_enemy)
+			get_viewport().set_input_as_handled()
+			return
+		if _pick_prop_in_group(screen_pos, &"interactable") != null:
+			_fx_popup(_popup_anchor(player), "Not during a fight", CombatFx.COLOR_WARNING, 16)
 			get_viewport().set_input_as_handled()
 			return
 		var ground: Variant = _pick_ground(screen_pos)
@@ -580,6 +696,8 @@ func _update_combat_state() -> void:
 	var player_alive: bool = true
 	if player.has_method("is_alive"):
 		player_alive = bool(player.call("is_alive"))
+	if not player_alive and not _respawn_scheduled and player.has_method("revive"):
+		_schedule_respawn()
 	if not enemy_alive or not player_alive:
 		if combat_state != CombatState.EXPLORATION:
 			_end_turn_based_combat()
@@ -645,7 +763,13 @@ func _start_ambush_combat(struck_enemy: CharacterBody3D) -> void:
 		var struck_alive := not struck_enemy.has_method("is_alive") or bool(struck_enemy.call("is_alive"))
 		if struck_alive:
 			engaged_enemies[struck_enemy.get_instance_id()] = true
-	_refresh_engaged_enemies()
+	if _player_is_stealthy():
+		# Gameplay expansion: a strike from stealth only wakes the struck
+		# enemy's close neighbours and whoever can see the body. A silent kill
+		# with nobody watching starts nothing.
+		_refresh_engaged_enemies_stealthy(struck_enemy)
+	else:
+		_refresh_engaged_enemies()
 	var anyone_engaged := false
 	for enemy_actor in _get_all_alive_enemies_unfiltered():
 		if engaged_enemies.has(enemy_actor.get_instance_id()):
@@ -653,6 +777,8 @@ func _start_ambush_combat(struck_enemy: CharacterBody3D) -> void:
 			break
 	if not anyone_engaged:
 		engaged_enemies.clear()
+		if _player_is_stealthy():
+			CombatFx.announce("UNSEEN", Color(0.8, 0.55, 1.0, 1.0), 0.6)
 		return
 	_start_turn_based_combat(true)
 
@@ -667,6 +793,9 @@ func _start_turn_based_combat(ambush: bool = false) -> void:
 		_refresh_engaged_enemies()
 	_stop_all_combatants_immediately()
 	_set_player_turn_action(PlayerTurnAction.MOVE)
+	_pending_interactable = null
+	if ability_runner != null:
+		ability_runner.on_combat_started()
 	combat_state = CombatState.ENEMY_TURN if ambush else CombatState.PLAYER_TURN
 	enemy_turn_running = false
 	active_enemy_turn_actor = null
@@ -764,7 +893,7 @@ func _request_player_turn_move(target_world_position: Vector3) -> void:
 # Coroutine: resolves when the swing has landed. Callers hold
 # `player_turn_action_running` across the await so End Turn can't fire
 # mid-swing.
-func _request_player_turn_attack(target_enemy: CharacterBody3D = null) -> void:
+func _request_player_turn_attack(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
 	if not player.has_method("can_turn_attack"):
@@ -779,6 +908,7 @@ func _request_player_turn_attack(target_enemy: CharacterBody3D = null) -> void:
 		return
 
 	await player.try_attack(target_enemy)
+	_after_player_strike(target_enemy)
 	_update_turn_ui()
 
 
@@ -817,7 +947,7 @@ func _get_spell_range_world(spell: Soul.Spell) -> float:
 	return spell.range_meters * _get_turn_meter_world_units()
 
 
-func _request_player_turn_ranged_attack(target_enemy: CharacterBody3D = null) -> void:
+func _request_player_turn_ranged_attack(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
 	if player_turn_action_running:
@@ -839,6 +969,7 @@ func _request_player_turn_ranged_attack(target_enemy: CharacterBody3D = null) ->
 	player_turn_action_running = true
 	await player.try_ranged_attack(target_enemy)
 	player_turn_action_running = false
+	_after_player_strike(target_enemy)
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	_update_turn_ui()
 
@@ -846,7 +977,7 @@ func _request_player_turn_ranged_attack(target_enemy: CharacterBody3D = null) ->
 # The mage's spells. Same shape as the ranged attack: refuse with a popup when
 # the spell is recharging or the target is out of range, otherwise hold the
 # turn while the bolt flies and the spell resolves.
-func _request_player_turn_spell(target_enemy: CharacterBody3D = null) -> void:
+func _request_player_turn_spell(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
 	if player_turn_action_running:
@@ -876,6 +1007,7 @@ func _request_player_turn_spell(target_enemy: CharacterBody3D = null) -> void:
 	player_turn_action_running = true
 	await player.try_cast_spell(spell.id, target_enemy)
 	player_turn_action_running = false
+	_after_player_strike(target_enemy)
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	_update_turn_ui()
 
@@ -887,7 +1019,7 @@ func _request_player_turn_spell(target_enemy: CharacterBody3D = null) -> void:
 # attack starts nothing. Melee in exploration is the click-to-attack pursuit and
 # the Space sweep, which the player already owns.
 
-func _request_exploration_ranged_attack(target_enemy: CharacterBody3D = null) -> void:
+func _request_exploration_ranged_attack(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.EXPLORATION:
 		return
 	if player_turn_action_running:
@@ -912,7 +1044,7 @@ func _request_exploration_ranged_attack(target_enemy: CharacterBody3D = null) ->
 	_update_turn_ui()
 
 
-func _request_exploration_spell(target_enemy: CharacterBody3D = null) -> void:
+func _request_exploration_spell(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.EXPLORATION:
 		return
 	if player_turn_action_running:
@@ -961,7 +1093,7 @@ func _player_can_pick_attack_aim() -> bool:
 	return combat_state == CombatState.PLAYER_TURN or combat_state == CombatState.EXPLORATION
 
 
-func _request_player_turn_engage_enemy(target_enemy: CharacterBody3D = null) -> void:
+func _request_player_turn_engage_enemy(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
 	if player_turn_action_running:
@@ -1032,6 +1164,9 @@ func _begin_enemy_turn() -> void:
 	if combat_state != CombatState.PLAYER_TURN:
 		return
 	_set_player_turn_action(PlayerTurnAction.MOVE)
+	if _player_escaped():
+		_escape_combat()
+		return
 	if player.has_method("end_turn"):
 		player.call("end_turn")
 	combat_state = CombatState.ENEMY_TURN
@@ -1074,6 +1209,14 @@ func _run_enemy_turn() -> void:
 				continue
 		first_actor = false
 
+		# Smoke Bomb: the body is lost in the smoke; the enemy looks around and
+		# spends its turn doing nothing useful.
+		if player.has_method("is_hidden_by_smoke") and bool(player.call("is_hidden_by_smoke")):
+			_fx_popup(_popup_anchor(enemy_actor), "?", CombatFx.COLOR_WARNING, 22)
+			if enemy_actor.has_method("end_turn"):
+				enemy_actor.call("end_turn")
+			continue
+
 		# The budget comes from the enemy itself, so one rooted by Frost Snare
 		# (zero movement this turn) stays where it is and just swings if it can.
 		var move_budget := TURN_MOVE_METERS
@@ -1105,6 +1248,8 @@ func _run_enemy_turn() -> void:
 
 	if player.has_method("start_turn"):
 		player.call("start_turn", TURN_MOVE_METERS)
+	if ability_runner != null:
+		ability_runner.on_player_turn_started()
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	active_enemy_turn_actor = null
 	combat_state = CombatState.PLAYER_TURN
@@ -1113,7 +1258,7 @@ func _run_enemy_turn() -> void:
 	_update_turn_ui()
 
 
-func _player_can_attack_enemy_now(target_enemy: CharacterBody3D = null) -> bool:
+func _player_can_attack_enemy_now(target_enemy: Node3D = null) -> bool:
 	if not player.has_method("can_turn_attack"):
 		return false
 	if not player.call("can_turn_attack"):
@@ -1741,7 +1886,7 @@ func _update_range_rings() -> void:
 	if melee_range_ring == null or ranged_range_ring == null or spell_area_ring == null:
 		return
 	var show := combat_state == CombatState.PLAYER_TURN and not InventoryScreen.is_open()
-	if show and player.has_method("can_turn_attack"):
+	if show and player.has_method("can_turn_attack") and selected_player_turn_action != PlayerTurnAction.ABILITY:
 		show = bool(player.call("can_turn_attack"))
 	# WP13: in exploration the rings show only while an aim is picked, so the
 	# enemies' detection rings stay readable the rest of the time.
@@ -1754,7 +1899,24 @@ func _update_range_rings() -> void:
 		return
 
 	spell_area_ring.hide_ring()
-	if selected_player_turn_action == PlayerTurnAction.RANGED:
+	if selected_player_turn_action == PlayerTurnAction.ABILITY:
+		melee_range_ring.hide_ring()
+		var ability := _get_selected_ability()
+		if ability == null or ability_runner == null:
+			ranged_range_ring.hide_ring()
+			return
+		var ring_color := Color(ability.color.r, ability.color.g, ability.color.b, 0.6)
+		ranged_range_ring.show_ring(ability_runner.get_range(ability), ring_color, not ability.is_melee())
+		if ability.is_area():
+			var area_center: Variant = null
+			if ability.target == Ability3D.Target.ENEMY and hovered_enemy != null and is_instance_valid(hovered_enemy):
+				area_center = hovered_enemy.global_position
+			elif ability.target == Ability3D.Target.GROUND:
+				area_center = _pick_ground(get_viewport().get_mouse_position())
+			if area_center is Vector3:
+				spell_area_ring.global_position = GroundMath.flatten(area_center)
+				spell_area_ring.show_ring(ability.radius_m, Color(ability.color.r, ability.color.g, ability.color.b, 0.45))
+	elif selected_player_turn_action == PlayerTurnAction.RANGED:
 		melee_range_ring.hide_ring()
 		ranged_range_ring.show_ring(_get_ranged_attack_range_world(), Color(0.55, 0.85, 1.0, 0.55), true)
 	elif selected_player_turn_action == PlayerTurnAction.SPELL:
@@ -1942,6 +2104,7 @@ func _setup_turn_ui() -> void:
 	turn_ui_order_panel.offset_top = 18.0
 	turn_ui_order_panel.offset_right = 130.0
 	turn_ui_order_panel.offset_bottom = 112.0
+	turn_ui_order_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 
 	var top_style := StyleBoxFlat.new()
 	top_style.bg_color = Color(0.08, 0.07, 0.05, 0.92)
@@ -2181,8 +2344,13 @@ func _update_turn_ui() -> void:
 	# An aim that can no longer be carried out - attack spent, or a shift to a
 	# soul without that action - falls back to plain movement.
 	var soul := _get_active_soul()
-	if not can_attack and selected_player_turn_action != PlayerTurnAction.MOVE:
+	if not can_attack and selected_player_turn_action != PlayerTurnAction.MOVE \
+			and selected_player_turn_action != PlayerTurnAction.ABILITY:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
+	if selected_player_turn_action == PlayerTurnAction.ABILITY and not player_turn_action_running:
+		var aimed := _get_selected_ability()
+		if aimed == null or ability_runner == null or not ability_runner.block_reason(aimed).is_empty():
+			_set_player_turn_action(PlayerTurnAction.MOVE)
 	if soul != null:
 		if selected_player_turn_action == PlayerTurnAction.RANGED and not soul.has_ranged():
 			_set_player_turn_action(PlayerTurnAction.MOVE)
@@ -2311,9 +2479,14 @@ func _update_turn_ui() -> void:
 			PlayerTurnAction.SPELL:
 				var aimed_spell := _get_selected_spell()
 				attack_mode_text = "%s aim" % (aimed_spell.display_name if aimed_spell != null else "Spell")
+			PlayerTurnAction.ABILITY:
+				var aimed_ability := _get_selected_ability()
+				attack_mode_text = "%s aim" % (aimed_ability.display_name if aimed_ability != null else "Ability")
 			_:
 				attack_mode_text = "Move"
-		attack_text = "Actions: %s | Mode: %s" % [("Ready" if can_attack_now else "Used"), attack_mode_text]
+		var bonus_ready := player != null and player.has_method("has_bonus_action") and bool(player.call("has_bonus_action"))
+		attack_text = "Action: %s | Bonus: %s | %s" % [("Ready" if can_attack_now else "Used"),
+			("Ready" if bonus_ready else "Used"), attack_mode_text]
 		turn_ui_phase_label.add_theme_color_override("font_color", Color(0.62, 0.84, 0.66, 1.0))
 		turn_ui_move_label.add_theme_color_override("font_color", Color(0.86, 0.86, 0.84, 1.0))
 		turn_ui_attack_label.add_theme_color_override("font_color", Color(0.65, 0.88, 0.67, 1.0) if can_attack_now else Color(0.88, 0.57, 0.57, 1.0))
@@ -2358,6 +2531,8 @@ func _set_player_turn_action(action: PlayerTurnAction) -> void:
 	selected_player_turn_action = action
 	if action != PlayerTurnAction.SPELL:
 		selected_spell_id = &""
+	if action != PlayerTurnAction.ABILITY:
+		selected_ability_id = &""
 
 
 func _on_turn_attack_button_pressed() -> void:
@@ -2614,9 +2789,15 @@ func _rebuild_turn_enemy_icons() -> void:
 		enemy_icon.texture = _create_placeholder_icon(Color(0.82, 0.26, 0.26, 1.0))
 		enemy_box.add_child(enemy_icon)
 
+		if enemy_actor.has_method("get_portrait_color"):
+			enemy_icon.texture = _create_placeholder_icon(enemy_actor.call("get_portrait_color") as Color)
+
 		var enemy_label := Label.new()
 		enemy_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		enemy_label.text = "Enemy %d" % (i + 1)
+		if enemy_actor.has_method("get_display_name"):
+			enemy_label.text = String(enemy_actor.call("get_display_name"))
+		enemy_label.add_theme_font_size_override("font_size", 12)
 		enemy_box.add_child(enemy_label)
 
 		turn_ui_enemy_icon_entries.append({
@@ -2631,15 +2812,38 @@ func _update_hover_state() -> void:
 	# Outside combat the outline tells you the enemy is a click-to-attack
 	# target; inside it marks what a click will engage. Pickups get the same
 	# push, because a 3D pickup never hit-tests itself (section 8).
-	if InventoryScreen.is_open() or LootMenu.is_open():
+	if InventoryScreen.is_open() or LootMenu.is_open() or _skill_tree_open():
 		_set_hovered_enemy(null)
 		_set_hovered_pickup(null)
+		_set_hovered_prop_target(null)
 		return
 
 	var mouse := get_viewport().get_mouse_position()
 	var hovered := _pick_enemy(mouse) as CharacterBody3D
 	_set_hovered_enemy(hovered)
 	_set_hovered_pickup(_pick_pickup(mouse))
+	var prop_target: Node3D = null
+	if hovered == null:
+		prop_target = _pick_prop_in_group(mouse, &"hittable")
+		if prop_target == null:
+			prop_target = _pick_prop_in_group(mouse, &"interactable")
+	_set_hovered_prop_target(prop_target)
+	if hover_hint_label != null:
+		var hint := ""
+		if prop_target != null:
+			if prop_target.has_method("get_interact_label"):
+				hint = String(prop_target.call("get_interact_label"))
+			elif prop_target.is_in_group(&"hittable"):
+				hint = "Explosive - strike it"
+		elif hovered != null and hovered.has_method("get_display_name"):
+			hint = String(hovered.call("get_display_name"))
+			if hovered.has_method("get_statuses"):
+				var statuses: Dictionary = hovered.call("get_statuses")
+				for status_id in statuses:
+					hint += "  %s" % String(status_id).to_upper()
+		hover_hint_label.text = hint
+		hover_hint_label.visible = not hint.is_empty()
+		hover_hint_label.position = mouse + Vector2(18, 14)
 
 
 func _set_hovered_pickup(new_pickup: Node3D) -> void:
@@ -2705,3 +2909,517 @@ func _create_turn_enemy_icon_panel_style(is_active: bool, is_hovered: bool) -> S
 		style.border_width_bottom = 1
 
 	return style
+
+
+# --- Gameplay expansion --------------------------------------------------------
+# Abilities (AbilityRunner3D, the ability bar), the skill tree (K), sneaking (C),
+# the world's hittables and interactables, slipping away from a fight, respawn
+# after a defeat, and the coordinator interface of docs/gameplay-expansion.md,
+# section 5.
+
+func _setup_gameplay_expansion() -> void:
+	ability_runner = AbilityRunner3D.new()
+	ability_runner.name = "AbilityRunner"
+	add_child(ability_runner)
+	var player_3d := player as Player3D
+	if player_3d != null:
+		ability_runner.setup(player_3d)
+		skill_tree_screen = SkillTreeScreen3D.new()
+		skill_tree_screen.name = "SkillTree"
+		add_child(skill_tree_screen)
+		skill_tree_screen.setup(player_3d.get_progression())
+		skill_tree_screen.visibility_changed_to.connect(_on_skill_tree_visibility_changed)
+	_setup_ability_bar()
+
+
+func _skill_tree_open() -> bool:
+	return skill_tree_screen != null and skill_tree_screen.is_open()
+
+
+func _on_skill_tree_visibility_changed(open: bool) -> void:
+	# The world waits while the tree is open, as it does under the story book.
+	get_tree().paused = open
+	_update_turn_ui()
+
+
+## K, C and the ability hotkeys, in every combat state. True when handled.
+func _handle_expansion_keys(event: InputEvent) -> bool:
+	var key := event as InputEventKey
+	if key == null or not key.pressed or key.echo:
+		return false
+	if key.physical_keycode == SKILL_TREE_KEY:
+		_toggle_skill_tree()
+		return true
+	if key.physical_keycode == SNEAK_KEY:
+		_toggle_sneak()
+		return true
+	if key.physical_keycode == KEY_ESCAPE and selected_player_turn_action == PlayerTurnAction.ABILITY:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+		return true
+	var index := ABILITY_HOTKEYS.find(key.physical_keycode)
+	if index >= 0 and index < ability_bar_order.size():
+		_on_ability_button_pressed(ability_bar_order[index].id)
+		return true
+	return false
+
+
+func _toggle_skill_tree() -> void:
+	if skill_tree_screen == null:
+		return
+	if InventoryScreen.is_open():
+		return
+	skill_tree_screen.toggle()
+
+
+func _toggle_sneak() -> void:
+	if not player.has_method("set_sneaking"):
+		return
+	if combat_state != CombatState.EXPLORATION:
+		_fx_popup(_popup_anchor(player), "Too late to hide", CombatFx.COLOR_WARNING, 16)
+		return
+	player.call("set_sneaking", not bool(player.call("is_sneaking")))
+	_update_turn_ui()
+
+
+func _get_selected_ability() -> Ability3D:
+	if selected_ability_id == &"":
+		return null
+	return AbilityCatalog3D.get_ability(selected_ability_id)
+
+
+## The abilities on the bar: the active soul's learned ones, then any-soul ones.
+func _bar_abilities() -> Array[Ability3D]:
+	var result: Array[Ability3D] = []
+	var soul := _get_active_soul()
+	var player_3d := player as Player3D
+	if soul == null or player_3d == null or player_3d.get_progression() == null:
+		return result
+	return player_3d.get_progression().learned_for_soul(int(soul.kind))
+
+
+func _on_ability_button_pressed(ability_id: StringName) -> void:
+	var ability := AbilityCatalog3D.get_ability(ability_id)
+	if ability == null or ability_runner == null:
+		return
+	if not _player_can_pick_attack_aim():
+		return
+	if combat_state == CombatState.PLAYER_TURN and player.has_method("is_moving") and bool(player.call("is_moving")):
+		return
+	if selected_player_turn_action == PlayerTurnAction.ABILITY and selected_ability_id == ability_id:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+		_update_turn_ui()
+		return
+	var reason := ability_runner.block_reason(ability)
+	if not reason.is_empty():
+		_fx_popup(_popup_anchor(player), reason, CombatFx.COLOR_WARNING, 16)
+		return
+	if ability.target == Ability3D.Target.SELF:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+		_execute_ability(ability, null, null)
+		return
+	_set_player_turn_action(PlayerTurnAction.ABILITY)
+	selected_ability_id = ability_id
+	_update_turn_ui()
+
+
+## A click while an ability is aimed: an enemy (or a hittable) for ENEMY
+## abilities, a ground point for GROUND ones.
+func _handle_ability_click(screen_pos: Vector2) -> void:
+	var ability := _get_selected_ability()
+	if ability == null:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+		return
+	if player_turn_action_running:
+		return
+	if ability.target == Ability3D.Target.ENEMY:
+		var target: Node3D = _pick_enemy(screen_pos)
+		if target == null:
+			target = _pick_prop_in_group(screen_pos, &"hittable")
+		if target == null:
+			_fx_popup(_popup_anchor(player), "Pick an enemy", CombatFx.COLOR_WARNING, 14)
+			return
+		_execute_ability(ability, target, null)
+		return
+	var ground: Variant = _pick_ground(screen_pos)
+	if ground == null:
+		return
+	_execute_ability(ability, null, ground)
+
+
+## Runs an ability with the turn held. A melee ability out of reach walks up
+## first (spending movement in a fight), like a melee click does.
+func _execute_ability(ability: Ability3D, target: Node3D, point: Variant) -> void:
+	if ability_runner == null or player_turn_action_running:
+		return
+	var state_at_start := combat_state
+	player_turn_action_running = true
+	if combat_state == CombatState.EXPLORATION:
+		_stop_player_for_exploration_attack()
+	if ability.target == Ability3D.Target.ENEMY and ability.is_melee() and target != null:
+		var reach := ability_runner.get_range(ability)
+		if GroundMath.ground_distance(player.global_position, target.global_position) > reach + ATTACK_RANGE_TOLERANCE_M:
+			await _approach_for_melee(target, reach)
+			if combat_state != state_at_start or not is_instance_valid(target):
+				player_turn_action_running = false
+				return
+	await ability_runner.execute(ability, target, point)
+	player_turn_action_running = false
+	if combat_state == state_at_start:
+		_set_player_turn_action(PlayerTurnAction.MOVE)
+	_update_turn_ui()
+
+
+## Walks toward `target` until it is within `reach`: within the turn's movement
+## in a fight, freely in exploration (where being spotted on the way starts the
+## fight and cancels the ability).
+func _approach_for_melee(target: Node3D, reach: float) -> void:
+	var stop := approach_distance_for(player, target, reach)
+	var approach_point := _compute_approach_world_point(player.global_position, target.global_position, stop)
+	var state_at_start := combat_state
+	if combat_state == CombatState.PLAYER_TURN:
+		var remaining := float(player.call("get_turn_remaining_move_meters")) if player.has_method("get_turn_remaining_move_meters") else 0.0
+		if remaining <= 0.0:
+			return
+		var used := _request_player_turn_move_by_distance(approach_point, remaining)
+		if used > 0.0 and player.has_method("consume_turn_movement_meters"):
+			player.call("consume_turn_movement_meters", used)
+	else:
+		_request_player_move(approach_point)
+	var deadline := Time.get_ticks_msec() + int(MELEE_APPROACH_TIMEOUT_SECONDS * 1000.0)
+	while player.has_method("is_moving") and bool(player.call("is_moving")):
+		await get_tree().physics_frame
+		if combat_state != state_at_start or not is_instance_valid(target) or Time.get_ticks_msec() > deadline:
+			return
+		if combat_state == CombatState.EXPLORATION \
+				and GroundMath.ground_distance(player.global_position, target.global_position) <= reach:
+			player.call("stop_movement_immediately")
+			return
+
+
+func _setup_ability_bar() -> void:
+	ability_bar_panel = PanelContainer.new()
+	ability_bar_panel.name = "AbilityBar"
+	ability_bar_panel.anchor_left = 0.5
+	ability_bar_panel.anchor_right = 0.5
+	ability_bar_panel.anchor_top = 1.0
+	ability_bar_panel.anchor_bottom = 1.0
+	ability_bar_panel.offset_left = -300.0
+	ability_bar_panel.offset_right = 300.0
+	ability_bar_panel.offset_top = -142.0
+	ability_bar_panel.offset_bottom = -90.0
+	ability_bar_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	ability_bar_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	ability_bar_panel.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.PANEL_BG, UiTheme.PANEL_BORDER, 2, 10, 6))
+	turn_ui_layer.add_child(ability_bar_panel)
+
+	var outer := HBoxContainer.new()
+	outer.alignment = BoxContainer.ALIGNMENT_CENTER
+	outer.add_theme_constant_override("separation", 14)
+	ability_bar_panel.add_child(outer)
+
+	ability_bar_row = HBoxContainer.new()
+	ability_bar_row.add_theme_constant_override("separation", 8)
+	outer.add_child(ability_bar_row)
+
+	var divider := ColorRect.new()
+	divider.color = UiTheme.RULE
+	divider.custom_minimum_size = Vector2(1, 30)
+	outer.add_child(divider)
+
+	sneak_button = Button.new()
+	sneak_button.toggle_mode = true
+	sneak_button.text = "Sneak (C)"
+	sneak_button.tooltip_text = "Crouch and move quietly: slower, and enemies must come much closer to spot you. In a bush, or as the rogue, even closer. A hit on an unaware enemy while sneaking is a sneak attack (x2, the rogue x3)."
+	sneak_button.custom_minimum_size = Vector2(104, 36)
+	UiTheme.style_button(sneak_button, 13)
+	sneak_button.pressed.connect(_toggle_sneak)
+	outer.add_child(sneak_button)
+
+	skills_button = Button.new()
+	skills_button.text = "Skills (K)"
+	skills_button.custom_minimum_size = Vector2(104, 36)
+	UiTheme.style_button(skills_button, 13)
+	skills_button.pressed.connect(_toggle_skill_tree)
+	outer.add_child(skills_button)
+
+	stealth_label = UiTheme.label("", Color(0.8, 0.7, 1.0, 1.0), 14)
+	stealth_label.position = Vector2(22.0, 150.0)
+	stealth_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	turn_ui_layer.add_child(stealth_label)
+
+	hover_hint_label = UiTheme.label("", UiTheme.TITLE, 14)
+	hover_hint_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	hover_hint_label.add_theme_constant_override("outline_size", 6)
+	hover_hint_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover_hint_label.visible = false
+	turn_ui_layer.add_child(hover_hint_label)
+
+
+func _rebuild_ability_bar(abilities: Array[Ability3D]) -> void:
+	for child in ability_bar_row.get_children():
+		child.queue_free()
+	ability_bar_buttons.clear()
+	ability_bar_order = abilities
+	for i in range(abilities.size()):
+		var ability := abilities[i]
+		var button := Button.new()
+		button.toggle_mode = true
+		button.custom_minimum_size = Vector2(118, 36)
+		button.tooltip_text = "%s\n%s\n%s" % [ability.display_name, ability.summary(), ability.description]
+		UiTheme.style_button(button, 13)
+		button.add_theme_color_override("font_color", ability.color)
+		button.pressed.connect(_on_ability_button_pressed.bind(ability.id))
+		ability_bar_row.add_child(button)
+		ability_bar_buttons[ability.id] = button
+
+
+func _update_ability_bar() -> void:
+	if ability_bar_panel == null:
+		return
+	var abilities := _bar_abilities()
+	var signature := ""
+	for ability in abilities:
+		signature += String(ability.id) + ","
+	if signature != _ability_bar_signature:
+		_ability_bar_signature = signature
+		_rebuild_ability_bar(abilities)
+	var can_pick := _player_can_pick_attack_aim()
+	if can_pick and combat_state == CombatState.PLAYER_TURN and player.has_method("is_moving"):
+		can_pick = not bool(player.call("is_moving"))
+	for i in range(ability_bar_order.size()):
+		var ability := ability_bar_order[i]
+		var button := ability_bar_buttons.get(ability.id) as Button
+		if button == null:
+			continue
+		var reason := ability_runner.block_reason(ability) if ability_runner != null else "No body"
+		var cooldown := ability_runner.get_cooldown(ability.id) if ability_runner != null else 0
+		var hotkey := str(i + 4)
+		var label := "%s %s" % [hotkey, ability.display_name]
+		if cooldown > 0:
+			label = "%s %s (%d)" % [hotkey, ability.display_name, cooldown]
+		elif ability.cost == Ability3D.Cost.BONUS:
+			label += " +"
+		button.text = label
+		button.disabled = not can_pick or not reason.is_empty()
+		button.button_pressed = selected_player_turn_action == PlayerTurnAction.ABILITY and selected_ability_id == ability.id
+	if sneak_button != null:
+		var sneaking := player.has_method("is_sneaking") and bool(player.call("is_sneaking"))
+		sneak_button.visible = combat_state == CombatState.EXPLORATION
+		sneak_button.button_pressed = sneaking
+		sneak_button.text = "Sneaking (C)" if sneaking else "Sneak (C)"
+	if skills_button != null:
+		var points := 0
+		var player_3d := player as Player3D
+		if player_3d != null and player_3d.get_progression() != null:
+			points = player_3d.get_progression().skill_points
+		skills_button.text = "Skills (K)  %d pt" % points if points > 0 else "Skills (K)"
+		skills_button.modulate = Color(1.25, 1.15, 0.8, 1.0) if points > 0 else Color.WHITE
+
+
+func _update_stealth_label() -> void:
+	if stealth_label == null:
+		return
+	var text := ""
+	if player.has_method("is_hidden_by_smoke") and bool(player.call("is_hidden_by_smoke")):
+		text = "In smoke - unseen"
+	elif player.has_method("is_sneaking") and bool(player.call("is_sneaking")):
+		if player.has_method("is_in_cover") and bool(player.call("is_in_cover")):
+			text = "Sneaking in cover - unseen"
+		else:
+			text = "Sneaking - detection rings shrink"
+	elif player.has_method("is_in_cover") and bool(player.call("is_in_cover")):
+		text = "In cover - press C to hide"
+	stealth_label.text = text
+	stealth_label.visible = not text.is_empty()
+
+
+## The world object in `group` under the cursor: a ray on the prop layer, then up
+## the parents to the first node in the group (docs/gameplay-expansion.md 3).
+func _pick_prop_in_group(screen_pos: Vector2, group: StringName) -> Node3D:
+	var camera := _get_active_camera()
+	if camera == null or not is_inside_tree():
+		return null
+	var world := get_world_3d()
+	if world == null or world.direct_space_state == null:
+		return null
+	var from := camera.project_ray_origin(screen_pos)
+	var to := from + camera.project_ray_normal(screen_pos) * 400.0
+	var query := PhysicsRayQueryParameters3D.create(from, to, LAYER_PROPS)
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	var hit: Dictionary = world.direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return null
+	var node := hit.get("collider") as Node
+	while node != null and node != self:
+		if node.is_in_group(group) and node is Node3D:
+			if node.has_method("is_alive") and not bool(node.call("is_alive")):
+				return null
+			if node.has_method("can_interact") and not bool(node.call("can_interact")):
+				return null
+			return node as Node3D
+		node = node.get_parent()
+	return null
+
+
+func _set_hovered_prop_target(target: Node3D) -> void:
+	if hovered_prop_target != null and not is_instance_valid(hovered_prop_target):
+		hovered_prop_target = null
+	if hovered_prop_target == target:
+		return
+	if hovered_prop_target != null and hovered_prop_target.has_method("set_hover_highlighted"):
+		hovered_prop_target.call("set_hover_highlighted", false)
+	hovered_prop_target = target
+	if hovered_prop_target != null and hovered_prop_target.has_method("set_hover_highlighted"):
+		hovered_prop_target.call("set_hover_highlighted", true)
+
+
+func _interact_range(target: Node3D) -> float:
+	if target.has_method("get_interact_range"):
+		return float(target.call("get_interact_range"))
+	return 1.8
+
+
+## A click on an interactable: use it when in range, else walk over and use it
+## on arrival.
+func _request_interaction(target: Node3D) -> void:
+	if target == null or not is_instance_valid(target):
+		return
+	if player.has_method("clear_attack_target"):
+		player.call("clear_attack_target")
+	if GroundMath.ground_distance(player.global_position, target.global_position) <= _interact_range(target) + INTERACT_RANGE_SLACK_M:
+		_pending_interactable = null
+		player.call("stop_movement_immediately")
+		target.call("interact", player)
+		return
+	_pending_interactable = target
+	_pending_interact_deadline_msec = Time.get_ticks_msec() + int(INTERACT_WALK_TIMEOUT_SECONDS * 1000.0)
+	var stop := maxf(0.5, _interact_range(target) - 0.4)
+	_request_player_move(_compute_approach_world_point(player.global_position, target.global_position, stop))
+
+
+func _update_pending_interaction() -> void:
+	if _pending_interactable == null:
+		return
+	if not is_instance_valid(_pending_interactable) or combat_state != CombatState.EXPLORATION \
+			or Time.get_ticks_msec() > _pending_interact_deadline_msec:
+		_pending_interactable = null
+		return
+	var in_range := GroundMath.ground_distance(player.global_position, _pending_interactable.global_position) \
+		<= _interact_range(_pending_interactable) + INTERACT_RANGE_SLACK_M
+	if in_range:
+		var target := _pending_interactable
+		_pending_interactable = null
+		player.call("stop_movement_immediately")
+		target.call("interact", player)
+	elif player.has_method("is_moving") and not bool(player.call("is_moving")):
+		_pending_interactable = null
+
+
+## After a melee swing, a throw or a spell: the rogue's Killing Spree.
+func _after_player_strike(target: Node3D) -> void:
+	var soul := _get_active_soul()
+	if soul == null or soul.kind != Soul.Kind.ROGUE or combat_state != CombatState.PLAYER_TURN:
+		return
+	if target == null:
+		return
+	var dead := not is_instance_valid(target) \
+		or (target.has_method("is_alive") and not bool(target.call("is_alive")))
+	if dead and player.has_method("refund_action_once") and bool(player.call("refund_action_once")):
+		_fx_popup(_popup_anchor(player) + Vector3(0.0, 0.6, 0.0), "KILLING SPREE  +action", AbilityCatalog3D.COLOR_ROGUE, 18)
+
+
+func _player_is_stealthy() -> bool:
+	if player.has_method("is_hidden") and bool(player.call("is_hidden")):
+		return true
+	return player.has_method("is_sneaking") and bool(player.call("is_sneaking"))
+
+
+## A stealth strike: the struck enemy's neighbours within STEALTH_ALERT_RADIUS_M
+## and anyone who can see the body join; nobody else.
+func _refresh_engaged_enemies_stealthy(struck_enemy: CharacterBody3D) -> void:
+	var struck_position := player.global_position
+	if struck_enemy != null and is_instance_valid(struck_enemy):
+		struck_position = struck_enemy.global_position
+	for enemy_actor in _get_all_alive_enemies_unfiltered():
+		if engaged_enemies.has(enemy_actor.get_instance_id()):
+			continue
+		var near_struck := GroundMath.ground_distance(struck_position, enemy_actor.global_position) <= STEALTH_ALERT_RADIUS_M
+		if near_struck or _enemy_can_spot_player(enemy_actor):
+			engaged_enemies[enemy_actor.get_instance_id()] = true
+
+
+## True when the player's turn ends out of every engaged enemy's reach and sight
+## (see ESCAPE_DISTANCE_M), or in smoke with nobody close.
+func _player_escaped() -> bool:
+	var engaged := _get_all_alive_enemies()
+	if engaged.is_empty():
+		return false
+	var in_smoke := player.has_method("is_hidden_by_smoke") and bool(player.call("is_hidden_by_smoke"))
+	for enemy_actor in engaged:
+		var distance := GroundMath.ground_distance(player.global_position, enemy_actor.global_position)
+		if in_smoke:
+			if distance <= ESCAPE_SMOKE_MIN_M:
+				return false
+			continue
+		if distance <= ESCAPE_DISTANCE_M:
+			return false
+		if distance <= ESCAPE_ANY_SIGHT_M and enemy_actor.has_method("has_line_of_sight_to") \
+				and bool(enemy_actor.call("has_line_of_sight_to", player)):
+			return false
+	return true
+
+
+func _escape_combat() -> void:
+	CombatFx.announce(ANNOUNCE_ESCAPED, Color(0.8, 0.55, 1.0, 1.0), 1.0)
+	_end_turn_based_combat()
+
+
+## Defeat: back on the feet at the last waystone (or the spawn) after a beat.
+## The enemies of the lost fight go back to watching.
+func _schedule_respawn() -> void:
+	_respawn_scheduled = true
+	await get_tree().create_timer(RESPAWN_DELAY_SECONDS).timeout
+	if not is_instance_valid(player):
+		return
+	var point := _respawn_point if _has_respawn_point else player.global_position
+	player.call("revive", point)
+	if camera_rig != null:
+		camera_rig.snap_to_target()
+	CombatFx.announce("THE BOUND RISE AGAIN", CombatFx.COLOR_COMBAT, 1.2)
+	_respawn_scheduled = false
+	_update_turn_ui()
+
+
+## Coordinator interface (docs/gameplay-expansion.md 5): an enemy spawned at
+## runtime (the boss's summons). Engaged at once when a fight is running.
+func register_spawned_enemy(enemy_actor: CharacterBody3D) -> void:
+	if enemy_actor == null or not is_instance_valid(enemy_actor):
+		return
+	if not enemy_actor.is_in_group("enemies"):
+		enemy_actor.add_to_group("enemies")
+	if enemy == null or not is_instance_valid(enemy):
+		enemy = enemy_actor
+	elif not extra_enemies.has(enemy_actor):
+		extra_enemies.append(enemy_actor)
+	_connect_enemy_signals(enemy_actor)
+	if enemy_actor.has_method("set_target"):
+		enemy_actor.call("set_target", player)
+	if combat_state != CombatState.EXPLORATION:
+		if enemy_actor.has_method("set_turn_based_combat"):
+			enemy_actor.call("set_turn_based_combat", true)
+		engaged_enemies[enemy_actor.get_instance_id()] = true
+		_rebuild_turn_enemy_icons()
+
+
+## A waystone moved the player: the camera jumps along and the stone becomes
+## the respawn point.
+func on_player_teleported() -> void:
+	if camera_rig != null:
+		camera_rig.snap_to_target()
+	_respawn_point = GroundMath.flatten(player.global_position)
+	_has_respawn_point = true
+
+
+func is_in_combat() -> bool:
+	return combat_state != CombatState.EXPLORATION

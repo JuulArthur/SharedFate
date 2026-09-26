@@ -126,6 +126,37 @@ const COUNTER_PHASE_NONE := 0
 const COUNTER_PHASE_WINDUP := 1
 const COUNTER_PHASE_STRIKE := 2
 
+# --- Gameplay expansion (docs/gameplay-expansion.md) -------------------------
+# Movement per turn by soul, relative to the coordinator's 6 m: the knight
+# plods, the rogue darts, the mage is slow on its feet. A shift mid-turn moves
+# the remaining budget by the difference.
+const SOUL_MOVE_DELTA_M := {
+	Soul.Kind.KNIGHT: 0.0,
+	Soul.Kind.ROGUE: 2.0,
+	Soul.Kind.MAGE: -1.0,
+}
+# The knight's perfect block answers with a shield riposte at this share of a
+# sword blow.
+const KNIGHT_RIPOSTE_MULT := 0.5
+# Sneaking (exploration only): slower walk, smaller detection rings. The
+# multiplier is what `Enemy3D.can_spot` scales its detection range by.
+const SNEAK_SPEED_MULT := 0.55
+const DETECTION_MULT_SNEAK := 0.55
+const DETECTION_MULT_SNEAK_ROGUE := 0.3
+const DETECTION_MULT_COVER_UPRIGHT := 0.6
+const DETECTION_MULT_HIDDEN := 0.0
+const SNEAK_RING_RADIUS_M := 0.7
+const SNEAK_RING_COLOR := Color(0.55, 0.45, 0.85, 0.7)
+const SNEAK_LIGHT_ENERGY_MULT := 0.45
+# A hit from hiding on an enemy that has not noticed the body.
+const SNEAK_ATTACK_MULT := 2.0
+const SNEAK_ATTACK_MULT_ROGUE := 3.0
+const COLOR_SNEAK_ATTACK := Color(0.8, 0.55, 1.0, 1.0)
+# Smoke Bomb outside a fight hides the body this long.
+const SMOKE_EXPLORATION_SECONDS := 6.0
+# Revive after a defeat: this share of maximum health.
+const REVIVE_HEALTH_RATIO := 1.0
+
 var attack_cooldown_left := 0.0
 var attack_target: Node3D = null
 var target_refresh_left := 0.0
@@ -164,6 +195,19 @@ var _counter_perfect_pressed := false
 # so the base class's plain `flash_hit()` that follows does not flash twice.
 var _hit_flash_handled := false
 var _bar_health := -1
+var progression: Progression3D = null
+var _base_max_health := 0
+var _base_move_speed := 0.0
+var _base_light_energy := 1.0
+var _sneaking := false
+# Cover zones (HideZone3D) the body stands in, by instance id.
+var _cover_zones: Dictionary = {}
+var _sneak_ring: RangeRing3D = null
+# Smoke Bomb: turns (fight) or seconds (exploration) the body stays unseen.
+var _smoke_turns := 0
+var _smoke_time_left := 0.0
+var _bonus_action_available := false
+var _kill_refund_used := false
 
 
 func _ready() -> void:
@@ -181,6 +225,12 @@ func _ready() -> void:
 		model_idle_position = model.position
 	hand_point = get_node_or_null("HandPoint") as Node3D
 	vision_light = get_node_or_null("VisionLight") as OmniLight3D
+	if vision_light != null:
+		_base_light_energy = vision_light.light_energy
+	_base_max_health = max_health
+	_base_move_speed = move_speed
+	_setup_progression()
+	_setup_sneak_ring()
 
 	_setup_health_bar()
 	_setup_level_and_xp_ui()
@@ -193,10 +243,15 @@ func _ready() -> void:
 	_setup_inventory()
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	# The base class writes `health` directly, so the bar follows it from here.
 	if health != _bar_health:
 		_update_health_bar()
+	if _smoke_time_left > 0.0 and not _turn_mode:
+		_smoke_time_left = maxf(0.0, _smoke_time_left - delta)
+		if _smoke_time_left <= 0.0:
+			CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_M, 0.0), "Smoke clears", SNEAK_RING_COLOR, 14)
+			_update_sneak_visual()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -397,14 +452,16 @@ func resolve_enemy_attack(attacker: Node3D, base_damage: int) -> bool:
 	var anchor := global_position + Vector3(0.0, POPUP_HEIGHT_HIGH_M, 0.0)
 	match reaction:
 		Soul.Reaction.BLOCK:
-			# The knight turns the blow aside. No riposte: the knight's edge is
-			# that Block also works without timing, through the stance.
+			# The knight turns the blow aside and answers with the shield rim: a
+			# riposte at half a sword blow (gameplay expansion). The stance still
+			# works without timing; the timing is what earns the riposte.
 			CombatFx.popup_text(anchor, "BLOCKED!", CombatFx.COLOR_BLOCK, 26)
 			_flash_body(Color(1.6, 2.0, 2.6, 1.0), 0.22)
 			CombatFx.ring_burst(self, global_position + Vector3(0.0, 0.05, 0.0), CombatFx.COLOR_BLOCK,
 				10.0 * FX_SCREEN_SCALE, 28.0 * FX_SCREEN_SCALE, 0.3)
 			CombatFx.hit_stop(0.06, 0.2)
 			CombatFx.shake(2.0, 0.1)
+			_counter_strike(attacker, KNIGHT_RIPOSTE_MULT)
 		Soul.Reaction.PARRY:
 			CombatFx.popup_text(anchor, "PARRY!", CombatFx.COLOR_COUNTER, 26)
 			CombatFx.hit_stop(0.08, 0.15)
@@ -441,11 +498,11 @@ func get_reaction_hint() -> Dictionary:
 
 
 # The riposte: face the attacker and run the normal melee swing at them.
-func _counter_strike(attacker: Node3D) -> void:
+func _counter_strike(attacker: Node3D, damage_mult: float = 1.0) -> void:
 	if attacker == null or not is_instance_valid(attacker):
 		return
 	_face_toward_world(attacker.global_position)
-	var damage := get_melee_damage()
+	var damage := maxi(1, int(round(float(get_melee_damage()) * damage_mult)))
 	_swing_melee(func() -> void:
 		if is_instance_valid(attacker) and attacker.has_method("receive_damage"):
 			attacker.call("receive_damage", damage)
@@ -553,7 +610,7 @@ func try_ranged_attack(target: Node3D = null) -> bool:
 	_spend_attack()
 	_face_toward_world(target.global_position)
 	_flash_ranged_feedback(target)
-	var damage := active_soul.ranged_damage
+	var damage := apply_stealth_bonus(target, scale_damage(active_soul.ranged_damage))
 	await _launch_bolt(target)
 	if is_instance_valid(target) and target.has_method("receive_damage"):
 		target.call("receive_damage", damage)
@@ -611,6 +668,8 @@ func try_cast_spell(spell_id: StringName, target: Node3D = null) -> bool:
 	_face_toward_world(target.global_position)
 	_flash_ranged_feedback(target, true)
 	var victim := target
+	var primary_damage := apply_stealth_bonus(victim, scale_damage(spell.damage))
+	var splash_damage := scale_damage(spell.damage)
 	await _launch_bolt(victim, spell.color)
 	if not is_instance_valid(self):
 		return true
@@ -621,6 +680,10 @@ func try_cast_spell(spell_id: StringName, target: Node3D = null) -> bool:
 	if spell.is_area():
 		var radius_world := spell.radius_meters * _meter_world_units
 		victims = _enemies_within(impact, radius_world)
+		# A hittable (an explosive barrel) as the primary target takes the blast
+		# too; `_enemies_within` only looks at the enemies group.
+		if is_instance_valid(victim) and not victims.has(victim):
+			victims.append(victim)
 		CombatFx.ring_burst(get_parent(), impact + Vector3(0.0, 0.05, 0.0), spell.color,
 			6.0 * FX_SCREEN_SCALE, _screen_radius_px(impact, radius_world), 0.4)
 		CombatFx.shake(4.0, 0.16)
@@ -629,7 +692,7 @@ func try_cast_spell(spell_id: StringName, target: Node3D = null) -> bool:
 
 	for hit_victim in victims:
 		if is_instance_valid(hit_victim) and hit_victim.has_method("receive_damage"):
-			hit_victim.call("receive_damage", spell.damage)
+			hit_victim.call("receive_damage", primary_damage if hit_victim == victim else splash_damage)
 	if spell.root_turns > 0 and is_instance_valid(victim) and victim.has_method("apply_root"):
 		victim.call("apply_root", spell.root_turns)
 	if not victims.is_empty():
@@ -797,7 +860,7 @@ func _try_attack_target(target: Node3D) -> void:
 
 	attack_cooldown_left = attack_cooldown
 	_face_toward_world(target.global_position)
-	var damage := get_melee_damage()
+	var damage := apply_stealth_bonus(target, get_melee_damage())
 	_swing_melee(func() -> void:
 		if is_instance_valid(target) and target.has_method("receive_damage"):
 			target.call("receive_damage", damage)
@@ -858,11 +921,14 @@ func _apply_attack_damage() -> void:
 		var collider := hit.get("collider") as Object
 		if collider == null:
 			continue
+		var dealt := damage
+		if collider is Node3D:
+			dealt = apply_stealth_bonus(collider as Node3D, damage)
 		if collider.has_method("take_damage"):
-			collider.call("take_damage", damage)
+			collider.call("take_damage", dealt)
 			landed = true
 		elif collider.has_method("receive_damage"):
-			collider.call("receive_damage", damage)
+			collider.call("receive_damage", dealt)
 			landed = true
 	if landed:
 		CombatFx.hit_stop()
@@ -965,8 +1031,15 @@ func add_experience(amount: int) -> void:
 
 func _on_level_up() -> void:
 	CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_HIGH_M, 0.0), "LEVEL UP!", CombatFx.COLOR_COUNTER, 26)
+	CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_TOP_M, 0.0), "+1 skill point (K)", CombatFx.COLOR_XP, 16)
 	_flash_body(Color(2.4, 2.2, 1.4, 1.0), 0.35)
 	CombatFx.shake(4.0, 0.2)
+	if progression != null:
+		progression.on_level_up(player_level)
+	# The level's own health gain lands on top of what the passives give; the
+	# new health is added to the current pool so a level up mid-fight helps.
+	_apply_progression_stats()
+	heal(int(round(max_health * 0.3)))
 
 
 func get_player_level() -> int:
@@ -1256,23 +1329,37 @@ func set_turn_based_combat(enabled: bool) -> void:
 	_resonance_pending = false
 	# Spells start every fight fresh.
 	spell_cooldowns.clear()
+	_bonus_action_available = false
+	_smoke_turns = 0
+	_smoke_time_left = 0.0
+	if enabled:
+		# A fight is loud: nobody sneaks through it.
+		set_sneaking(false)
 	super(enabled)
 	if not enabled:
 		clear_attack_target()
+	_update_sneak_visual()
 
 
 func start_turn(max_move_meters: float = 6.0) -> void:
-	super(max_move_meters)
+	super(maxf(0.0, max_move_meters + _soul_move_delta(active_soul) + _progression_move_bonus()))
 	set_blocking(false)
 	# One shift a turn, plus the one Resonance earned during the enemy turn.
-	shifts_left_this_turn = SHIFTS_PER_TURN + (1 if _resonance_pending else 0)
+	shifts_left_this_turn = SHIFTS_PER_TURN + _progression_bonus_shifts() + (1 if _resonance_pending else 0)
 	_resonance_pending = false
+	_bonus_action_available = true
+	_kill_refund_used = false
+	# Smoke lasts through the enemy turn it was thrown before, no longer.
+	if _smoke_turns > 0:
+		_smoke_turns -= 1
+		_update_sneak_visual()
 	_tick_spell_cooldowns()
 
 
 func end_turn() -> void:
 	super()
 	shifts_left_this_turn = 0
+	_bonus_action_available = false
 
 
 func consume_turn_movement(used_cells: int) -> void:
@@ -1418,7 +1505,11 @@ func shift_to(kind: int) -> bool:
 	var previous := active_soul
 	active_soul = soul
 	character_name = soul.display_name
+	if _turn_mode and _turn_active:
+		# The new soul walks at its own pace for the rest of the turn.
+		_turn_move_left = maxf(0.0, _turn_move_left + _soul_move_delta(soul) - _soul_move_delta(previous))
 	_apply_soul_visual(soul)
+	_update_sneak_visual()
 	_play_shift_fx(previous, soul)
 	soul_changed.emit(soul)
 	return true
@@ -1465,6 +1556,259 @@ func _tick_exploration_spell_cooldowns(delta: float) -> void:
 		return
 	_exploration_cooldown_tick_left = EXPLORATION_SECONDS_PER_TURN
 	_tick_spell_cooldowns()
+
+
+# --- Progression (gameplay expansion) ---------------------------------------------
+# Progression3D (child "Progression") owns skill points, learned abilities and
+# passive ranks; the body reads its numbers here. Levels add HEALTH_PER_LEVEL
+# each, Vitality its ranks.
+
+func _setup_progression() -> void:
+	progression = get_node_or_null("Progression") as Progression3D
+	if progression == null:
+		progression = Progression3D.new()
+		progression.name = "Progression"
+		add_child(progression)
+	progression.set_level(player_level)
+	progression.changed.connect(_apply_progression_stats)
+	_apply_progression_stats()
+
+
+func get_progression() -> Progression3D:
+	return progression
+
+
+## Recomputes maximum health from the base, the levels and Vitality. A raise
+## also raises current health by the same amount.
+func _apply_progression_stats() -> void:
+	var wanted := _base_max_health + (player_level - 1) * Progression3D.HEALTH_PER_LEVEL
+	if progression != null:
+		wanted += progression.bonus_max_health()
+	if wanted == max_health:
+		return
+	var gained := wanted - max_health
+	max_health = wanted
+	if _alive:
+		health = clampi(health + maxi(gained, 0), 0, max_health)
+	_update_health_bar()
+
+
+## Outgoing damage through the Might passive; exact at rank 0.
+func scale_damage(amount: int) -> int:
+	if progression == null or amount <= 0:
+		return amount
+	var mult := progression.damage_multiplier()
+	if is_equal_approx(mult, 1.0):
+		return amount
+	return maxi(1, int(round(float(amount) * mult)))
+
+
+func _progression_move_bonus() -> float:
+	return progression.bonus_move_meters() if progression != null else 0.0
+
+
+func _progression_bonus_shifts() -> int:
+	return progression.bonus_shifts() if progression != null else 0
+
+
+func _soul_move_delta(soul: Soul) -> float:
+	if soul == null:
+		return 0.0
+	return float(SOUL_MOVE_DELTA_M.get(soul.kind, 0.0))
+
+
+# --- Action economy (gameplay expansion) --------------------------------------------
+# A turn has one action (melee, throw, spell or an action ability) and one bonus
+# action (bonus abilities). Outside a fight the action is the realtime attack
+# cooldown and the bonus is always there; ability cooldowns gate the rest.
+
+func has_action() -> bool:
+	return _alive and _attack_available_now()
+
+
+func spend_action() -> void:
+	_spend_attack()
+
+
+func has_bonus_action() -> bool:
+	if not _alive:
+		return false
+	if not _turn_mode:
+		return true
+	return _turn_active and _bonus_action_available
+
+
+func spend_bonus_action() -> void:
+	if _turn_mode:
+		_bonus_action_available = false
+
+
+## The rogue's Killing Spree: once per turn a kill gives the action back.
+## Returns true when it did.
+func refund_action_once() -> bool:
+	if not _turn_mode or not _turn_active or _kill_refund_used:
+		return false
+	if _turn_attack_available:
+		return false
+	_kill_refund_used = true
+	_turn_attack_available = true
+	return true
+
+
+# --- Stealth (gameplay expansion) ------------------------------------------------------
+
+func is_sneaking() -> bool:
+	return _sneaking
+
+
+## Exploration only; a fight ends it. The walk slows and the enemies' detection
+## rings shrink (they read `get_detection_multiplier`).
+func set_sneaking(enabled: bool) -> void:
+	if enabled and (_turn_mode or not _alive):
+		return
+	if enabled == _sneaking:
+		return
+	_sneaking = enabled
+	move_speed = _base_move_speed * (SNEAK_SPEED_MULT if enabled else 1.0)
+	if enabled:
+		CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_M, 0.0), "Sneaking", SNEAK_RING_COLOR, 14)
+	_update_sneak_visual()
+
+
+func set_in_cover(zone: Node, inside: bool) -> void:
+	if zone == null:
+		return
+	var key := zone.get_instance_id()
+	var was_in := is_in_cover()
+	if inside:
+		_cover_zones[key] = true
+	else:
+		_cover_zones.erase(key)
+	if was_in != is_in_cover():
+		_update_sneak_visual()
+
+
+func is_in_cover() -> bool:
+	return not _cover_zones.is_empty()
+
+
+## Unseen: in smoke, or sneaking inside cover. Enemies cannot spot the body.
+func is_hidden() -> bool:
+	if is_hidden_by_smoke():
+		return true
+	return _sneaking and is_in_cover()
+
+
+func is_hidden_by_smoke() -> bool:
+	if _turn_mode:
+		return _smoke_turns > 0
+	return _smoke_time_left > 0.0
+
+
+## Smoke Bomb: in a fight the body stays unseen through the coming enemy turn;
+## outside one for SMOKE_EXPLORATION_SECONDS.
+func apply_smoke_cover() -> void:
+	if _turn_mode:
+		_smoke_turns = 1
+	else:
+		_smoke_time_left = SMOKE_EXPLORATION_SECONDS
+	_update_sneak_visual()
+
+
+## What `Enemy3D.can_spot` multiplies its detection range by.
+func get_detection_multiplier() -> float:
+	if not _alive:
+		return 0.0
+	if is_hidden():
+		return DETECTION_MULT_HIDDEN
+	if _sneaking:
+		if active_soul != null and active_soul.kind == Soul.Kind.ROGUE:
+			return DETECTION_MULT_SNEAK_ROGUE
+		return DETECTION_MULT_SNEAK
+	if is_in_cover():
+		return DETECTION_MULT_COVER_UPRIGHT
+	return 1.0
+
+
+## A hit from hiding: outside a fight, on an enemy that has not noticed the
+## body, while sneaking or unseen. Returns the damage to deal and says so.
+func apply_stealth_bonus(target: Node3D, damage: int) -> int:
+	var mult := stealth_multiplier_against(target)
+	if mult <= 1.0:
+		return damage
+	if is_instance_valid(target):
+		CombatFx.popup_text(target.global_position + Vector3(0.0, 1.4, 0.0),
+			"SNEAK ATTACK x%d" % int(mult), COLOR_SNEAK_ATTACK, 22)
+	return maxi(1, int(round(float(damage) * mult)))
+
+
+func stealth_multiplier_against(target: Node3D) -> float:
+	if _turn_mode or target == null or not is_instance_valid(target):
+		return 1.0
+	if not (_sneaking or is_hidden()):
+		return 1.0
+	if not target.has_method("is_unaware") or not bool(target.call("is_unaware")):
+		return 1.0
+	if active_soul != null and active_soul.kind == Soul.Kind.ROGUE:
+		return SNEAK_ATTACK_MULT_ROGUE
+	return SNEAK_ATTACK_MULT
+
+
+func _setup_sneak_ring() -> void:
+	_sneak_ring = RangeRing3D.new()
+	_sneak_ring.name = "SneakRing"
+	add_child(_sneak_ring)
+	_sneak_ring.hide_ring()
+
+
+## The sneak ring at the feet (solid when unseen, dashed when only sneaking)
+## and the dimmed vision light.
+func _update_sneak_visual() -> void:
+	var hidden := is_hidden()
+	if _sneak_ring != null:
+		if _sneaking or hidden:
+			var ring_color := SNEAK_RING_COLOR
+			if hidden:
+				ring_color = Color(0.35, 0.3, 0.55, 0.9)
+			_sneak_ring.show_ring(SNEAK_RING_RADIUS_M, ring_color, not hidden)
+		else:
+			_sneak_ring.hide_ring()
+	if vision_light != null:
+		vision_light.light_energy = _base_light_energy * (SNEAK_LIGHT_ENERGY_MULT if (_sneaking or hidden) else 1.0)
+
+
+# --- Teleport and revive (gameplay expansion) -------------------------------------------
+
+## Blink, Shadowstep, waystones: vanish here, appear on the nearest navmesh
+## point to `world_point`.
+func teleport_to(world_point: Vector3) -> void:
+	var from := global_position
+	var destination := _closest_navigation_point(GroundMath.flatten(world_point))
+	destination = GroundMath.flatten(destination, GroundMath.GROUND_Y)
+	var accent := active_soul.color if active_soul != null else Color.WHITE
+	CombatFx.ring_burst(self, from + Vector3(0.0, 0.05, 0.0), accent, 4.0 * FX_SCREEN_SCALE, 22.0 * FX_SCREEN_SCALE, 0.3)
+	clear_attack_target()
+	manual_path_points.clear()
+	manual_path_index = 0
+	snap_to(destination)
+	CombatFx.ring_burst(self, destination + Vector3(0.0, 0.05, 0.0), accent, 22.0 * FX_SCREEN_SCALE, 4.0 * FX_SCREEN_SCALE, 0.3)
+	_flash_body(Color(accent.r * 2.0, accent.g * 2.0, accent.b * 2.0, 1.0), 0.25)
+	if soul_bodies != null:
+		soul_bodies.punch_active_body()
+
+
+## Back on its feet after a defeat, at `world_point`, with REVIVE_HEALTH_RATIO of
+## its health. Death is otherwise final (the base class), so this undoes it.
+func revive(world_point: Vector3) -> void:
+	_alive = true
+	health = maxi(1, int(round(max_health * REVIVE_HEALTH_RATIO)))
+	visible = true
+	collision_layer = 2
+	cancel_enemy_counter()
+	set_turn_based_combat(false)
+	snap_to(world_point)
+	_update_health_bar()
+	_flash_body(Color(2.0, 2.0, 1.6, 1.0), 0.4)
 
 
 # --- Inventory and the held weapon ------------------------------------------------
@@ -1584,8 +1928,8 @@ func get_melee_damage() -> int:
 		base = weapon.damage
 	# The soul in control decides how hard the shared body swings what it holds.
 	if active_soul != null:
-		return maxi(1, int(round(float(base) * active_soul.melee_mult)))
-	return base
+		return scale_damage(maxi(1, int(round(float(base) * active_soul.melee_mult))))
+	return scale_damage(base)
 
 
 ## Metres. Item ranges are authored in 2D pixels; `attack_range` already is a
