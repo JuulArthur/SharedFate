@@ -2,7 +2,9 @@ extends SceneTree
 
 ## Windowed screenshots of the pre-render test (docs/style-study/prerender_crypt.md):
 ##
-##     godot --path . --script res://scripts/3d/tests/styles/prerender_crypt_capture.gd -- <out_dir>
+##     godot --path . --script res://scripts/3d/tests/styles/prerender_crypt_capture.gd -- <out_dir> [shot,shot,...]
+##
+## The optional second argument keeps only the named shots.
 ##
 ## Loads scenes/3d/tests/styles/prerender_crypt_view.tscn and, for each shot,
 ## puts the mage on a named spot, sets the zoom, waits for the camera and the
@@ -24,11 +26,14 @@ const SHOTS := [
 	["by_brazier", "by_brazier", 5.5, -1.0, false, Vector3.ZERO],
 	["cast", "front_of_pillar", 8.0, 0.68, false, Vector3(1, 0, 0)],
 	["proxies", "on_dais", 17.4, -1.0, true, Vector3.ZERO],
+	# the game's default camera (CameraRig3D, 14 m): the base for HUD mockups
+	["game_zoom", "spawn", 14.0, -1.0, false, Vector3.ZERO],
 ]
 
 var _frames := 0
 var _out_dir := ""
 var _view: Node = null
+var _shots: Array = SHOTS
 var _shot := -1
 var _shot_frame := 0
 
@@ -36,6 +41,9 @@ var _shot_frame := 0
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	_out_dir = args[0] if args.size() > 0 else "user://"
+	if args.size() > 1:
+		var wanted := args[1].split(",")
+		_shots = SHOTS.filter(func(s: Array) -> bool: return wanted.has(s[0]))
 	var packed := load(VIEW_SCENE) as PackedScene
 	if packed == null:
 		push_error("PRERENDER_CAPTURE: cannot load %s" % VIEW_SCENE)
@@ -51,11 +59,11 @@ func _process(_delta: float) -> bool:
 		return false
 	if _shot < 0 or _frames - _shot_frame >= SETTLE_FRAMES:
 		if _shot >= 0:
-			_save(SHOTS[_shot][0])
+			_save(_shots[_shot][0])
 		_shot += 1
-		if _shot >= SHOTS.size():
+		if _shot >= _shots.size():
 			return true
-		var s: Array = SHOTS[_shot]
+		var s: Array = _shots[_shot]
 		_view.call("set_hud_visible", false)
 		_view.call("set_debug_geometry", s[4])
 		_view.call("set_zoom", s[2])
