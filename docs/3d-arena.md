@@ -1,12 +1,12 @@
 # The 3D arena: how to run it
 
-The playable 3D slice is `scenes/3d/arena.tscn`: one clearing ringed by trees, the knight with the three souls, three wolves, a crate and a chest, on the coordinator `scripts/3d/main_3d.gd`. The 2D game is untouched and stays the main scene.
+The playable 3D slice is `scenes/3d/arena.tscn`: one clearing ringed by trees, the knight with the three souls, three wolves, a crate and a chest, on the coordinator `scripts/3d/main_3d.gd`. Since 2026-09-26 it is the game's main scene; the original 2D game stays in the repository, untouched, as reference.
 
 ## Open and run
 
 1. Install Godot 4.7.2 (the version `project.godot` declares; an older editor rewrites scene files). On this PC it is the winget build under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Microsoft.Winget.Source_8wekyb3d8bbwe\`.
 2. Open the repository's `project.godot` in the editor and let the first import finish.
-3. Open `scenes/3d/arena.tscn` and press F6 (Run Current Scene). F5 still runs the 2D hub, `scenes/main.tscn`.
+3. Press F5 (Run Project); it opens the arena. To look at the old 2D hub, open `scenes/main.tscn` and press F6 (Run Current Scene).
 
 Headless check of the whole slice (prints `INTEGRATION OK`):
 
@@ -15,7 +15,7 @@ $godot = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Mi
 & $godot --headless --path . res://scenes/3d/arena.tscn --quit-after 1200
 ```
 
-The `IntegrationSmoke` node in the arena drives that check. It only runs headless, or with the user argument `-- --integration-smoke`, so F6 plays normally.
+The `IntegrationSmoke` node in the arena drives that check. It only runs headless, or with the user argument `-- --integration-smoke`, so F5 and F6 play normally.
 
 ## Controls
 
@@ -48,7 +48,7 @@ Headless check of the detection and ambush rules (prints `DETECTION OK`):
 
 - The generic enemy (`scenes/3d/enemy_3d.tscn`) is still a red box; only the wolf has a model. Each soul has its own body and weapon (knight and sword, rogue and daggers, mage and staff, swapped by `scripts/3d/soul_bodies_3d.gd` on a shift); the equipped item decides damage and range, not the mesh in the hand, so an equipped dagger as the knight still shows the sword.
 - The three souls are rigged (hips, spine, head, arms, legs; a robe bone for the mage) with `idle` and `walk` clips authored in the generator and exported in the glb; the player plays `walk` while moving with the stride matched to its speed. Attacks are still the procedural lunge, squash and tint on `Model` plus the weapon-holder swing, layered over the walk. Wolves are rigged too (9 bones) with `idle` and a diagonal-gait `trot`, played by ground speed from `enemy_3d.gd` and frozen during the death topple.
-- No link from the 2D hub. The arena runs standalone; `LevelLoader.change_level("res://scenes/3d/arena.tscn")` works but nothing calls it, and `story_chapter_id` on the arena root is empty so no chapter opens at start.
+- No link to or from the 2D hub. The arena is the start scene and has no level transitions (`LevelLoader.change_level` accepts 3D scenes, but nothing calls it yet), and `story_chapter_id` on the arena root is empty so no chapter opens at start.
 - Test loot drops beside the player at start (`spawn_test_loot` on the arena root); untick it in the inspector for a clean run.
 - Turn-order portraits are coloured squares; dropped items are the 2D icons as billboards.
 

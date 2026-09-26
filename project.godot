@@ -11,8 +11,12 @@ config_version=5
 [application]
 
 config/name="The Bound Three"
-run/main_scene="res://scenes/main.tscn"
+run/main_scene="res://scenes/3d/arena.tscn"
 config/features=PackedStringArray("4.7")
+
+[audio]
+
+general/text_to_speech=true
 
 [autoload]
 
@@ -22,10 +26,6 @@ LootMenu="*res://scripts/inventory/loot_menu.gd"
 InventoryScreen="*res://scripts/inventory/inventory_screen.gd"
 CombatFx="*res://scripts/combat_fx.gd"
 StoryBook="*res://scripts/story/story_book.gd"
-
-[audio]
-
-general/text_to_speech=true
 
 [display]
 

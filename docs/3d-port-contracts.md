@@ -1,6 +1,6 @@
 # 3D port: conventions and contracts
 
-Status: WP0 deliverable, written 2026-09-20 on branch `feat/3d-test`. Every 3D work package quotes the parts of this file it needs. Deviations found while implementing go in the "Deviations log" at the end, and the lead folds them back into the text before the next package reads it.
+Status: WP0 deliverable, written 2026-09-20 on branch `feat/3d-test`, merged into `main` on 2026-09-26 when the 3D arena became the main scene. The ground rules in section 1 still hold on `main`: the 2D game stays as unchanged reference. Every 3D work package quotes the parts of this file it needs. Deviations found while implementing go in the "Deviations log" at the end, and the lead folds them back into the text before the next package reads it.
 
 Plan and package table: `docs/3d-test-plan.md`. 2D architecture: `CODEBASE_GUIDE.md`.
 

@@ -1,19 +1,23 @@
 # Shared Fate (The Bound Three)
 
-Godot 4.7 isometric CRPG. Read `CODEBASE_GUIDE.md` for the 2D architecture before touching gameplay code.
+Godot 4.7 CRPG. The game is 3D: the main scene is `scenes/3d/arena.tscn` on the coordinator `scripts/3d/main_3d.gd`. How to run, play and test it: `docs/3d-arena.md`.
 
-## Branch `feat/3d-test`: the 3D port
+## The 3D game
 
-The 3D version is being built beside the 2D game, never on top of it. Plan: `docs/3d-test-plan.md`. Conventions and contracts every 3D package must follow: `docs/3d-port-contracts.md`.
+The 3D version was built on branch `feat/3d-test` and merged into `main` on 2026-09-26. Plan and history: `docs/3d-test-plan.md`. Conventions and contracts every 3D change must follow: `docs/3d-port-contracts.md`. The 3D scripts were ported from the 2D ones, so `CODEBASE_GUIDE.md` (the 2D architecture) still explains most of the gameplay flow.
 
-Rules on this branch:
-
-- 2D scripts, scenes and assets are read-only. New code goes under `scripts/3d/`, `scenes/3d/`, `assets/3d/`, `tools/blender/`.
-- Only the shared files named in the contracts document may be edited, and only additively (new optional parameters, widened types, new methods, new guarded branches).
+- New code goes under `scripts/3d/`, `scenes/3d/`, `assets/3d/`, `tools/blender/`.
 - 1 unit = 1 m, +Y up, ground at y = 0, characters face local -Z. 2D y becomes 3D z. All conversions go through `GroundMath`; never inline them.
 - Actors are called duck-typed from the coordinator; keep the method names in the actor contract exactly.
-- Before finishing: run the headless checks in the contracts document (section 11) and `git diff --stat 2d-baseline -- scenes scripts`; only `3d` paths and the allowed additive files may appear.
-- Stay inside the files your work package owns. If another file needs a change, write it in the deviations log of the contracts document and stop.
+- Before finishing: run the headless checks in the contracts document (section 11) and the arena acceptance test in `docs/3d-arena.md` (prints `INTEGRATION OK`).
+- A work package stays inside the files it owns. If another file needs a change, write it in the deviations log of the contracts document and stop.
+
+## The 2D game: reference only
+
+The original 2D game (`scenes/main.tscn` and the 2D scripts, scenes and assets; tag `2d-baseline`) stays in the repository as reference and inspiration for maps and sprites. It is no longer the main scene.
+
+- 2D scripts, scenes and assets are read-only. Only the shared files named in the contracts document may be edited, and only additively (new optional parameters, widened types, new methods, new guarded branches), because the 3D game uses them too.
+- Check with `git diff --stat 2d-baseline -- scenes scripts`: only `3d` paths and the allowed additive files may appear.
 
 ## Working notes
 
