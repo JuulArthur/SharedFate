@@ -91,7 +91,16 @@ enum PlayerTurnAction {
 # Ability bar hotkeys: 4 to 9 pick the bar's abilities in order (1-3 shift).
 const ABILITY_HOTKEYS: Array[Key] = [KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9]
 const SNEAK_KEY := KEY_C
-const SKILL_TREE_KEY := KEY_K
+const CHARACTER_SCREEN_KEY := KEY_K
+# Skill cards (docs/cards-and-attributes.md): forging needs a campfire or
+# waystone this close, outside a fight; cards drop from chests and enemies.
+const REST_POINT_RANGE_M := 4.0
+const REST_POINT_GROUP := &"rest_point"
+const CHEST_CARDS := 2
+const BOSS_CARDS := 3
+const ENEMY_CARD_CHANCE_BASE := 0.35
+const ENEMY_CARD_CHANCE_PER_XP := 0.005
+const ENEMY_CARD_CHANCE_MAX := 0.85
 # A hit from stealth only wakes the struck enemy's close neighbours and anyone
 # who can actually see the body, not the whole 12 m around it.
 const STEALTH_ALERT_RADIUS_M := 4.0
@@ -104,6 +113,13 @@ const ESCAPE_SMOKE_MIN_M := 3.0
 const ANNOUNCE_ESCAPED := "SLIPPED AWAY"
 const RESPAWN_DELAY_SECONDS := 3.0
 const INTERACT_RANGE_SLACK_M := 0.3
+# Exploration: a ranged attack on a target out of reach walks the body in first
+# and stops this far inside the range; the walk gives up after the timeout and
+# follows a moving target every REPATH seconds.
+const RANGED_APPROACH_MARGIN_M := 0.6
+const RANGED_APPROACH_TIMEOUT_SECONDS := 10.0
+const RANGED_APPROACH_REPATH_SECONDS := 0.3
+const RANGED_APPROACH_REPATH_MOVE_M := 0.6
 const INTERACT_WALK_TIMEOUT_SECONDS := 8.0
 const MELEE_APPROACH_TIMEOUT_SECONDS := 5.0
 # Attack spots (`_find_free_attack_spot`): candidates every 15 degrees around
@@ -131,6 +147,11 @@ const TURN_MOVE_GRACE_SECONDS := 1.5
 # menu can be tested without hunting down a crate. Untick in the inspector once
 # the level has its own loot worth testing against.
 @export var spawn_test_loot: bool = true
+# Debug convenience, like the test loot: every skill card this many times in
+# the collection at start, so skills can be forged at once (the Wilds spawn is
+# 6 m from the start waystone). Set to 0 for the real game, where cards only
+# drop from enemies and chests (docs/cards-and-attributes.md).
+@export var starter_card_copies: int = 5
 # Scene instanced by `_spawn_additional_enemy`: the WP3c wolf by default.
 @export var enemy_scene: PackedScene = preload("res://scenes/3d/wolf_3d.tscn")
 # A level authored in the editor ships a baked NavigationMesh; a test scene may
@@ -195,6 +216,7 @@ var selected_spell_id: StringName = &""
 # The Bound Three: the always-visible soul portraits and the shift status line.
 var soul_ui_panel: PanelContainer
 var soul_ui_buttons: Array[Button] = []
+var soul_ui_pool_bars: Array[ProgressBar] = []
 var soul_ui_status_label: Label
 var _soul_ui_styled_kind := -1
 # Overlays (section 7, WP5). The path preview lives under the level root and
@@ -214,7 +236,10 @@ var story_book: StoryBook3D
 # Gameplay expansion: abilities, the skill tree, stealth, the world objects.
 var ability_runner: AbilityRunner3D
 var selected_ability_id: StringName = &""
-var skill_tree_screen: SkillTreeScreen3D
+var character_screen: CharacterScreen3D
+var _card_rng := RandomNumberGenerator.new()
+# Where the next "Card: ..." popup goes (a chest or a fallen enemy).
+var _card_popup_anchor := Vector3.ZERO
 var ability_bar_buttons: Dictionary = {}
 var ability_bar_order: Array[Ability3D] = []
 var _ability_bar_signature := ""
@@ -225,6 +250,10 @@ var hover_hint_label: Label
 var hovered_prop_target: Node3D
 var _pending_interactable: Node3D
 var _pending_interact_deadline_msec := 0
+# The ranged attack waiting for the body to walk into range (exploration):
+# target (or null), point (ground skills), reach, action, deadline, aimed_at,
+# repath_left. Empty when none.
+var _ranged_approach: Dictionary = {}
 var _respawn_scheduled := false
 var _respawn_point := Vector3.ZERO
 var _has_respawn_point := false
@@ -290,7 +319,7 @@ func _exit_tree() -> void:
 	CombatFx.set_shake_target(null)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_camera_rig()
 	_update_combat_state()
 	_update_hover_state()
@@ -298,6 +327,7 @@ func _process(_delta: float) -> void:
 	_update_path_preview()
 	_update_range_rings()
 	_update_pending_interaction()
+	_update_ranged_approach(delta)
 	_update_ability_bar()
 	_update_stealth_label()
 
@@ -312,6 +342,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		var screen_pos: Vector2 = event.position
+		# Any new click drops a walk into range; a new ranged click starts its own.
+		_cancel_ranged_approach()
 		# Loot first. In 2D the pickup swallowed the click itself; in 3D the
 		# coordinator picks (section 8).
 		if _try_click_pickup(screen_pos):
@@ -360,6 +392,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		_request_player_move(ground)
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("ui_accept"):
+		_cancel_ranged_approach()
 		_request_player_attack()
 		get_viewport().set_input_as_handled()
 
@@ -397,6 +430,10 @@ func _connect_enemy_signals(enemy_actor: CharacterBody3D) -> void:
 	var handler := Callable(self, "_on_enemy_provoked_by_hit").bind(enemy_actor)
 	if not enemy_actor.is_connected("provoked_by_hit", handler):
 		enemy_actor.connect("provoked_by_hit", handler)
+	# A slain enemy may drop a skill card as it leaves (docs/cards-and-attributes.md).
+	var leaving := Callable(self, "_on_enemy_leaving").bind(enemy_actor)
+	if not enemy_actor.tree_exiting.is_connected(leaving):
+		enemy_actor.tree_exiting.connect(leaving)
 
 
 func _wire_enemy_ai_targets() -> void:
@@ -826,6 +863,7 @@ func _start_turn_based_combat(ambush: bool = false) -> void:
 	_stop_all_combatants_immediately()
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	_pending_interactable = null
+	_ranged_approach = {}
 	if ability_runner != null:
 		ability_runner.on_combat_started()
 	combat_state = CombatState.ENEMY_TURN if ambush else CombatState.PLAYER_TURN
@@ -1046,10 +1084,12 @@ func _request_player_turn_spell(target_enemy: Node3D = null) -> void:
 
 # --- Exploration attacks (WP13) --------------------------------------------------
 # The throw and the spells outside combat, with the turn mode's rings, targeting
-# and refusals. The player stands still to throw or cast. A hit that lands
-# starts the fight as an ambush through `provoked_by_hit`; a refused or missed
-# attack starts nothing. Melee in exploration is the click-to-attack pursuit and
-# the Space sweep, which the player already owns.
+# and refusals. A target out of range is walked to first (`_start_ranged_approach`)
+# and the attack fires on arrival; any other click cancels the walk. The player
+# stands still to throw or cast. A hit that lands starts the fight as an ambush
+# through `provoked_by_hit`; a refused or missed attack starts nothing. Melee in
+# exploration is the click-to-attack pursuit and the Space sweep, which the
+# player already owns.
 
 func _request_exploration_ranged_attack(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.EXPLORATION:
@@ -1064,7 +1104,7 @@ func _request_exploration_ranged_attack(target_enemy: Node3D = null) -> void:
 		return
 	var max_dist := _get_ranged_attack_range_world()
 	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > max_dist:
-		_fx_popup(_popup_anchor(target_enemy), "Out of range", CombatFx.COLOR_WARNING, 16)
+		_start_ranged_approach(target_enemy, null, max_dist, _request_exploration_ranged_attack.bind(target_enemy))
 		return
 
 	_stop_player_for_exploration_attack()
@@ -1076,7 +1116,9 @@ func _request_exploration_ranged_attack(target_enemy: Node3D = null) -> void:
 	_update_turn_ui()
 
 
-func _request_exploration_spell(target_enemy: Node3D = null) -> void:
+## `spell_id` names the spell when the call comes back from a walk into range
+## (the aim may have changed meanwhile); otherwise the aimed spell.
+func _request_exploration_spell(target_enemy: Node3D = null, spell_id: StringName = &"") -> void:
 	if combat_state != CombatState.EXPLORATION:
 		return
 	if player_turn_action_running:
@@ -1084,6 +1126,9 @@ func _request_exploration_spell(target_enemy: Node3D = null) -> void:
 	if not player.has_method("try_cast_spell"):
 		return
 	var spell := _get_selected_spell()
+	if spell_id != &"":
+		var soul := _get_active_soul()
+		spell = soul.get_spell(spell_id) if soul != null else null
 	if spell == null:
 		return
 	var cooldown := 0
@@ -1096,8 +1141,9 @@ func _request_exploration_spell(target_enemy: Node3D = null) -> void:
 		target_enemy = _get_closest_enemy_to_player()
 	if target_enemy == null:
 		return
-	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > _get_spell_range_world(spell):
-		_fx_popup(_popup_anchor(target_enemy), "Out of range", CombatFx.COLOR_WARNING, 16)
+	var reach := _get_spell_range_world(spell)
+	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > reach:
+		_start_ranged_approach(target_enemy, null, reach, _request_exploration_spell.bind(target_enemy, spell.id))
 		return
 
 	_stop_player_for_exploration_attack()
@@ -1107,6 +1153,100 @@ func _request_exploration_spell(target_enemy: Node3D = null) -> void:
 	if combat_state == CombatState.EXPLORATION:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
 	_update_turn_ui()
+
+
+# --- Walking into range (exploration) ---------------------------------------------
+
+## Walks the body toward `target` (or the ground `point`) until it is within
+## `reach` m, following a target that moves, then calls `action`, which makes
+## the attack. Cancelled by any other click, Space, another action on the bar,
+## Esc, a fight starting, the target dying or RANGED_APPROACH_TIMEOUT_SECONDS.
+func _start_ranged_approach(target: Node3D, point: Variant, reach: float, action: Callable) -> void:
+	if player.has_method("clear_attack_target"):
+		player.call("clear_attack_target")
+	_pending_interactable = null
+	var goal := _approach_goal(target, point)
+	_ranged_approach = {
+		"target": target, "has_target": target != null, "point": point, "reach": reach, "action": action,
+		"deadline": Time.get_ticks_msec() + int(RANGED_APPROACH_TIMEOUT_SECONDS * 1000.0),
+		"aimed_at": goal, "repath_left": RANGED_APPROACH_REPATH_SECONDS,
+	}
+	_walk_into_range(goal, reach)
+
+
+func has_ranged_approach() -> bool:
+	return not _ranged_approach.is_empty()
+
+
+## Drops a walk into range; `stop_walking` also halts the body where it is.
+func _cancel_ranged_approach(stop_walking: bool = false) -> void:
+	if _ranged_approach.is_empty():
+		return
+	_ranged_approach = {}
+	if stop_walking and player.has_method("stop_movement_immediately"):
+		player.call("stop_movement_immediately")
+
+
+func _approach_goal(target: Node3D, point: Variant) -> Vector3:
+	if target != null and is_instance_valid(target):
+		return GroundMath.flatten(target.global_position)
+	return GroundMath.flatten(point as Vector3) if point is Vector3 else GroundMath.flatten(player.global_position)
+
+
+func _walk_into_range(goal: Vector3, reach: float) -> void:
+	var stop := maxf(0.5, reach - RANGED_APPROACH_MARGIN_M)
+	_request_player_move(_compute_approach_world_point(player.global_position, goal, stop))
+
+
+func _update_ranged_approach(delta: float) -> void:
+	if _ranged_approach.is_empty():
+		return
+	# A freed enemy cannot even be cast, so check it before touching it.
+	var raw: Variant = _ranged_approach["target"]
+	var had_target := bool(_ranged_approach["has_target"])
+	var target: Node3D = null
+	if had_target and is_instance_valid(raw):
+		target = raw as Node3D
+	var target_gone := had_target and (target == null \
+		or (target.has_method("is_alive") and not bool(target.call("is_alive"))))
+	if combat_state != CombatState.EXPLORATION or target_gone \
+			or Time.get_ticks_msec() > int(_ranged_approach["deadline"]):
+		_ranged_approach = {}
+		return
+	if player_turn_action_running:
+		return
+	var goal := _approach_goal(target, _ranged_approach["point"])
+	var reach := float(_ranged_approach["reach"])
+	if GroundMath.ground_distance(player.global_position, goal) <= reach - 0.05:
+		var action: Callable = _ranged_approach["action"]
+		_ranged_approach = {}
+		action.call()
+		return
+	# Follow a target that has moved, and nudge a walk that has stalled.
+	_ranged_approach["repath_left"] = float(_ranged_approach["repath_left"]) - delta
+	if float(_ranged_approach["repath_left"]) > 0.0:
+		return
+	_ranged_approach["repath_left"] = RANGED_APPROACH_REPATH_SECONDS
+	var moved := GroundMath.ground_distance(goal, _ranged_approach["aimed_at"] as Vector3) > RANGED_APPROACH_REPATH_MOVE_M
+	var stalled := player.has_method("is_moving") and not bool(player.call("is_moving"))
+	if moved or stalled:
+		_ranged_approach["aimed_at"] = goal
+		_walk_into_range(goal, reach)
+
+
+## A ranged skill aimed out of reach in exploration: walk into range first.
+## True when an approach started (the skill fires on arrival).
+func _approach_for_ability(ability: Ability3D, target: Node3D, point: Variant) -> bool:
+	if combat_state != CombatState.EXPLORATION or ability.is_melee() or ability_runner == null:
+		return false
+	if not ability_runner.block_reason(ability).is_empty():
+		return false
+	var reach := ability_runner.get_range(ability)
+	var goal := _approach_goal(target, point)
+	if GroundMath.ground_distance(player.global_position, goal) <= reach:
+		return false
+	_start_ranged_approach(target, point, reach, _execute_ability.bind(ability, target, point))
+	return true
 
 
 # A throw or a cast is made standing: drop the walk and any melee pursuit.
@@ -2379,7 +2519,7 @@ func _setup_turn_ui() -> void:
 
 	# The action bar. Soul-specific slots are built once and shown for the
 	# soul that has them: the rogue's throw, the knight's Block stance, the
-	# mage's spells. The learned abilities, Sneak and the skill tree slot are
+	# mage's spells. The forged skills, Sneak and the character slot are
 	# added by `_setup_ability_bar`.
 	action_bar = ActionBar3D.new()
 	turn_ui_layer.add_child(action_bar)
@@ -2657,6 +2797,8 @@ func _set_player_turn_action(action: PlayerTurnAction) -> void:
 
 
 func _on_turn_attack_button_pressed() -> void:
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
 	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.ATTACK:
@@ -2671,6 +2813,8 @@ func _on_turn_attack_button_pressed() -> void:
 
 
 func _on_turn_ranged_button_pressed() -> void:
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
 	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.RANGED:
@@ -2685,6 +2829,8 @@ func _on_turn_ranged_button_pressed() -> void:
 
 
 func _on_turn_spell_button_pressed(spell_id: StringName) -> void:
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
 	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.SPELL and selected_spell_id == spell_id:
@@ -2811,6 +2957,24 @@ func _setup_soul_ui() -> void:
 		row.add_child(button)
 		soul_ui_buttons.append(button)
 
+	# Each soul's mana or stamina (docs/cards-and-attributes.md), under its portrait.
+	var pool_row := HBoxContainer.new()
+	pool_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	pool_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(pool_row)
+	soul_ui_pool_bars.clear()
+	for soul: Soul in souls:
+		var bar := ProgressBar.new()
+		bar.custom_minimum_size = Vector2(96, 7)
+		bar.show_percentage = false
+		bar.mouse_filter = Control.MOUSE_FILTER_PASS
+		bar.set_meta("soul_kind", int(soul.kind))
+		bar.add_theme_stylebox_override("background", UiTheme.box(UiTheme.WELL_BG, UiTheme.SLOT_EMPTY_BORDER, 1))
+		var fill := UiTheme.box(soul.color.darkened(0.15), soul.color.darkened(0.15), 0)
+		bar.add_theme_stylebox_override("fill", fill)
+		pool_row.add_child(bar)
+		soul_ui_pool_bars.append(bar)
+
 	soul_ui_status_label = UiTheme.label("", UiTheme.MUTED, 12)
 	soul_ui_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(soul_ui_status_label)
@@ -2865,8 +3029,36 @@ func _update_soul_ui() -> void:
 		CombatState.ENEMY_TURN:
 			status = "%s holds the body  |  F to %s" % [soul.display_name, soul.reaction_name().to_lower()]
 			status_color = CombatFx.COLOR_ENEMY_TURN
+	var buffs_text := _buffs_text()
+	if not buffs_text.is_empty():
+		status += "\n" + buffs_text
 	soul_ui_status_label.text = status
 	soul_ui_status_label.add_theme_color_override("font_color", status_color)
+	_update_pool_bars()
+
+
+func _update_pool_bars() -> void:
+	var player_3d := player as Player3D
+	if player_3d == null or player_3d.get_progression() == null:
+		return
+	var progression := player_3d.get_progression()
+	for bar in soul_ui_pool_bars:
+		var kind := int(bar.get_meta("soul_kind", 0))
+		bar.max_value = progression.pool_max(kind)
+		bar.value = progression.get_pool(kind)
+		bar.tooltip_text = "%s %d / %d" % [Progression3D.resource_name(kind), progression.get_pool(kind), progression.pool_max(kind)]
+
+
+## The body's buffs from card skills, "WARD 2  EMPOWER 1".
+func _buffs_text() -> String:
+	var player_3d := player as Player3D
+	if player_3d == null:
+		return ""
+	var parts: Array[String] = []
+	var buffs := player_3d.get_buffs()
+	for buff_id in buffs:
+		parts.append("%s %d" % [String(buff_id).to_upper(), int(buffs[buff_id]["turns"])])
+	return "  ".join(parts)
 
 
 func _create_placeholder_icon(base_color: Color) -> Texture2D:
@@ -2933,7 +3125,7 @@ func _update_hover_state() -> void:
 	# Outside combat the outline tells you the enemy is a click-to-attack
 	# target; inside it marks what a click will engage. Pickups get the same
 	# push, because a 3D pickup never hit-tests itself (section 8).
-	if InventoryScreen.is_open() or LootMenu.is_open() or _skill_tree_open():
+	if InventoryScreen.is_open() or LootMenu.is_open() or _character_screen_open():
 		_set_hovered_enemy(null)
 		_set_hovered_pickup(null)
 		_set_hovered_prop_target(null)
@@ -3033,34 +3225,139 @@ func _create_turn_enemy_icon_panel_style(is_active: bool, is_hovered: bool) -> S
 
 
 # --- Gameplay expansion --------------------------------------------------------
-# Abilities (AbilityRunner3D, the ability bar), the skill tree (K), sneaking (C),
-# the world's hittables and interactables, slipping away from a fight, respawn
-# after a defeat, and the coordinator interface of docs/gameplay-expansion.md,
-# section 5.
+# Skills (AbilityRunner3D, the action bar), the character screen (K) with
+# attributes and the card forge, skill card drops, sneaking (C), the world's
+# hittables and interactables, slipping away from a fight, respawn after a
+# defeat, and the coordinator interface of docs/gameplay-expansion.md,
+# section 5. Cards and attributes: docs/cards-and-attributes.md.
 
 func _setup_gameplay_expansion() -> void:
 	ability_runner = AbilityRunner3D.new()
 	ability_runner.name = "AbilityRunner"
 	add_child(ability_runner)
+	_card_rng.randomize()
 	var player_3d := player as Player3D
 	if player_3d != null:
 		ability_runner.setup(player_3d)
-		skill_tree_screen = SkillTreeScreen3D.new()
-		skill_tree_screen.name = "SkillTree"
-		add_child(skill_tree_screen)
-		skill_tree_screen.setup(player_3d.get_progression())
-		skill_tree_screen.visibility_changed_to.connect(_on_skill_tree_visibility_changed)
+		character_screen = CharacterScreen3D.new()
+		character_screen.name = "CharacterScreen"
+		add_child(character_screen)
+		character_screen.setup(player_3d.get_progression())
+		character_screen.set_forge_gate(forge_block_reason)
+		character_screen.visibility_changed_to.connect(_on_character_screen_visibility_changed)
+		if player_3d.get_progression() != null:
+			# The starter cards arrive before the popups are wired: no flood of "Card:".
+			if starter_card_copies > 0:
+				for card in SkillCards3D.CARDS:
+					player_3d.get_progression().add_card(card["id"], starter_card_copies)
+			player_3d.get_progression().card_added.connect(_on_card_added)
+	_connect_chests()
 	_setup_ability_bar()
 
 
-func _skill_tree_open() -> bool:
-	return skill_tree_screen != null and skill_tree_screen.is_open()
+func _character_screen_open() -> bool:
+	return character_screen != null and character_screen.is_open()
 
 
-func _on_skill_tree_visibility_changed(open: bool) -> void:
-	# The world waits while the tree is open, as it does under the story book.
+func _on_character_screen_visibility_changed(open: bool) -> void:
+	# The world waits while the screen is open, as it does under the story book.
 	get_tree().paused = open
 	_update_turn_ui()
+
+
+# --- Skill cards: drops and the forge gate (docs/cards-and-attributes.md) --------
+
+## Why the body cannot forge skills here, or "" when it stands within
+## REST_POINT_RANGE_M of a campfire or waystone outside a fight.
+func forge_block_reason() -> String:
+	if combat_state != CombatState.EXPLORATION:
+		return "Not during a fight"
+	if player == null:
+		return "No body"
+	for rest_point in _rest_points():
+		if GroundMath.ground_distance(rest_point.global_position, player.global_position) <= REST_POINT_RANGE_M:
+			return ""
+	return "Rest at a campfire or waystone to forge"
+
+
+## Campfires, waystones and anything in group `rest_point` in this level.
+func _rest_points() -> Array[Node3D]:
+	var found: Array[Node3D] = []
+	_collect_rest_points(self, found)
+	for node in get_tree().get_nodes_in_group(REST_POINT_GROUP):
+		if node is Node3D and not found.has(node):
+			found.append(node as Node3D)
+	return found
+
+
+func _collect_rest_points(node: Node, found: Array[Node3D]) -> void:
+	for child in node.get_children():
+		if child is Campfire3D or child is Waystone3D:
+			found.append(child as Node3D)
+		elif child.get_child_count() > 0 and not (child is CharacterBody3D):
+			_collect_rest_points(child, found)
+
+
+## Chests give skill cards on top of their items.
+func _connect_chests() -> void:
+	for chest in _find_chests(self):
+		if not chest.opened.is_connected(_on_chest_opened):
+			chest.opened.connect(_on_chest_opened.bind(chest))
+
+
+func _find_chests(node: Node) -> Array[LootChest3D]:
+	var found: Array[LootChest3D] = []
+	for child in node.get_children():
+		if child is LootChest3D:
+			found.append(child as LootChest3D)
+		elif child.get_child_count() > 0 and not (child is CharacterBody3D):
+			found.append_array(_find_chests(child))
+	return found
+
+
+func _on_chest_opened(_items: Array[Item], chest: LootChest3D) -> void:
+	var count := CHEST_CARDS + (1 if chest.item_count >= 3 else 0)
+	grant_cards(count, chest.global_position + Vector3(0.0, 1.3, 0.0))
+
+
+## A slain enemy leaves the tree after its death; a live one leaving (the level
+## unloading) drops nothing.
+func _on_enemy_leaving(enemy_actor: Node3D) -> void:
+	if not is_instance_valid(enemy_actor) or not enemy_actor.is_inside_tree():
+		return
+	if enemy_actor.has_method("is_alive") and bool(enemy_actor.call("is_alive")):
+		return
+	# Its children (the overhead anchor) have already left the tree by now.
+	var at := enemy_actor.global_position + Vector3(0.0, 1.8, 0.0)
+	var boss := enemy_actor.has_method("is_boss") and bool(enemy_actor.call("is_boss"))
+	if boss:
+		grant_cards(BOSS_CARDS, at)
+		return
+	var reward := float(enemy_actor.get("experience_reward")) if "experience_reward" in enemy_actor else 25.0
+	var chance := clampf(ENEMY_CARD_CHANCE_BASE + reward * ENEMY_CARD_CHANCE_PER_XP, ENEMY_CARD_CHANCE_BASE, ENEMY_CARD_CHANCE_MAX)
+	if _card_rng.randf() < chance:
+		grant_cards(1, at)
+
+
+## Rolls `count` cards into the collection, with a popup for each at `at`.
+func grant_cards(count: int, at: Vector3) -> Array[StringName]:
+	var granted: Array[StringName] = []
+	var player_3d := player as Player3D
+	if player_3d == null or player_3d.get_progression() == null:
+		return granted
+	var progression := player_3d.get_progression()
+	for i in range(count):
+		var card_id := progression.roll_drop(_card_rng)
+		_card_popup_anchor = at + Vector3(0.0, 0.3 * i, 0.0)
+		progression.add_card(card_id)
+		granted.append(card_id)
+	return granted
+
+
+func _on_card_added(card_id: StringName) -> void:
+	var at := _card_popup_anchor if _card_popup_anchor != Vector3.ZERO else _popup_anchor(player)
+	_fx_popup(at, "Card: %s" % SkillCards3D.display_name(card_id), SkillCards3D.color_of(card_id), 18)
+	_card_popup_anchor = Vector3.ZERO
 
 
 ## K, C and the ability hotkeys, in every combat state. True when handled.
@@ -3068,28 +3365,35 @@ func _handle_expansion_keys(event: InputEvent) -> bool:
 	var key := event as InputEventKey
 	if key == null or not key.pressed or key.echo:
 		return false
-	if key.physical_keycode == SKILL_TREE_KEY:
-		_toggle_skill_tree()
+	if key.physical_keycode == CHARACTER_SCREEN_KEY:
+		_toggle_character_screen()
 		return true
 	if key.physical_keycode == SNEAK_KEY:
 		_toggle_sneak()
+		return true
+	if key.physical_keycode == KEY_ESCAPE and has_ranged_approach():
+		_cancel_ranged_approach(true)
 		return true
 	if key.physical_keycode == KEY_ESCAPE and selected_player_turn_action == PlayerTurnAction.ABILITY:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
 		return true
 	var index := ABILITY_HOTKEYS.find(key.physical_keycode)
-	if index >= 0 and index < ability_bar_order.size():
+	if index >= 0 and index < ability_bar_order.size() and ability_bar_order[index] != null:
 		_on_ability_button_pressed(ability_bar_order[index].id)
 		return true
 	return false
 
 
-func _toggle_skill_tree() -> void:
-	if skill_tree_screen == null:
+func _toggle_character_screen() -> void:
+	if character_screen == null:
 		return
 	if InventoryScreen.is_open():
 		return
-	skill_tree_screen.toggle()
+	if character_screen.is_open():
+		character_screen.set_open(false)
+		return
+	var soul := _get_active_soul()
+	character_screen.set_open(true, int(soul.kind) if soul != null else -1)
 
 
 func _toggle_sneak() -> void:
@@ -3105,21 +3409,38 @@ func _toggle_sneak() -> void:
 func _get_selected_ability() -> Ability3D:
 	if selected_ability_id == &"":
 		return null
-	return AbilityCatalog3D.get_ability(selected_ability_id)
+	return _find_ability(selected_ability_id)
 
 
-## The abilities on the bar: the active soul's learned ones, then any-soul ones.
+## A skill on the bar or a catalog ability, by id.
+func _find_ability(ability_id: StringName) -> Ability3D:
+	for ability in _bar_abilities():
+		if ability != null and ability.id == ability_id:
+			return ability
+	return AbilityCatalog3D.get_ability(ability_id)
+
+
+## The abilities on the bar, one entry per hotkey from 4: the soul in control's
+## skill slots (null for an empty slot, so a slot keeps its key), then the
+## catalog abilities every soul has (Toss Pebble).
 func _bar_abilities() -> Array[Ability3D]:
 	var result: Array[Ability3D] = []
 	var soul := _get_active_soul()
 	var player_3d := player as Player3D
 	if soul == null or player_3d == null or player_3d.get_progression() == null:
 		return result
-	return player_3d.get_progression().learned_for_soul(int(soul.kind))
+	var kind := int(soul.kind)
+	var progression := player_3d.get_progression()
+	for slot in range(SkillCards3D.SKILLS_PER_SOUL):
+		result.append(progression.skill_ability(kind, slot))
+	result.append_array(AbilityCatalog3D.for_soul(kind))
+	return result
 
 
 func _on_ability_button_pressed(ability_id: StringName) -> void:
-	var ability := AbilityCatalog3D.get_ability(ability_id)
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
+	var ability := _find_ability(ability_id)
 	if ability == null or ability_runner == null:
 		return
 	if not _player_can_pick_attack_aim():
@@ -3159,10 +3480,14 @@ func _handle_ability_click(screen_pos: Vector2) -> void:
 		if target == null:
 			_fx_popup(_popup_anchor(player), "Pick an enemy", CombatFx.COLOR_WARNING, 14)
 			return
+		if _approach_for_ability(ability, target, null):
+			return
 		_execute_ability(ability, target, null)
 		return
 	var ground: Variant = _pick_ground(screen_pos)
 	if ground == null:
+		return
+	if _approach_for_ability(ability, null, ground):
 		return
 	_execute_ability(ability, null, ground)
 
@@ -3220,16 +3545,17 @@ func _approach_for_melee(target: Node3D, reach: float) -> void:
 			return
 
 
-## The learned abilities go into the action bar's Skills group (the active
-## soul's) and Utility group (any soul's, like Toss Pebble), numbered 4-9 in
-## `ability_bar_order`. The skill tree slot closes the Skills group and Sneak
-## closes Utility; `_rebuild_ability_bar` inserts the abilities before them.
+## The forged skills go into the action bar's Skills group (the soul in
+## control's slots, keys 4-6) and the catalog's Utility group (Toss Pebble,
+## key 7), numbered from 4 in `ability_bar_order`. The character slot (K)
+## closes the Skills group and Sneak closes Utility; `_rebuild_ability_bar`
+## inserts the skills before them.
 func _setup_ability_bar() -> void:
-	skills_button = action_bar.add_slot(ActionBar3D.GROUP_SKILLS, &"skill_tree", "Skill Tree", UiTheme.TITLE)
+	skills_button = action_bar.add_slot(ActionBar3D.GROUP_SKILLS, &"skill_tree", "Character", UiTheme.TITLE)
 	skills_button.hotkey = "K"
-	skills_button.detail = "Learn new abilities with skill points"
-	skills_button.tooltip_text = "Skill Tree (K)\nSpend skill points on new abilities."
-	skills_button.pressed.connect(_toggle_skill_tree)
+	skills_button.detail = "Attributes, and skills forged from cards"
+	skills_button.tooltip_text = "Character (K)\nSpend attribute points on the three souls, and forge skills from cards at a campfire or waystone."
+	skills_button.pressed.connect(_toggle_character_screen)
 
 	sneak_button = action_bar.add_slot(ActionBar3D.GROUP_UTILITY, &"sneak", "Sneak", Color(0.8, 0.7, 1.0, 1.0), true)
 	sneak_button.aims = false
@@ -3239,7 +3565,7 @@ func _setup_ability_bar() -> void:
 	sneak_button.pressed.connect(_toggle_sneak)
 
 	stealth_label = UiTheme.label("", Color(0.8, 0.7, 1.0, 1.0), 14)
-	stealth_label.position = Vector2(22.0, 150.0)
+	stealth_label.position = Vector2(22.0, 186.0)
 	stealth_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	turn_ui_layer.add_child(stealth_label)
 
@@ -3260,10 +3586,13 @@ func _rebuild_ability_bar(abilities: Array[Ability3D]) -> void:
 	var utility_index := 0
 	for i in range(abilities.size()):
 		var ability := abilities[i]
+		if ability == null:
+			continue
 		var any_soul := ability.soul_kind == Ability3D.ANY_SOUL
 		var group := ActionBar3D.GROUP_UTILITY if any_soul else ActionBar3D.GROUP_SKILLS
 		var index := utility_index if any_soul else skills_index
-		var slot := action_bar.add_slot(group, ability.id, ability.display_name, ability.color, true, index)
+		var icon_key := ability.icon if ability.icon != &"" else ability.id
+		var slot := action_bar.add_slot(group, icon_key, ability.display_name, ability.color, true, index)
 		if any_soul:
 			utility_index += 1
 		else:
@@ -3280,9 +3609,10 @@ func _update_ability_bar() -> void:
 	if action_bar == null or skills_button == null:
 		return
 	var abilities := _bar_abilities()
+	# By content too: a slot forged anew keeps its id.
 	var signature := ""
 	for ability in abilities:
-		signature += String(ability.id) + ","
+		signature += ("%s:%s:%s," % [ability.id, ability.display_name, ability.description]) if ability != null else "-,"
 	if signature != _ability_bar_signature:
 		_ability_bar_signature = signature
 		_rebuild_ability_bar(abilities)
@@ -3291,6 +3621,8 @@ func _update_ability_bar() -> void:
 		can_pick = not bool(player.call("is_moving"))
 	for i in range(ability_bar_order.size()):
 		var ability := ability_bar_order[i]
+		if ability == null:
+			continue
 		var button := ability_bar_buttons.get(ability.id) as ActionSlot3D
 		if button == null:
 			continue
@@ -3310,9 +3642,9 @@ func _update_ability_bar() -> void:
 	var points := 0
 	var player_3d := player as Player3D
 	if player_3d != null and player_3d.get_progression() != null:
-		points = player_3d.get_progression().skill_points
+		points = player_3d.get_progression().attribute_points
 	skills_button.badge = str(points) if points > 0 else ""
-	skills_button.caption = "Skill Tree  (%d point%s to spend)" % [points, "" if points == 1 else "s"] if points > 0 else "Skill Tree"
+	skills_button.caption = "Character  (%d attribute point%s to spend)" % [points, "" if points == 1 else "s"] if points > 0 else "Character"
 	action_bar.refresh()
 
 

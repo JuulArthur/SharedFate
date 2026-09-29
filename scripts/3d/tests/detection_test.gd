@@ -51,6 +51,8 @@ const THROW_WOLF_B := Vector3(-10.0, 0.0, 11.0)
 const THROW_WOLF_C := Vector3(-10.0, 0.0, -13.0)
 # (e) Beyond the mage's 10 m spell range.
 const SPELL_WOLF_A := Vector3(1.0, 0.0, 0.0)
+# Far enough (15 m) that the walk into the 10 m spell range takes a while.
+const APPROACH_WOLF_A := Vector3(5.0, 0.0, 0.0)
 # (g) The obstacle is a 2 m box centred at (4, 1, -3): the wolf 4 m from the
 # player with the box between them; walking to the clear point opens the line.
 const LOS_PLAYER := Vector3(4.0, 0.0, -1.0)
@@ -95,7 +97,8 @@ func _run() -> void:
 		["spotted", _step_spotted],
 		["joining", _step_joining],
 		["throw_ambush", _step_throw_ambush],
-		["spell_out_of_range", _step_spell_out_of_range],
+		["approach_cancel", _step_approach_cancel],
+		["spell_approach", _step_spell_approach],
 		["line_of_sight", _step_line_of_sight],
 		["melee_ambush", _step_melee_ambush],
 	]
@@ -285,9 +288,73 @@ func _step_throw_ambush() -> String:
 	return ""
 
 
-## (e) A mage spell beyond its range is refused and starts nothing.
-func _step_spell_out_of_range() -> String:
-	_reset_to_exploration(PLAYER_START, SPELL_WOLF_A, THROW_WOLF_B, THROW_WOLF_C)
+## (e) A mage spell beyond its range walks the mage into range; a click on the
+## ground on the way cancels it: no spell, no fight.
+func _step_approach_cancel() -> String:
+	var armed := await _arm_arcane_burst_out_of_range()
+	if not armed.is_empty():
+		return armed
+	var before := _wolf_a.health
+	var start := _player.global_position
+	_main._request_exploration_spell(_wolf_a)
+	if not _main.has_ranged_approach():
+		return "an out-of-range spell did not start a walk into range"
+	await _pause(0.3)
+	if GroundMath.ground_distance(_player.global_position, _wolf_a.global_position) \
+			>= GroundMath.ground_distance(start, _wolf_a.global_position):
+		return "the mage is not walking toward WolfA"
+	if not _main.has_ranged_approach():
+		return "the walk ended before the click (%.2f m from WolfA)" % GroundMath.ground_distance(_player.global_position, _wolf_a.global_position)
+	# A plain left click on the ground 2 m behind the mage, as the player would
+	# make it, through the coordinator's input handler.
+	var camera := _main._get_active_camera()
+	if camera == null:
+		return "no active camera to click through"
+	var click := InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_LEFT
+	click.pressed = true
+	click.position = camera.unproject_position(GroundMath.flatten(_player.global_position) + Vector3(-2.0, 0.0, 0.0))
+	if _main._pick_enemy(click.position) != null or _main._pick_ground(click.position) == null:
+		return "the test click does not land on bare ground"
+	_main._unhandled_input(click)
+	if _main.has_ranged_approach():
+		return "a ground click did not cancel the walk into range"
+	await _pause(1.5)
+	if _wolf_a.health != before:
+		return "the cancelled spell still hurt WolfA (%d -> %d)" % [before, _wolf_a.health]
+	if _main.combat_state != Main3D.CombatState.EXPLORATION:
+		return "a cancelled spell started combat (state %d)" % _main.combat_state
+	if _player.get_spell_cooldown(Soul.SPELL_ARCANE_BURST) != 0:
+		return "the cancelled spell went on cooldown (%d)" % _player.get_spell_cooldown(Soul.SPELL_ARCANE_BURST)
+	_main._set_player_turn_action(Main3D.PlayerTurnAction.MOVE)
+	print("[detection] out-of-range Arcane Burst walk cancelled by a ground click")
+	return ""
+
+
+## (e2) Left alone, the walk ends in range and the spell lands: an ambush.
+func _step_spell_approach() -> String:
+	var armed := await _arm_arcane_burst_out_of_range()
+	if not armed.is_empty():
+		return armed
+	var spell := _player.get_active_soul().get_spell(Soul.SPELL_ARCANE_BURST)
+	var before := _wolf_a.health
+	_main._request_exploration_spell(_wolf_a)
+	if not _main.has_ranged_approach():
+		return "an out-of-range spell did not start a walk into range"
+	if not await _wait_until(func() -> bool: return _wolf_a.health < before, MOVE_TIMEOUT_SECONDS):
+		return "the spell never landed (approach %s, %.2f m from WolfA)" % [str(_main.has_ranged_approach()),
+			GroundMath.ground_distance(_player.global_position, _wolf_a.global_position)]
+	var distance := GroundMath.ground_distance(_player.global_position, _wolf_a.global_position)
+	if distance > spell.range_meters + 0.1:
+		return "cast from %.2f m, beyond the %.1f m range" % [distance, spell.range_meters]
+	if not await _wait_until(func() -> bool: return _main.combat_state != Main3D.CombatState.EXPLORATION, AMBUSH_TIMEOUT_SECONDS):
+		return "the spell that landed did not start the fight as an ambush"
+	print("[detection] Arcane Burst walked in and cast from %.2f m (range %.1f m)" % [distance, spell.range_meters])
+	return ""
+
+
+func _arm_arcane_burst_out_of_range() -> String:
+	_reset_to_exploration(PLAYER_START, APPROACH_WOLF_A, THROW_WOLF_B, THROW_WOLF_C)
 	await get_tree().process_frame
 	_main._request_shift(int(Soul.Kind.MAGE))
 	if _player.get_active_soul().kind != Soul.Kind.MAGE:
@@ -302,19 +369,6 @@ func _step_spell_out_of_range() -> String:
 	var distance := GroundMath.ground_distance(_player.global_position, _wolf_a.global_position)
 	if distance <= spell.range_meters:
 		return "WolfA is %.2f m away, inside the %.1f m spell range" % [distance, spell.range_meters]
-	var before := _wolf_a.health
-	await _main._request_exploration_spell(_wolf_a)
-	await _pause(SETTLE_SECONDS)
-	if _wolf_a.health != before:
-		return "the refused spell still hurt WolfA (%d -> %d)" % [before, _wolf_a.health]
-	if _main.combat_state != Main3D.CombatState.EXPLORATION:
-		return "a refused spell started combat (state %d)" % _main.combat_state
-	if _player.get_spell_cooldown(Soul.SPELL_ARCANE_BURST) != 0:
-		return "the refused spell went on cooldown (%d)" % _player.get_spell_cooldown(Soul.SPELL_ARCANE_BURST)
-	if _main.selected_player_turn_action != Main3D.PlayerTurnAction.SPELL:
-		return "the refusal dropped the spell aim"
-	_main._set_player_turn_action(Main3D.PlayerTurnAction.MOVE)
-	print("[detection] Arcane Burst at %.2f m refused, no combat" % distance)
 	return ""
 
 

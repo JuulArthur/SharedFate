@@ -1,16 +1,20 @@
 class_name AbilityRunner3D
 extends Node
 
-## Carries out the abilities in AbilityCatalog3D for the player, and owns their
-## cooldowns. Created by the coordinator (main_3d.gd) as a child named
-## "AbilityRunner"; the coordinator picks the target and awaits `execute`.
+## Carries out the player's skills and owns their cooldowns. Created by the
+## coordinator (main_3d.gd) as a child named "AbilityRunner"; the coordinator
+## picks the target and awaits `execute`.
+##
+## Card skills (docs/cards-and-attributes.md) are run from their compiled
+## fields, by delivery: a bolt, a chain, a nova, a throw, a strike, a trap
+## field, a leap, a sweep, a buff or heal on the body, or a summoned spirit.
+## They cost the soul's mana or stamina on top of the action or bonus action.
+## The only catalog ability left is Toss Pebble (AbilityCatalog3D).
 ##
 ## Everything reaches actors duck-typed, per docs/gameplay-expansion.md: enemies
-## through `receive_damage`, `apply_status` (fallback `apply_root`),
-## `knockback`, `is_back_turned_to`, `is_unaware`, `investigate`; hittables
-## (barrels) through `receive_damage`; the rogue's snare through the `Trap3D`
-## class that track A provides, looked up by class name so this file loads
-## without it.
+## through `receive_damage`, `take_environment_damage` (trap fields),
+## `apply_status` (fallback `apply_root`), `knockback`, `is_back_turned_to`,
+## `is_unaware`, `investigate`; hittables (barrels) through `receive_damage`.
 
 signal ability_used(ability: Ability3D)
 
@@ -18,18 +22,19 @@ const EXPLORATION_SECONDS_PER_TURN := Player3D.EXPLORATION_SECONDS_PER_TURN
 const RANGE_TOLERANCE_M := 0.05
 const FX_SCREEN_SCALE := 3.35
 const HIT_HEIGHT_M := 1.0
-## Charge: the rush is this fast, and a prop in the way stops it.
-const CHARGE_SECONDS := 0.2
-const CHARGE_BLOCK_MASK := 8
-## Shadowstep lands this far behind the target's collision surface.
-const SHADOWSTEP_GAP_M := 0.35
-## Blink refuses a point this far off the navmesh (a wall, a tree).
-const BLINK_MAX_OFFMESH_M := 0.8
+## A leap is this fast, and a prop in the way stops it.
+const LEAP_SECONDS := 0.2
+const LEAP_BLOCK_MASK := 8
+## A spirit refuses a point this far off the navmesh (a wall, a tree).
+const MAX_OFFMESH_M := 0.8
+const CHAIN_FALLOFF := 0.8
 const COLOR_REFUSE := CombatFx.COLOR_WARNING
 
 var player: Player3D = null
 var _cooldowns: Dictionary = {}
 var _exploration_tick_left := EXPLORATION_SECONDS_PER_TURN
+var _fields: Array[SkillField3D] = []
+var _totems: Array[SkillTotem3D] = []
 
 
 func setup(the_player: Player3D) -> void:
@@ -39,7 +44,8 @@ func setup(the_player: Player3D) -> void:
 func _physics_process(delta: float) -> void:
 	if player == null or player.is_in_turn_based_combat():
 		return
-	if _cooldowns.is_empty():
+	_prune()
+	if _cooldowns.is_empty() and _fields.is_empty() and _totems.is_empty():
 		_exploration_tick_left = EXPLORATION_SECONDS_PER_TURN
 		return
 	_exploration_tick_left -= delta
@@ -47,6 +53,7 @@ func _physics_process(delta: float) -> void:
 		return
 	_exploration_tick_left = EXPLORATION_SECONDS_PER_TURN
 	_tick_cooldowns()
+	_tick_persistent()
 
 
 # --- Cooldowns ---------------------------------------------------------------------
@@ -55,12 +62,14 @@ func get_cooldown(ability_id: StringName) -> int:
 	return int(_cooldowns.get(ability_id, 0))
 
 
-## The player's turn starts: every cooldown melts one turn.
+## The player's turn starts: every cooldown melts one turn, trap fields strike
+## whoever stands in them and spirits strike.
 func on_player_turn_started() -> void:
 	_tick_cooldowns()
+	_tick_persistent()
 
 
-## Abilities start every fight fresh, like the spells.
+## Skills start every fight fresh, like the spells.
 func on_combat_started() -> void:
 	_cooldowns.clear()
 
@@ -72,6 +81,38 @@ func _tick_cooldowns() -> void:
 			_cooldowns.erase(ability_id)
 		else:
 			_cooldowns[ability_id] = left
+
+
+func get_fields() -> Array[SkillField3D]:
+	_prune()
+	return _fields
+
+
+func get_totems() -> Array[SkillTotem3D]:
+	_prune()
+	return _totems
+
+
+func _tick_persistent() -> void:
+	_prune()
+	for field in _fields.duplicate():
+		field.tick()
+	for totem in _totems.duplicate():
+		totem.tick()
+	_prune()
+
+
+func _prune() -> void:
+	var fields: Array[SkillField3D] = []
+	for field in _fields:
+		if is_instance_valid(field) and field.turns_left > 0:
+			fields.append(field)
+	_fields = fields
+	var totems: Array[SkillTotem3D] = []
+	for totem in _totems:
+		if is_instance_valid(totem) and totem.turns_left > 0:
+			totems.append(totem)
+	_totems = totems
 
 
 # --- Availability -------------------------------------------------------------------
@@ -88,6 +129,10 @@ func block_reason(ability: Ability3D) -> String:
 		return "Only in a fight"
 	if in_fight and not player.is_turn_active():
 		return "Not your turn"
+	if ability.card_skill:
+		var soul := player.get_active_soul()
+		if soul == null or int(soul.kind) != ability.soul_kind:
+			return "Another soul's skill"
 	var cooldown := get_cooldown(ability.id)
 	if cooldown > 0:
 		return "Recharging (%d)" % cooldown
@@ -96,6 +141,10 @@ func block_reason(ability: Ability3D) -> String:
 			return "Bonus action used"
 	elif not player.has_action():
 		return "No action left" if in_fight else "Not ready"
+	if ability.resource_cost > 0:
+		var progression := player.get_progression()
+		if progression != null and not progression.can_afford(ability.soul_kind, ability.resource_cost):
+			return "Not enough %s" % Progression3D.resource_name(ability.soul_kind).to_lower()
 	return ""
 
 
@@ -132,51 +181,14 @@ func execute(ability: Ability3D, target: Node3D = null, point: Variant = null) -
 				return false
 
 	var ok := true
-	match ability.id:
-		AbilityCatalog3D.SHIELD_BASH, AbilityCatalog3D.POISON_BLADE, AbilityCatalog3D.BACKSTAB:
-			_pay(ability)
-			await _melee_strike(ability, target)
-		AbilityCatalog3D.CLEAVE:
-			_pay(ability)
-			await _cleave(ability)
-		AbilityCatalog3D.SECOND_WIND:
-			_pay(ability)
-			_second_wind()
-		AbilityCatalog3D.CHARGE:
-			ok = _charge_path_clear(target)
-			if ok:
-				_pay(ability)
-				await _charge(ability, target)
-		AbilityCatalog3D.SHADOWSTEP:
-			_pay(ability)
-			_shadowstep(target)
-		AbilityCatalog3D.SET_SNARE:
-			ok = _set_snare(point)
-			if ok:
-				_pay(ability)
-		AbilityCatalog3D.SMOKE_BOMB:
-			_pay(ability)
-			_smoke_bomb(ability)
-		AbilityCatalog3D.BLINK:
-			ok = _blink_point_valid(point)
-			if ok:
-				_pay(ability)
-				player.teleport_to(point)
-		AbilityCatalog3D.FIREBALL:
-			_pay(ability)
-			await _fireball(ability, target)
-		AbilityCatalog3D.CHAIN_LIGHTNING:
-			_pay(ability)
-			await _chain_lightning(ability, target)
-		AbilityCatalog3D.FROST_NOVA:
-			_pay(ability)
-			_frost_nova(ability)
-		AbilityCatalog3D.DISTRACT:
-			_pay(ability)
-			await _distract(ability, point)
-		_:
-			push_warning("AbilityRunner3D: no effect for %s" % ability.id)
-			ok = false
+	if ability.card_skill:
+		ok = await _execute_card_skill(ability, target, point)
+	elif ability.id == AbilityCatalog3D.DISTRACT:
+		_pay(ability)
+		await _distract(ability, point)
+	else:
+		push_warning("AbilityRunner3D: no effect for %s" % ability.id)
+		ok = false
 	if ok:
 		ability_used.emit(ability)
 	return ok
@@ -189,44 +201,188 @@ func _pay(ability: Ability3D) -> void:
 		player.spend_action()
 	if ability.cooldown_turns > 0:
 		_cooldowns[ability.id] = ability.cooldown_turns
+	if ability.resource_cost > 0 and player.get_progression() != null:
+		player.get_progression().spend_pool(ability.soul_kind, ability.resource_cost)
 	CombatFx.popup_text(_anchor(player) + Vector3(0.0, 0.35, 0.0), ability.display_name, ability.color, 16)
 
 
-# --- Effects ------------------------------------------------------------------------------
+func _execute_card_skill(ability: Ability3D, target: Node3D, point: Variant) -> bool:
+	match ability.delivery:
+		Ability3D.Delivery.BOLT:
+			_pay(ability)
+			await _card_bolt(ability, target)
+		Ability3D.Delivery.CHAIN:
+			_pay(ability)
+			await _card_chain(ability, target)
+		Ability3D.Delivery.NOVA:
+			_pay(ability)
+			_card_nova(ability)
+		Ability3D.Delivery.THROW:
+			_pay(ability)
+			await _card_throw(ability, target)
+		Ability3D.Delivery.STRIKE:
+			_pay(ability)
+			await _card_strike(ability, target)
+		Ability3D.Delivery.FIELD:
+			var center: Vector3 = point if point is Vector3 else player.global_position
+			_pay(ability)
+			_card_field(ability, center)
+		Ability3D.Delivery.LEAP:
+			if not _leap_path_clear(target):
+				return false
+			_pay(ability)
+			await _card_leap(ability, target)
+		Ability3D.Delivery.SWEEP:
+			_pay(ability)
+			await _card_sweep(ability)
+		Ability3D.Delivery.SELF:
+			_pay(ability)
+			_card_self(ability)
+		Ability3D.Delivery.TOTEM:
+			if not _ground_point_valid(point, "Can't raise a spirit there"):
+				return false
+			_pay(ability)
+			_card_totem(ability, point as Vector3)
+		_:
+			push_warning("AbilityRunner3D: card skill %s has no delivery" % ability.id)
+			return false
+	return true
 
-## Shield Bash, Poison Blade, Backstab: one swing with the contact delay.
-func _melee_strike(ability: Ability3D, target: Node3D) -> void:
+
+# --- Card skill deliveries --------------------------------------------------------------
+
+func _card_bolt(ability: Ability3D, target: Node3D) -> void:
 	player.face_toward(target.global_position)
-	var damage := _ability_damage(ability)
-	var bonus_text := ""
-	if ability.id == AbilityCatalog3D.BACKSTAB and _is_exposed(target):
-		damage = maxi(1, int(round(float(damage) * AbilityCatalog3D.BACKSTAB_MULT)))
-		bonus_text = "BACKSTAB!"
-	damage = player.apply_stealth_bonus(target, damage)
+	player._flash_ranged_feedback(target, true)
+	var primary := target
+	var impact := GroundMath.flatten(target.global_position)
+	await player._launch_bolt(target, ability.color)
+	if is_instance_valid(primary):
+		impact = GroundMath.flatten(primary.global_position)
+	var victims: Array[Node3D] = []
+	if ability.radius_m > 0.0:
+		victims = _targets_within(impact, ability.radius_m)
+		if is_instance_valid(primary) and _is_alive(primary) and not victims.has(primary):
+			victims.append(primary)
+		_burst_fx(impact, ability)
+	elif is_instance_valid(primary) and _is_alive(primary):
+		victims.append(primary)
+	for victim in victims:
+		_card_hit(ability, victim, victim == primary)
+	if not victims.is_empty():
+		CombatFx.hit_stop(0.05, 0.25)
+	_after_hits(victims)
+
+
+func _card_chain(ability: Ability3D, target: Node3D) -> void:
+	player.face_toward(target.global_position)
+	player._flash_ranged_feedback(target, true)
+	await player._launch_bolt(target, ability.color)
+	var scale := 1.0
+	var hit_list: Array[Node3D] = []
+	var current := target
+	var from_point := player._bolt_start_position()
+	for jump in range(ability.chain_jumps + 1):
+		if current == null or not is_instance_valid(current) or not _is_alive(current):
+			break
+		var strike_point := current.global_position + Vector3(0.0, HIT_HEIGHT_M, 0.0)
+		if jump > 0:
+			_zap(from_point, strike_point, ability.color)
+			await get_tree().create_timer(0.08).timeout
+			if not is_instance_valid(current):
+				break
+		_card_hit(ability, current, jump == 0, false, scale)
+		hit_list.append(current)
+		from_point = strike_point
+		scale *= CHAIN_FALLOFF
+		current = _nearest_target(current.global_position, ability.radius_m, hit_list)
+	CombatFx.hit_stop(0.05, 0.25)
+	_after_hits(hit_list)
+
+
+func _card_nova(ability: Ability3D) -> void:
+	var victims := _targets_within(player.global_position, ability.radius_m)
+	_burst_fx(player.global_position, ability, player)
+	CombatFx.shake(4.0, 0.16)
+	for victim in victims:
+		_card_hit(ability, victim, true)
+	_after_hits(victims)
+
+
+func _card_throw(ability: Ability3D, target: Node3D) -> void:
+	player.face_toward(target.global_position)
+	player._flash_ranged_feedback(target)
+	var victim := target
+	await player._launch_bolt(target, ability.color)
+	if is_instance_valid(victim) and _is_alive(victim):
+		_card_hit(ability, victim, true)
+		CombatFx.hit_stop(0.04, 0.3)
+		_after_hits([victim])
+
+
+func _card_strike(ability: Ability3D, target: Node3D) -> void:
+	player.face_toward(target.global_position)
 	var victim := target
 	await player._swing_melee(func() -> void:
 		if not is_instance_valid(victim):
 			return
-		if not bonus_text.is_empty():
-			CombatFx.popup_text(_anchor(victim) + Vector3(0.0, 0.3, 0.0), bonus_text, ability.color, 22)
-		_hit(victim, damage)
-		_apply_ability_status(ability, victim)
-		if ability.knockback_m > 0.0 and victim.has_method("knockback"):
-			victim.call("knockback", player.global_position, ability.knockback_m)
+		_card_hit(ability, victim, true)
 		CombatFx.hit_stop(0.07, 0.2)
 	)
 	_after_hits([victim])
 
 
-func _cleave(ability: Ability3D) -> void:
+func _card_field(ability: Ability3D, center: Vector3) -> void:
+	var holder := player.get_parent()
+	if holder == null:
+		return
+	var field := SkillField3D.new()
+	field.name = "SkillField"
+	field.setup(ability)
+	holder.add_child(field)
+	field.global_position = GroundMath.flatten(center)
+	field.strike_requested.connect(_on_field_strike)
+	_fields.append(field)
+	_burst_fx(field.global_position, ability)
+	field.strike_everyone_inside()
+
+
+func _card_leap(ability: Ability3D, target: Node3D) -> void:
+	var destination := _leap_destination(target)
+	player.stop_movement_immediately()
+	player.face_toward(target.global_position)
+	var tween := player.create_tween()
+	tween.tween_property(player, "global_position", destination, LEAP_SECONDS) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	await tween.finished
+	if not is_instance_valid(player):
+		return
+	player.snap_to(destination)
+	CombatFx.shake(5.0, 0.16)
+	if ability.radius_m <= 0.0:
+		if is_instance_valid(target) and _is_alive(target):
+			await _card_strike(ability, target)
+		return
+	var primary := target
 	var victims := _targets_within(player.global_position, ability.radius_m)
-	var damage := _ability_damage(ability)
-	CombatFx.ring_burst(player, player.global_position + Vector3(0.0, 0.05, 0.0), ability.color,
-		6.0 * FX_SCREEN_SCALE, player._screen_radius_px(player.global_position, ability.radius_m), 0.3)
+	_burst_fx(player.global_position, ability, player)
 	await player._swing_melee(func() -> void:
 		for victim in victims:
 			if is_instance_valid(victim):
-				_hit(victim, player.apply_stealth_bonus(victim, damage))
+				_card_hit(ability, victim, victim == primary)
+		if not victims.is_empty():
+			CombatFx.hit_stop(0.06, 0.2)
+	)
+	_after_hits(victims)
+
+
+func _card_sweep(ability: Ability3D) -> void:
+	var victims := _targets_within(player.global_position, ability.radius_m)
+	_burst_fx(player.global_position, ability, player)
+	await player._swing_melee(func() -> void:
+		for victim in victims:
+			if is_instance_valid(victim):
+				_card_hit(ability, victim, true)
 		if not victims.is_empty():
 			CombatFx.hit_stop(0.06, 0.2)
 			CombatFx.shake(4.0, 0.15)
@@ -236,21 +392,118 @@ func _cleave(ability: Ability3D) -> void:
 	_after_hits(victims)
 
 
-func _second_wind() -> void:
-	var amount := int(round(player.max_health * AbilityCatalog3D.SECOND_WIND_HEAL_RATIO))
-	player.heal(amount)
-	CombatFx.ring_burst(player, player.global_position + Vector3(0.0, 0.05, 0.0), CombatFx.COLOR_HEAL,
+func _card_self(ability: Ability3D) -> void:
+	var color := CombatFx.COLOR_HEAL if ability.heal_ratio > 0.0 else ability.color
+	CombatFx.ring_burst(player, player.global_position + Vector3(0.0, 0.05, 0.0), color,
 		8.0 * FX_SCREEN_SCALE, 26.0 * FX_SCREEN_SCALE, 0.35)
+	if ability.heal_ratio > 0.0:
+		player.heal(int(round(player.max_health * ability.heal_ratio)))
+	var offset := 0.6
+	for buff in ability.buffs:
+		player.apply_buff(buff["id"], int(buff["turns"]), int(buff["power"]))
+		if buff["id"] != &"vanish":
+			CombatFx.popup_text(_anchor(player) + Vector3(0.0, offset, 0.0),
+				String(buff["id"]).to_upper(), ability.color, 16)
+			offset += 0.3
+		else:
+			CombatFx.popup_text(_anchor(player) + Vector3(0.0, offset, 0.0), "VANISHED", ability.color, 22)
 
 
-func _charge_path_clear(target: Node3D) -> bool:
-	var destination := _charge_destination(target)
+func _card_totem(ability: Ability3D, point: Vector3) -> void:
+	var holder := player.get_parent()
+	if holder == null:
+		return
+	var totem := SkillTotem3D.new()
+	totem.name = "SkillTotem"
+	totem.setup(ability)
+	holder.add_child(totem)
+	totem.global_position = GroundMath.flatten(point)
+	totem.strike_requested.connect(_on_totem_strike)
+	_totems.append(totem)
+	CombatFx.ring_burst(holder, totem.global_position + Vector3(0.0, 0.05, 0.0), ability.color,
+		6.0 * FX_SCREEN_SCALE, player._screen_radius_px(totem.global_position, 1.2), 0.4)
+
+
+func _on_field_strike(field: SkillField3D, enemy: Node3D) -> void:
+	if not is_instance_valid(field) or field.ability == null or not _is_alive(enemy):
+		return
+	# A trap, not a blow: it does not start an ambush on an unaware enemy.
+	_card_hit(field.ability, enemy, false, true)
+
+
+## A spirit strikes at the start of a player turn in a fight: the nearest enemy
+## in reach, or everyone in reach when its skill has an Area card.
+func _on_totem_strike(totem: SkillTotem3D) -> void:
+	if player == null or not player.is_in_turn_based_combat():
+		return
+	if not is_instance_valid(totem) or totem.ability == null:
+		return
+	var ability := totem.ability
+	var victims: Array[Node3D] = []
+	if ability.radius_m > 0.0:
+		victims = _targets_within(totem.global_position, totem.reach_m)
+	else:
+		var nearest := _nearest_target(totem.global_position, totem.reach_m, [])
+		if nearest != null:
+			victims.append(nearest)
+	for victim in victims:
+		_zap(totem.get_strike_origin(), victim.global_position + Vector3(0.0, HIT_HEIGHT_M, 0.0), ability.color)
+		_card_hit(ability, victim, false)
+
+
+# --- Card skill effects -------------------------------------------------------------------
+
+## Damage before stealth and exposure: the flat part through Power (and any
+## Empower), plus the weapon share of a strike.
+func card_damage(ability: Ability3D) -> int:
+	var damage := 0
+	if ability.flat_damage > 0:
+		damage += player.scale_damage(ability.flat_damage)
+	if ability.damage_mult > 0.0:
+		damage += int(round(float(player.get_melee_damage()) * ability.damage_mult))
+	return damage
+
+
+func _card_hit(ability: Ability3D, victim: Node3D, primary: bool, environment: bool = false,
+		scale: float = 1.0) -> void:
+	if victim == null or not is_instance_valid(victim) or not _is_alive(victim):
+		return
+	var damage := int(round(float(card_damage(ability)) * scale))
+	if primary and ability.exposed_mult > 1.0 and _is_exposed(victim):
+		damage = int(round(float(damage) * ability.exposed_mult))
+		CombatFx.popup_text(_anchor(victim) + Vector3(0.0, 0.3, 0.0), "EXPOSED!", ability.color, 20)
+	if primary and not environment:
+		damage = player.apply_stealth_bonus(victim, damage)
+	if damage > 0:
+		if environment and victim.has_method("take_environment_damage"):
+			victim.call("take_environment_damage", damage)
+		else:
+			_hit(victim, damage)
+	if not _is_alive(victim):
+		return
+	for status in ability.statuses:
+		apply_status_to(victim, status["id"], int(status["turns"]), int(status["power"]))
+	if ability.knockback_m > 0.0 and victim.has_method("knockback"):
+		victim.call("knockback", player.global_position, ability.knockback_m)
+	if not environment:
+		player.apply_on_hit_effects(victim)
+
+
+func _burst_fx(center: Vector3, ability: Ability3D, on_node: Node3D = null) -> void:
+	var holder: Node = on_node if on_node != null else player.get_parent()
+	CombatFx.ring_burst(holder, center + Vector3(0.0, 0.05, 0.0), ability.color,
+		6.0 * FX_SCREEN_SCALE, player._screen_radius_px(center, maxf(0.5, ability.radius_m)), 0.45)
+	CombatFx.shake(4.0, 0.16)
+
+
+func _leap_path_clear(target: Node3D) -> bool:
+	var destination := _leap_destination(target)
 	var world := player.get_world_3d()
 	if world == null:
 		return true
 	var from := player.global_position + Vector3(0.0, 0.6, 0.0)
 	var to := destination + Vector3(0.0, 0.6, 0.0)
-	var query := PhysicsRayQueryParameters3D.create(from, to, CHARGE_BLOCK_MASK)
+	var query := PhysicsRayQueryParameters3D.create(from, to, LEAP_BLOCK_MASK)
 	query.exclude = [player.get_rid()]
 	var hit: Dictionary = world.direct_space_state.intersect_ray(query)
 	if not hit.is_empty():
@@ -259,7 +512,7 @@ func _charge_path_clear(target: Node3D) -> bool:
 	return true
 
 
-func _charge_destination(target: Node3D) -> Vector3:
+func _leap_destination(target: Node3D) -> Vector3:
 	var stop := player.get_attack_approach_distance(target, player.get_melee_range())
 	var away := GroundMath.ground_direction(target.global_position, player.global_position)
 	if away == Vector3.ZERO:
@@ -267,126 +520,21 @@ func _charge_destination(target: Node3D) -> Vector3:
 	return GroundMath.flatten(target.global_position) + away * stop
 
 
-func _charge(ability: Ability3D, target: Node3D) -> void:
-	var destination := _charge_destination(target)
-	player.stop_movement_immediately()
-	player.face_toward(target.global_position)
-	var tween := player.create_tween()
-	tween.tween_property(player, "global_position", destination, CHARGE_SECONDS) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	await tween.finished
-	if not is_instance_valid(player):
-		return
-	player.snap_to(destination)
-	CombatFx.shake(5.0, 0.16)
-	if is_instance_valid(target) and _is_alive(target):
-		await _melee_strike(ability, target)
-
-
-func _shadowstep(target: Node3D) -> void:
-	var back := target.global_transform.basis.z
-	back.y = 0.0
-	if back.length() < 0.01:
-		back = GroundMath.ground_direction(player.global_position, target.global_position)
-	back = back.normalized()
-	var gap := ActorBase3D.collision_radius_of(target) + player.get_collision_radius() + SHADOWSTEP_GAP_M
-	var spot := GroundMath.flatten(target.global_position) + back * gap
-	player.teleport_to(spot)
-	player.face_toward(target.global_position)
-
-
-func _set_snare(point: Variant) -> bool:
-	var trap_script := _global_class_script(&"Trap3D")
-	if trap_script == null or not trap_script.has_method("place_player_trap"):
-		_refuse("No snares in this build")
+func _ground_point_valid(point: Variant, refusal: String) -> bool:
+	if not (point is Vector3):
+		_refuse("No target point")
 		return false
-	var parent := player.get_parent()
-	trap_script.call("place_player_trap", parent, GroundMath.flatten(point as Vector3))
-	return true
-
-
-func _smoke_bomb(ability: Ability3D) -> void:
-	player.apply_smoke_cover()
-	CombatFx.ring_burst(player, player.global_position + Vector3(0.0, 0.3, 0.0), ability.color,
-		10.0 * FX_SCREEN_SCALE, player._screen_radius_px(player.global_position, ability.radius_m), 0.5, 1.0)
-	CombatFx.popup_text(_anchor(player) + Vector3(0.0, 0.6, 0.0), "VANISHED", ability.color, 22)
-
-
-func _blink_point_valid(point: Variant) -> bool:
 	var target_point := GroundMath.flatten(point as Vector3)
 	var world := player.get_world_3d()
 	if world != null and world.navigation_map.is_valid():
 		var on_mesh := NavigationServer3D.map_get_closest_point(world.navigation_map, target_point)
-		if GroundMath.ground_distance(on_mesh, target_point) > BLINK_MAX_OFFMESH_M:
-			_refuse("Can't blink there")
+		if GroundMath.ground_distance(on_mesh, target_point) > MAX_OFFMESH_M:
+			_refuse(refusal)
 			return false
 	return true
 
 
-func _fireball(ability: Ability3D, target: Node3D) -> void:
-	player.face_toward(target.global_position)
-	player._flash_ranged_feedback(target, true)
-	var impact := GroundMath.flatten(target.global_position)
-	var primary := target
-	await player._launch_bolt(target, ability.color)
-	if is_instance_valid(primary):
-		impact = GroundMath.flatten(primary.global_position)
-	var victims := _targets_within(impact, ability.radius_m)
-	var damage := _ability_damage(ability)
-	CombatFx.ring_burst(player.get_parent(), impact + Vector3(0.0, 0.05, 0.0), ability.color,
-		6.0 * FX_SCREEN_SCALE, player._screen_radius_px(impact, ability.radius_m), 0.45)
-	CombatFx.shake(5.0, 0.18)
-	for victim in victims:
-		if not is_instance_valid(victim):
-			continue
-		_hit(victim, player.apply_stealth_bonus(victim, damage) if victim == primary else damage)
-		_apply_ability_status(ability, victim)
-	if not victims.is_empty():
-		CombatFx.hit_stop(0.05, 0.25)
-	_after_hits(victims)
-
-
-func _chain_lightning(ability: Ability3D, target: Node3D) -> void:
-	player.face_toward(target.global_position)
-	player._flash_ranged_feedback(target, true)
-	await player._launch_bolt(target, ability.color)
-	var damage := float(_ability_damage(ability))
-	var hit_list: Array[Node3D] = []
-	var current := target
-	var from_point := player._bolt_start_position()
-	for jump in range(AbilityCatalog3D.CHAIN_LIGHTNING_JUMPS + 1):
-		if current == null or not is_instance_valid(current) or not _is_alive(current):
-			break
-		var strike_point := current.global_position + Vector3(0.0, HIT_HEIGHT_M, 0.0)
-		if jump > 0:
-			_zap(from_point, strike_point, ability.color)
-			await get_tree().create_timer(0.08).timeout
-			if not is_instance_valid(current):
-				break
-		var dealt := maxi(1, int(round(damage)))
-		if jump == 0:
-			dealt = player.apply_stealth_bonus(current, dealt)
-		_hit(current, dealt)
-		hit_list.append(current)
-		from_point = strike_point
-		damage *= 0.8
-		current = _nearest_target(current.global_position, AbilityCatalog3D.CHAIN_LIGHTNING_JUMP_M, hit_list)
-	CombatFx.hit_stop(0.05, 0.25)
-	_after_hits(hit_list)
-
-
-func _frost_nova(ability: Ability3D) -> void:
-	var victims := _targets_within(player.global_position, ability.radius_m)
-	var damage := _ability_damage(ability)
-	CombatFx.ring_burst(player, player.global_position + Vector3(0.0, 0.05, 0.0), ability.color,
-		6.0 * FX_SCREEN_SCALE, player._screen_radius_px(player.global_position, ability.radius_m), 0.45)
-	CombatFx.shake(4.0, 0.16)
-	for victim in victims:
-		if is_instance_valid(victim):
-			_hit(victim, player.apply_stealth_bonus(victim, damage))
-			_apply_ability_status(ability, victim)
-	_after_hits(victims)
-
+# --- Toss Pebble ------------------------------------------------------------------------------
 
 func _distract(ability: Ability3D, point: Variant) -> void:
 	var landing := GroundMath.flatten(point as Vector3)
@@ -415,16 +563,7 @@ func _distract(ability: Ability3D, point: Variant) -> void:
 
 # --- Helpers -------------------------------------------------------------------------------
 
-func _ability_damage(ability: Ability3D) -> int:
-	var damage := 0
-	if ability.damage_mult > 0.0:
-		damage += int(round(float(player.get_melee_damage()) * ability.damage_mult))
-	if ability.flat_damage > 0:
-		damage += player.scale_damage(ability.flat_damage)
-	return damage
-
-
-## Stunned, rooted, unaware or turned away: a backstab doubles up.
+## Stunned, rooted, unaware or turned away: a rogue's strike bites deeper.
 func _is_exposed(target: Node3D) -> bool:
 	if target.has_method("is_unaware") and bool(target.call("is_unaware")):
 		return true
@@ -445,12 +584,6 @@ func _hit(target: Node3D, amount: int) -> void:
 		target.call("receive_damage", amount)
 	elif target.has_method("take_damage"):
 		target.call("take_damage", amount)
-
-
-func _apply_ability_status(ability: Ability3D, target: Node3D) -> void:
-	if ability.status_id == &"" or not is_instance_valid(target) or not _is_alive(target):
-		return
-	apply_status_to(target, ability.status_id, ability.status_turns, ability.status_power)
 
 
 ## `apply_status` when the target has it; a root falls back to `apply_root`.
@@ -513,7 +646,7 @@ static func _is_alive(node: Node3D) -> bool:
 	return true
 
 
-## A short bright streak between two points (the lightning's jumps).
+## A short bright streak between two points (lightning jumps, spirit strikes).
 func _zap(from: Vector3, to: Vector3, color: Color) -> void:
 	var holder := player.get_parent()
 	if holder == null:
@@ -555,10 +688,3 @@ static func _anchor(actor: Node3D) -> Vector3:
 	if anchor != null:
 		return anchor.global_position
 	return actor.global_position + Vector3.UP * 1.8
-
-
-static func _global_class_script(class_id: StringName) -> Script:
-	for entry in ProjectSettings.get_global_class_list():
-		if StringName(entry.get("class", "")) == class_id:
-			return load(String(entry.get("path", ""))) as Script
-	return null
