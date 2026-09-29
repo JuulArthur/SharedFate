@@ -116,6 +116,7 @@ const INTERACT_RANGE_SLACK_M := 0.3
 # Exploration: a ranged attack on a target out of reach walks the body in first
 # and stops this far inside the range; the walk gives up after the timeout and
 # follows a moving target every REPATH seconds.
+const TRAVEL_FADE_SECONDS := 0.45
 const RANGED_APPROACH_MARGIN_M := 0.6
 const RANGED_APPROACH_TIMEOUT_SECONDS := 10.0
 const RANGED_APPROACH_REPATH_SECONDS := 0.3
@@ -152,6 +153,8 @@ const TURN_MOVE_GRACE_SECONDS := 1.5
 # 6 m from the start waystone). Set to 0 for the real game, where cards only
 # drop from enemies and chests (docs/cards-and-attributes.md).
 @export var starter_card_copies: int = 5
+# The level's name, announced on arrival from another level (docs/level-flow.md).
+@export var level_display_name: String = ""
 # Scene instanced by `_spawn_additional_enemy`: the WP3c wolf by default.
 @export var enemy_scene: PackedScene = preload("res://scenes/3d/wolf_3d.tscn")
 # A level authored in the editor ships a baked NavigationMesh; a test scene may
@@ -254,6 +257,13 @@ var _pending_interact_deadline_msec := 0
 # target (or null), point (ground skills), reach, action, deadline, aimed_at,
 # repath_left. Empty when none.
 var _ranged_approach: Dictionary = {}
+# Level flow (docs/level-flow.md): where this level was entered ("" on a fresh
+# start), the body's state carried from the last level, and the fade overlay.
+var _arrival_entry: StringName = &""
+var _carried_state: Dictionary = {}
+var _traveling := false
+var _fade_layer: CanvasLayer = null
+var _fade_rect: ColorRect = null
 var _respawn_scheduled := false
 var _respawn_point := Vector3.ZERO
 var _has_respawn_point := false
@@ -261,6 +271,9 @@ var _has_respawn_point := false
 
 func _ready() -> void:
 	add_to_group("level_coordinator")
+	# Arriving from another level: the entry point and what the body carries.
+	_arrival_entry = RunState3D.take_entry()
+	_carried_state = RunState3D.take_player_state()
 	_setup_turn_ui()
 	_setup_soul_ui()
 	_setup_music()
@@ -272,10 +285,15 @@ func _ready() -> void:
 	_place_player()
 	_respawn_point = GroundMath.flatten(player.global_position)
 	_has_respawn_point = true
+	var player_3d := player as Player3D
+	if player_3d != null and not _carried_state.is_empty():
+		player_3d.apply_run_state(_carried_state)
 	# Spell radii are authored in meters; with 1 unit = 1 m this is 1.0.
 	if player.has_method("set_turn_meter_world_units"):
 		player.call("set_turn_meter_world_units", _get_turn_meter_world_units())
-	_spawn_test_loot()
+	# The debug loot is for a fresh start, not for every level walked into.
+	if _arrival_entry == &"":
+		_spawn_test_loot()
 	_register_placed_enemies()
 	# Enemy targets are wired once the navigation map has synced (`_setup_navmesh`):
 	# Enemy3D.set_target routes at once, and a map query before the first sync
@@ -289,7 +307,10 @@ func _ready() -> void:
 
 	# Last, so the world is fully placed under the book before it opens.
 	_setup_story_book()
-	if should_play_intro():
+	# A level walked into from another opens with a fade and its name instead.
+	if _arrival_entry != &"":
+		_arrive_from_travel()
+	elif should_play_intro():
 		story_book.show_chapter_once(StoryLibrary.chapter(story_chapter_id))
 
 
@@ -637,10 +658,17 @@ func _spawn_test_loot() -> void:
 
 
 func _place_player() -> void:
-	# A `Spawn_default` node (the LevelLoader convention) wins; otherwise the 2D
+	# Arriving from another level, its `Entry_<id>` node wins (docs/level-flow.md);
+	# then a `Spawn_default` node (the LevelLoader convention); otherwise the 2D
 	# rule: the map centre cell plus PLAYER_SPAWN_OFFSET, clamped to the grid.
 	var spawn_position: Vector3
-	var spawn := find_child("Spawn_default", true, false) as Node3D
+	var spawn: Node3D = null
+	if _arrival_entry != &"":
+		spawn = find_child("Entry_%s" % _arrival_entry, true, false) as Node3D
+		if spawn == null:
+			push_warning("main_3d: no Entry_%s in %s; using the default spawn" % [_arrival_entry, name])
+	if spawn == null:
+		spawn = find_child("Spawn_default", true, false) as Node3D
 	if spawn != null:
 		spawn_position = GroundMath.flatten(spawn.global_position)
 	else:
@@ -3246,8 +3274,9 @@ func _setup_gameplay_expansion() -> void:
 		character_screen.set_forge_gate(forge_block_reason)
 		character_screen.visibility_changed_to.connect(_on_character_screen_visibility_changed)
 		if player_3d.get_progression() != null:
-			# The starter cards arrive before the popups are wired: no flood of "Card:".
-			if starter_card_copies > 0:
+			# The starter cards arrive before the popups are wired: no flood of
+			# "Card:". Only on a fresh start: a body from another level brings its own.
+			if starter_card_copies > 0 and _carried_state.is_empty():
 				for card in SkillCards3D.CARDS:
 					player_3d.get_progression().add_card(card["id"], starter_card_copies)
 			player_3d.get_progression().card_added.connect(_on_card_added)
@@ -3842,6 +3871,75 @@ func register_spawned_enemy(enemy_actor: CharacterBody3D) -> void:
 			enemy_actor.call("set_turn_based_combat", true)
 		engaged_enemies[enemy_actor.get_instance_id()] = true
 		_rebuild_turn_enemy_icons()
+
+
+# --- Level flow (docs/level-flow.md) ----------------------------------------------
+
+## Coordinator interface: leave this level for `scene_path`, arriving at its
+## `Entry_<entry_id>` node. Only outside a fight. The body's state goes into
+## RunState3D, the screen fades to black and the scene changes; the next
+## level's coordinator takes the state in `_ready`. Coroutine; false when
+## refused.
+func travel_to(scene_path: String, entry_id: StringName) -> bool:
+	if _traveling:
+		return false
+	if combat_state != CombatState.EXPLORATION:
+		_fx_popup(_popup_anchor(player), "Not during a fight", CombatFx.COLOR_WARNING, 16)
+		return false
+	if scene_path.is_empty() or not ResourceLoader.exists(scene_path):
+		push_error("main_3d: travel_to: no level at '%s'" % scene_path)
+		_fx_popup(_popup_anchor(player), "The way is shut", CombatFx.COLOR_WARNING, 16)
+		return false
+	_traveling = true
+	_cancel_ranged_approach()
+	_pending_interactable = null
+	if player.has_method("stop_movement_immediately"):
+		player.call("stop_movement_immediately")
+	var player_3d := player as Player3D
+	RunState3D.store(player_3d.get_run_state() if player_3d != null else {}, entry_id, scene_file_path)
+	await _fade_screen(1.0, TRAVEL_FADE_SECONDS)
+	get_tree().paused = false
+	get_tree().change_scene_to_file(scene_path)
+	return true
+
+
+func is_traveling() -> bool:
+	return _traveling
+
+
+## Where this level was entered from another, &"" on a fresh start.
+func get_arrival_entry() -> StringName:
+	return _arrival_entry
+
+
+func _arrive_from_travel() -> void:
+	_ensure_fade_overlay()
+	_fade_rect.color.a = 1.0
+	_fade_screen(0.0, TRAVEL_FADE_SECONDS)
+	if not level_display_name.is_empty():
+		CombatFx.announce(level_display_name.to_upper(), UiTheme.TITLE, 1.2)
+
+
+func _ensure_fade_overlay() -> void:
+	if _fade_layer != null:
+		return
+	_fade_layer = CanvasLayer.new()
+	_fade_layer.name = "TravelFade"
+	_fade_layer.layer = 30
+	_fade_layer.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(_fade_layer)
+	_fade_rect = ColorRect.new()
+	_fade_rect.color = Color(0.0, 0.0, 0.0, 0.0)
+	_fade_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_fade_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fade_layer.add_child(_fade_rect)
+
+
+func _fade_screen(to_alpha: float, seconds: float) -> void:
+	_ensure_fade_overlay()
+	var tween := _fade_rect.create_tween()
+	tween.tween_property(_fade_rect, "color:a", to_alpha, seconds)
+	await tween.finished
 
 
 ## A waystone moved the player: the camera jumps along and the stone becomes

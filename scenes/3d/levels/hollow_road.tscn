@@ -1,0 +1,212 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/3d/main_3d.gd" id="1_ljv6f"]
+[ext_resource type="NavigationMesh" path="res://scenes/3d/arena_navmesh.tres" id="2_518qq"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/tree.glb" id="3_kchyn"]
+[ext_resource type="Script" path="res://scripts/3d/prop_3d.gd" id="4_p1f71"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/crate.glb" id="5_7xt4b"]
+[ext_resource type="PackedScene" path="res://assets/3d/models/chest.glb" id="6_hvxcl"]
+[ext_resource type="PackedScene" path="res://scenes/3d/camera_rig_3d.tscn" id="7_xm7w4"]
+[ext_resource type="Script" path="res://scripts/3d/camera_rig_3d.gd" id="8_7670t"]
+[ext_resource type="PackedScene" path="res://scenes/3d/player_3d.tscn" id="9_atjii"]
+[ext_resource type="Script" path="res://scripts/3d/player_3d.gd" id="10_s5s3u"]
+[ext_resource type="PackedScene" path="res://scenes/3d/wolf_3d.tscn" id="11_bfgai"]
+[ext_resource type="Script" path="res://scripts/3d/enemy_3d.gd" id="12_6ko1a"]
+[ext_resource type="Script" path="res://scripts/3d/arena_ground_tiles.gd" id="13_2u6i1"]
+[ext_resource type="Script" path="res://scripts/3d/world/level_exit_3d.gd" id="14_l3suy"]
+
+[sub_resource type="Environment" id="Environment_arena"]
+background_mode = 1
+background_color = Color(0.09, 0.1, 0.15, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.5, 0.55, 0.65, 1)
+ambient_light_energy = 0.9
+fog_enabled = true
+fog_light_color = Color(0.45, 0.5, 0.6, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(30, 0.4, 30)
+
+[node name="HollowRoad" type="Node3D" unique_id=368989868]
+script = ExtResource("1_ljv6f")
+spawn_test_loot = false
+level_display_name = "The Hollow Road (placeholder)"
+story_chapter_id = &""
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=23915802]
+environment = SubResource("Environment_arena")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=2098216183]
+transform = Transform3D(0.8660254, -0.40957603, 0.28678823, 0, 0.57357645, 0.81915206, -0.5, -0.7094065, 0.49673176, 0, 10, 0)
+light_energy = 1.3
+shadow_enabled = true
+
+[node name="NavigationRegion3D" type="NavigationRegion3D" parent="." unique_id=1835445170]
+navigation_mesh = ExtResource("2_518qq")
+
+[node name="Ground" type="StaticBody3D" parent="NavigationRegion3D" unique_id=1395740417]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 0)
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="NavigationRegion3D/Ground" unique_id=1215224210]
+shape = SubResource("BoxShape3D_ground")
+
+[node name="Tree_01" type="Node3D" parent="NavigationRegion3D" unique_id=994922362 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 13)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_02" type="Node3D" parent="NavigationRegion3D" unique_id=496806510 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.017, 0, 12.363)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_03" type="Node3D" parent="NavigationRegion3D" unique_id=1003544449 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.644, 0, 10.517)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_04" type="Node3D" parent="NavigationRegion3D" unique_id=588855462 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10.517, 0, 7.644)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_05" type="Node3D" parent="NavigationRegion3D" unique_id=1425783299 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12.363, 0, 4.017)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_06" type="Node3D" parent="NavigationRegion3D" unique_id=8795569 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 13, 0, 0)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_07" type="Node3D" parent="NavigationRegion3D" unique_id=1497044767 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12.363, 0, -4.017)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_08" type="Node3D" parent="NavigationRegion3D" unique_id=1729670512 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10.517, 0, -7.644)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_09" type="Node3D" parent="NavigationRegion3D" unique_id=1833557654 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.644, 0, -10.517)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_10" type="Node3D" parent="NavigationRegion3D" unique_id=854891789 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.017, 0, -12.363)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_11" type="Node3D" parent="NavigationRegion3D" unique_id=1687604032 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -13)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_12" type="Node3D" parent="NavigationRegion3D" unique_id=1822575052 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.017, 0, -12.363)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_13" type="Node3D" parent="NavigationRegion3D" unique_id=1532464708 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.644, 0, -10.517)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_14" type="Node3D" parent="NavigationRegion3D" unique_id=2023188447 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.517, 0, -7.644)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_15" type="Node3D" parent="NavigationRegion3D" unique_id=610974155 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12.363, 0, -4.017)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_16" type="Node3D" parent="NavigationRegion3D" unique_id=1426512826 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -13, 0, 0)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_17" type="Node3D" parent="NavigationRegion3D" unique_id=971948274 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12.363, 0, 4.017)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_18" type="Node3D" parent="NavigationRegion3D" unique_id=259805815 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.517, 0, 7.644)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_19" type="Node3D" parent="NavigationRegion3D" unique_id=1964528315 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.644, 0, 10.517)
+script = ExtResource("4_p1f71")
+
+[node name="Tree_20" type="Node3D" parent="NavigationRegion3D" unique_id=208228235 instance=ExtResource("3_kchyn")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.017, 0, 12.363)
+script = ExtResource("4_p1f71")
+
+[node name="Crate" type="Node3D" parent="NavigationRegion3D" unique_id=279776457 instance=ExtResource("5_7xt4b")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0, 3)
+script = ExtResource("4_p1f71")
+
+[node name="TreasureChest" type="Node3D" parent="NavigationRegion3D" unique_id=1190591586 instance=ExtResource("6_hvxcl")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0, -3)
+script = ExtResource("4_p1f71")
+
+[node name="CameraRig" type="Node3D" parent="." unique_id=54777070 instance=ExtResource("7_xm7w4")]
+script = ExtResource("8_7670t")
+
+[node name="Player" type="CharacterBody3D" parent="." unique_id=1411137159 groups=["player"] instance=ExtResource("9_atjii")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9, 0, 0)
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("10_s5s3u")
+
+[node name="Enemy_01" type="CharacterBody3D" parent="." unique_id=1091967780 groups=["enemies"] instance=ExtResource("11_bfgai")]
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("12_6ko1a")
+attack_cooldown = 0.7
+experience_reward = 35
+loot_drop_chance = 0.5
+detection_range = 5.0
+display_name = "Wolf"
+portrait_color = Color(0.62, 0.6, 0.56, 1)
+move_speed = 3.6
+max_health = 36
+attack_damage = 10
+attack_range = 1.3
+
+[node name="Enemy_02" type="CharacterBody3D" parent="." unique_id=1488258457 groups=["enemies"] instance=ExtResource("11_bfgai")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, 5)
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("12_6ko1a")
+attack_cooldown = 0.7
+experience_reward = 35
+loot_drop_chance = 0.5
+detection_range = 5.0
+display_name = "Wolf"
+portrait_color = Color(0.62, 0.6, 0.56, 1)
+move_speed = 3.6
+max_health = 36
+attack_damage = 10
+attack_range = 1.3
+
+[node name="Enemy_03" type="CharacterBody3D" parent="." unique_id=1286258970 groups=["enemies"] instance=ExtResource("11_bfgai")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, -5)
+collision_layer = 2
+collision_mask = 9
+script = ExtResource("12_6ko1a")
+attack_cooldown = 0.7
+experience_reward = 35
+loot_drop_chance = 0.5
+detection_range = 5.0
+display_name = "Wolf"
+portrait_color = Color(0.62, 0.6, 0.56, 1)
+move_speed = 3.6
+max_health = 36
+attack_damage = 10
+attack_range = 1.3
+
+[node name="Spawn_default" type="Node3D" parent="." unique_id=944696898]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9, 0, 0)
+
+[node name="GroundTiles" type="Node3D" parent="." unique_id=2102511836]
+script = ExtResource("13_2u6i1")
+
+[node name="Entry_from_wilds" type="Node3D" parent="." unique_id=1323047253]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9, 0, 0)
+
+[node name="ExitToWilds" type="Node3D" parent="." unique_id=839600268]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.5, 0, 2.6)
+script = ExtResource("14_l3suy")
+target_scene = "res://scenes/3d/wilds.tscn"
+target_entry = &"from_road"
+label = "To the Wilds"

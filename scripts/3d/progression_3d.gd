@@ -364,6 +364,55 @@ func preview_skill(kind: int, cards: Array[StringName]) -> Ability3D:
 	return CardSkillCompiler3D.compile(kind, cards, -1, skill_range_bonus(kind), skill_radius_bonus(kind))
 
 
+# --- Carrying it between levels (docs/level-flow.md) ------------------------------
+
+## Everything this node holds, as plain data (a deep copy), for RunState3D.
+func to_state() -> Dictionary:
+	var skills := {}
+	for kind in SOUL_KINDS:
+		var slots: Array = []
+		for slot in range(SkillCards3D.SKILLS_PER_SOUL):
+			slots.append(Array(get_skill_cards(kind, slot)))
+		skills[kind] = slots
+	return {
+		"attribute_points": attribute_points,
+		"level": _level,
+		"attributes": _attributes.duplicate(true),
+		"pools": _pools.duplicate(),
+		"cards": _cards.duplicate(),
+		"skills": skills,
+	}
+
+
+## Puts back what `to_state` returned. Missing keys keep the current values.
+func from_state(state: Dictionary) -> void:
+	if state.is_empty():
+		return
+	attribute_points = int(state.get("attribute_points", attribute_points))
+	_level = maxi(1, int(state.get("level", _level)))
+	var attributes: Dictionary = state.get("attributes", {})
+	for kind in SOUL_KINDS:
+		if attributes.has(kind):
+			_attributes[kind] = (attributes[kind] as Dictionary).duplicate(true)
+	var pools: Dictionary = state.get("pools", {})
+	for kind in SOUL_KINDS:
+		if pools.has(kind):
+			_pools[kind] = int(pools[kind])
+	if state.has("cards"):
+		_cards = (state["cards"] as Dictionary).duplicate()
+	var skills: Dictionary = state.get("skills", {})
+	for kind in SOUL_KINDS:
+		if not skills.has(kind):
+			continue
+		var slots: Array = skills[kind]
+		for slot in range(mini(slots.size(), SkillCards3D.SKILLS_PER_SOUL)):
+			var cards := _empty_cards()
+			cards.assign(slots[slot])
+			_skills[kind][slot] = cards
+	changed.emit()
+	pools_changed.emit()
+
+
 static func _empty_cards() -> Array[StringName]:
 	var cards: Array[StringName] = []
 	return cards

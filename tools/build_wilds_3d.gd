@@ -40,6 +40,13 @@ const HIDE_ZONE_SCRIPT_PATH := "res://scripts/3d/world/hide_zone_3d.gd"
 const WAYSTONE_SCRIPT_PATH := "res://scripts/3d/world/waystone_3d.gd"
 const CHEST_SCRIPT_PATH := "res://scripts/3d/world/loot_chest_3d.gd"
 const CAMPFIRE_SCRIPT_PATH := "res://scripts/3d/world/campfire_3d.gd"
+const LEVEL_EXIT_SCRIPT_PATH := "res://scripts/3d/world/level_exit_3d.gd"
+const HOLLOW_ROAD_PATH := "res://scenes/3d/levels/hollow_road.tscn"
+## Start glade (centre (-34, 34), radius 11): the exit 8 m south of the
+## centre, clear of the edge trees and 6 m from the spawn; the arrival point
+## 3.9 m north-west of the exit.
+const EXIT_TO_ROAD := Vector2(-31.0, 41.5)
+const ENTRY_FROM_ROAD := Vector2(-33.5, 38.5)
 const GROUND_SCRIPT_PATH := "res://scripts/3d/world/wilds_ground_3d.gd"
 const FOREST_SCRIPT_PATH := "res://scripts/3d/world/wilds_forest_3d.gd"
 
@@ -491,6 +498,23 @@ func _add_interactables() -> void:
 		Vector2(-1.5, 17.5), Vector2(-14.0, 30.0), false)
 	_add_waystone(waystones, "WaystoneGate", &"gate", &"start", "Warden's Gate",
 		Vector2(16.0, -34.0), Vector2(16.0, -31.0), false)
+
+	# The way to the next level (docs/level-flow.md): an exit on the south side
+	# of the start glade, and the entry the Hollow Road leads back to, 3.9 m
+	# from it so an arrival never stands in the exit.
+	var exit_node: Node3D = _new_scripted(Node3D.new(), LEVEL_EXIT_SCRIPT_PATH)
+	exit_node.name = "ExitToHollowRoad"
+	exit_node.position = _at(EXIT_TO_ROAD)
+	exit_node.set("target_scene", HOLLOW_ROAD_PATH)
+	exit_node.set("target_entry", &"from_wilds")
+	exit_node.set("label", "To the Hollow Road")
+	_attach(_root, exit_node)
+	_keep(EXIT_TO_ROAD, 2.0)
+	var entry := Node3D.new()
+	entry.name = "Entry_from_road"
+	entry.position = _at(ENTRY_FROM_ROAD)
+	_attach(_root, entry)
+	_keep(ENTRY_FROM_ROAD, 1.0)
 
 	var chests := Node3D.new()
 	chests.name = "Chests"

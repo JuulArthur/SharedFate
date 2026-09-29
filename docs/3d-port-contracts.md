@@ -193,6 +193,8 @@ A 3D level that runs `main_3d.gd` is a `Node3D` root with:
 | `Player` | CharacterBody3D (player_3d.gd) | group `player` |
 | enemies | CharacterBody3D (enemy_3d.gd) | group `enemies`, anywhere in the tree |
 | `Spawn_<name>` | Node3D | spawn points for `LevelLoader` |
+| `Entry_<id>` (optional) | Node3D | arrival point from another level (`docs/level-flow.md`) |
+| `LevelExit3D` (optional) | Node3D (level_exit_3d.gd) | the way to another level: `target_scene`, `target_entry`, `label` |
 
 The 2D tilemap nodes (`MyCustomBackground` and friends) have no 3D equivalent; `main_3d.gd` takes its grid from `GroundMath` and the map bounds from the `Ground` collision box.
 
