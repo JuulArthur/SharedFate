@@ -113,6 +113,13 @@ const ESCAPE_SMOKE_MIN_M := 3.0
 const ANNOUNCE_ESCAPED := "SLIPPED AWAY"
 const RESPAWN_DELAY_SECONDS := 3.0
 const INTERACT_RANGE_SLACK_M := 0.3
+# Exploration: a ranged attack on a target out of reach walks the body in first
+# and stops this far inside the range; the walk gives up after the timeout and
+# follows a moving target every REPATH seconds.
+const RANGED_APPROACH_MARGIN_M := 0.6
+const RANGED_APPROACH_TIMEOUT_SECONDS := 10.0
+const RANGED_APPROACH_REPATH_SECONDS := 0.3
+const RANGED_APPROACH_REPATH_MOVE_M := 0.6
 const INTERACT_WALK_TIMEOUT_SECONDS := 8.0
 const MELEE_APPROACH_TIMEOUT_SECONDS := 5.0
 # Attack spots (`_find_free_attack_spot`): candidates every 15 degrees around
@@ -140,6 +147,11 @@ const TURN_MOVE_GRACE_SECONDS := 1.5
 # menu can be tested without hunting down a crate. Untick in the inspector once
 # the level has its own loot worth testing against.
 @export var spawn_test_loot: bool = true
+# Debug convenience, like the test loot: every skill card this many times in
+# the collection at start, so skills can be forged at once (the Wilds spawn is
+# 6 m from the start waystone). Set to 0 for the real game, where cards only
+# drop from enemies and chests (docs/cards-and-attributes.md).
+@export var starter_card_copies: int = 5
 # Scene instanced by `_spawn_additional_enemy`: the WP3c wolf by default.
 @export var enemy_scene: PackedScene = preload("res://scenes/3d/wolf_3d.tscn")
 # A level authored in the editor ships a baked NavigationMesh; a test scene may
@@ -238,6 +250,10 @@ var hover_hint_label: Label
 var hovered_prop_target: Node3D
 var _pending_interactable: Node3D
 var _pending_interact_deadline_msec := 0
+# The ranged attack waiting for the body to walk into range (exploration):
+# target (or null), point (ground skills), reach, action, deadline, aimed_at,
+# repath_left. Empty when none.
+var _ranged_approach: Dictionary = {}
 var _respawn_scheduled := false
 var _respawn_point := Vector3.ZERO
 var _has_respawn_point := false
@@ -303,7 +319,7 @@ func _exit_tree() -> void:
 	CombatFx.set_shake_target(null)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_camera_rig()
 	_update_combat_state()
 	_update_hover_state()
@@ -311,6 +327,7 @@ func _process(_delta: float) -> void:
 	_update_path_preview()
 	_update_range_rings()
 	_update_pending_interaction()
+	_update_ranged_approach(delta)
 	_update_ability_bar()
 	_update_stealth_label()
 
@@ -325,6 +342,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		var screen_pos: Vector2 = event.position
+		# Any new click drops a walk into range; a new ranged click starts its own.
+		_cancel_ranged_approach()
 		# Loot first. In 2D the pickup swallowed the click itself; in 3D the
 		# coordinator picks (section 8).
 		if _try_click_pickup(screen_pos):
@@ -373,6 +392,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		_request_player_move(ground)
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("ui_accept"):
+		_cancel_ranged_approach()
 		_request_player_attack()
 		get_viewport().set_input_as_handled()
 
@@ -843,6 +863,7 @@ func _start_turn_based_combat(ambush: bool = false) -> void:
 	_stop_all_combatants_immediately()
 	_set_player_turn_action(PlayerTurnAction.MOVE)
 	_pending_interactable = null
+	_ranged_approach = {}
 	if ability_runner != null:
 		ability_runner.on_combat_started()
 	combat_state = CombatState.ENEMY_TURN if ambush else CombatState.PLAYER_TURN
@@ -1063,10 +1084,12 @@ func _request_player_turn_spell(target_enemy: Node3D = null) -> void:
 
 # --- Exploration attacks (WP13) --------------------------------------------------
 # The throw and the spells outside combat, with the turn mode's rings, targeting
-# and refusals. The player stands still to throw or cast. A hit that lands
-# starts the fight as an ambush through `provoked_by_hit`; a refused or missed
-# attack starts nothing. Melee in exploration is the click-to-attack pursuit and
-# the Space sweep, which the player already owns.
+# and refusals. A target out of range is walked to first (`_start_ranged_approach`)
+# and the attack fires on arrival; any other click cancels the walk. The player
+# stands still to throw or cast. A hit that lands starts the fight as an ambush
+# through `provoked_by_hit`; a refused or missed attack starts nothing. Melee in
+# exploration is the click-to-attack pursuit and the Space sweep, which the
+# player already owns.
 
 func _request_exploration_ranged_attack(target_enemy: Node3D = null) -> void:
 	if combat_state != CombatState.EXPLORATION:
@@ -1081,7 +1104,7 @@ func _request_exploration_ranged_attack(target_enemy: Node3D = null) -> void:
 		return
 	var max_dist := _get_ranged_attack_range_world()
 	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > max_dist:
-		_fx_popup(_popup_anchor(target_enemy), "Out of range", CombatFx.COLOR_WARNING, 16)
+		_start_ranged_approach(target_enemy, null, max_dist, _request_exploration_ranged_attack.bind(target_enemy))
 		return
 
 	_stop_player_for_exploration_attack()
@@ -1093,7 +1116,9 @@ func _request_exploration_ranged_attack(target_enemy: Node3D = null) -> void:
 	_update_turn_ui()
 
 
-func _request_exploration_spell(target_enemy: Node3D = null) -> void:
+## `spell_id` names the spell when the call comes back from a walk into range
+## (the aim may have changed meanwhile); otherwise the aimed spell.
+func _request_exploration_spell(target_enemy: Node3D = null, spell_id: StringName = &"") -> void:
 	if combat_state != CombatState.EXPLORATION:
 		return
 	if player_turn_action_running:
@@ -1101,6 +1126,9 @@ func _request_exploration_spell(target_enemy: Node3D = null) -> void:
 	if not player.has_method("try_cast_spell"):
 		return
 	var spell := _get_selected_spell()
+	if spell_id != &"":
+		var soul := _get_active_soul()
+		spell = soul.get_spell(spell_id) if soul != null else null
 	if spell == null:
 		return
 	var cooldown := 0
@@ -1113,8 +1141,9 @@ func _request_exploration_spell(target_enemy: Node3D = null) -> void:
 		target_enemy = _get_closest_enemy_to_player()
 	if target_enemy == null:
 		return
-	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > _get_spell_range_world(spell):
-		_fx_popup(_popup_anchor(target_enemy), "Out of range", CombatFx.COLOR_WARNING, 16)
+	var reach := _get_spell_range_world(spell)
+	if GroundMath.ground_distance(player.global_position, target_enemy.global_position) > reach:
+		_start_ranged_approach(target_enemy, null, reach, _request_exploration_spell.bind(target_enemy, spell.id))
 		return
 
 	_stop_player_for_exploration_attack()
@@ -1124,6 +1153,100 @@ func _request_exploration_spell(target_enemy: Node3D = null) -> void:
 	if combat_state == CombatState.EXPLORATION:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
 	_update_turn_ui()
+
+
+# --- Walking into range (exploration) ---------------------------------------------
+
+## Walks the body toward `target` (or the ground `point`) until it is within
+## `reach` m, following a target that moves, then calls `action`, which makes
+## the attack. Cancelled by any other click, Space, another action on the bar,
+## Esc, a fight starting, the target dying or RANGED_APPROACH_TIMEOUT_SECONDS.
+func _start_ranged_approach(target: Node3D, point: Variant, reach: float, action: Callable) -> void:
+	if player.has_method("clear_attack_target"):
+		player.call("clear_attack_target")
+	_pending_interactable = null
+	var goal := _approach_goal(target, point)
+	_ranged_approach = {
+		"target": target, "has_target": target != null, "point": point, "reach": reach, "action": action,
+		"deadline": Time.get_ticks_msec() + int(RANGED_APPROACH_TIMEOUT_SECONDS * 1000.0),
+		"aimed_at": goal, "repath_left": RANGED_APPROACH_REPATH_SECONDS,
+	}
+	_walk_into_range(goal, reach)
+
+
+func has_ranged_approach() -> bool:
+	return not _ranged_approach.is_empty()
+
+
+## Drops a walk into range; `stop_walking` also halts the body where it is.
+func _cancel_ranged_approach(stop_walking: bool = false) -> void:
+	if _ranged_approach.is_empty():
+		return
+	_ranged_approach = {}
+	if stop_walking and player.has_method("stop_movement_immediately"):
+		player.call("stop_movement_immediately")
+
+
+func _approach_goal(target: Node3D, point: Variant) -> Vector3:
+	if target != null and is_instance_valid(target):
+		return GroundMath.flatten(target.global_position)
+	return GroundMath.flatten(point as Vector3) if point is Vector3 else GroundMath.flatten(player.global_position)
+
+
+func _walk_into_range(goal: Vector3, reach: float) -> void:
+	var stop := maxf(0.5, reach - RANGED_APPROACH_MARGIN_M)
+	_request_player_move(_compute_approach_world_point(player.global_position, goal, stop))
+
+
+func _update_ranged_approach(delta: float) -> void:
+	if _ranged_approach.is_empty():
+		return
+	# A freed enemy cannot even be cast, so check it before touching it.
+	var raw: Variant = _ranged_approach["target"]
+	var had_target := bool(_ranged_approach["has_target"])
+	var target: Node3D = null
+	if had_target and is_instance_valid(raw):
+		target = raw as Node3D
+	var target_gone := had_target and (target == null \
+		or (target.has_method("is_alive") and not bool(target.call("is_alive"))))
+	if combat_state != CombatState.EXPLORATION or target_gone \
+			or Time.get_ticks_msec() > int(_ranged_approach["deadline"]):
+		_ranged_approach = {}
+		return
+	if player_turn_action_running:
+		return
+	var goal := _approach_goal(target, _ranged_approach["point"])
+	var reach := float(_ranged_approach["reach"])
+	if GroundMath.ground_distance(player.global_position, goal) <= reach - 0.05:
+		var action: Callable = _ranged_approach["action"]
+		_ranged_approach = {}
+		action.call()
+		return
+	# Follow a target that has moved, and nudge a walk that has stalled.
+	_ranged_approach["repath_left"] = float(_ranged_approach["repath_left"]) - delta
+	if float(_ranged_approach["repath_left"]) > 0.0:
+		return
+	_ranged_approach["repath_left"] = RANGED_APPROACH_REPATH_SECONDS
+	var moved := GroundMath.ground_distance(goal, _ranged_approach["aimed_at"] as Vector3) > RANGED_APPROACH_REPATH_MOVE_M
+	var stalled := player.has_method("is_moving") and not bool(player.call("is_moving"))
+	if moved or stalled:
+		_ranged_approach["aimed_at"] = goal
+		_walk_into_range(goal, reach)
+
+
+## A ranged skill aimed out of reach in exploration: walk into range first.
+## True when an approach started (the skill fires on arrival).
+func _approach_for_ability(ability: Ability3D, target: Node3D, point: Variant) -> bool:
+	if combat_state != CombatState.EXPLORATION or ability.is_melee() or ability_runner == null:
+		return false
+	if not ability_runner.block_reason(ability).is_empty():
+		return false
+	var reach := ability_runner.get_range(ability)
+	var goal := _approach_goal(target, point)
+	if GroundMath.ground_distance(player.global_position, goal) <= reach:
+		return false
+	_start_ranged_approach(target, point, reach, _execute_ability.bind(ability, target, point))
+	return true
 
 
 # A throw or a cast is made standing: drop the walk and any melee pursuit.
@@ -2674,6 +2797,8 @@ func _set_player_turn_action(action: PlayerTurnAction) -> void:
 
 
 func _on_turn_attack_button_pressed() -> void:
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
 	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.ATTACK:
@@ -2688,6 +2813,8 @@ func _on_turn_attack_button_pressed() -> void:
 
 
 func _on_turn_ranged_button_pressed() -> void:
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
 	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.RANGED:
@@ -2702,6 +2829,8 @@ func _on_turn_ranged_button_pressed() -> void:
 
 
 func _on_turn_spell_button_pressed(spell_id: StringName) -> void:
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
 	if not _player_can_pick_attack_aim():
 		return
 	if selected_player_turn_action == PlayerTurnAction.SPELL and selected_spell_id == spell_id:
@@ -3117,6 +3246,10 @@ func _setup_gameplay_expansion() -> void:
 		character_screen.set_forge_gate(forge_block_reason)
 		character_screen.visibility_changed_to.connect(_on_character_screen_visibility_changed)
 		if player_3d.get_progression() != null:
+			# The starter cards arrive before the popups are wired: no flood of "Card:".
+			if starter_card_copies > 0:
+				for card in SkillCards3D.CARDS:
+					player_3d.get_progression().add_card(card["id"], starter_card_copies)
 			player_3d.get_progression().card_added.connect(_on_card_added)
 	_connect_chests()
 	_setup_ability_bar()
@@ -3238,6 +3371,9 @@ func _handle_expansion_keys(event: InputEvent) -> bool:
 	if key.physical_keycode == SNEAK_KEY:
 		_toggle_sneak()
 		return true
+	if key.physical_keycode == KEY_ESCAPE and has_ranged_approach():
+		_cancel_ranged_approach(true)
+		return true
 	if key.physical_keycode == KEY_ESCAPE and selected_player_turn_action == PlayerTurnAction.ABILITY:
 		_set_player_turn_action(PlayerTurnAction.MOVE)
 		return true
@@ -3302,6 +3438,8 @@ func _bar_abilities() -> Array[Ability3D]:
 
 
 func _on_ability_button_pressed(ability_id: StringName) -> void:
+	# Picking another action drops a walk into range.
+	_cancel_ranged_approach(true)
 	var ability := _find_ability(ability_id)
 	if ability == null or ability_runner == null:
 		return
@@ -3342,10 +3480,14 @@ func _handle_ability_click(screen_pos: Vector2) -> void:
 		if target == null:
 			_fx_popup(_popup_anchor(player), "Pick an enemy", CombatFx.COLOR_WARNING, 14)
 			return
+		if _approach_for_ability(ability, target, null):
+			return
 		_execute_ability(ability, target, null)
 		return
 	var ground: Variant = _pick_ground(screen_pos)
 	if ground == null:
+		return
+	if _approach_for_ability(ability, null, ground):
 		return
 	_execute_ability(ability, null, ground)
 

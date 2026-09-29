@@ -51,6 +51,7 @@ A skill holds 1 to 5 cards: exactly one kind of type card (in one to three copie
 - A fallen enemy gives a card with a chance of 35 % plus 0.5 % per XP it was worth, at most 85 %. The boss gives 3.
 - While the body owns no type card at all, the next card is always a type card, so the first card found can become a skill.
 - Otherwise a card is rolled by weight: Damage is the most common type and Summon the rarest; elements and modifiers are about equally common.
+- **Testing:** `Main3D.starter_card_copies` (an inspector setting on the level root, default 5) puts every card that many times in the collection at start, so skills can be forged at once. The Wilds spawn is 6 m from the start waystone. Set it to 0 for the real game, where cards only drop; `gameplay_test` sets it to 0.
 
 ### Forging
 

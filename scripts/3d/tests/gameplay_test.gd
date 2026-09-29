@@ -35,6 +35,8 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	Engine.max_fps = HEADLESS_FPS
 	var arena := ARENA.instantiate()
+	# The test counts cards from an empty collection.
+	arena.set("starter_card_copies", 0)
 	var smoke := arena.get_node_or_null("IntegrationSmoke")
 	if smoke != null:
 		arena.remove_child(smoke)
@@ -69,6 +71,7 @@ func _run() -> void:
 		["exploration_refill", _step_exploration_refill],
 		["card_drops", _step_card_drops],
 		["respawn", _step_respawn],
+		["skill_approach", _step_skill_approach],
 	]
 	for entry in steps:
 		_step = String(entry[0])
@@ -559,6 +562,38 @@ func _step_respawn() -> String:
 		return "revived with %d / %d health" % [_player.health, _player.max_health]
 	if _player.collision_layer != 2:
 		return "revived body is on collision layer %d" % _player.collision_layer
+	return ""
+
+
+## Exploration: a ranged card skill aimed beyond its range walks the mage in
+## and fires on arrival (the throw and the spells do the same, detection_test).
+func _step_skill_approach() -> String:
+	if not await _wait_until(func() -> bool: return _main.combat_state == Main3D.CombatState.EXPLORATION, COMBAT_TIMEOUT_SECONDS):
+		return "not in exploration (state %d)" % _main.combat_state
+	var wolf := _alive_wolf_near()
+	if wolf == null:
+		return "no wolf left"
+	_player.snap_to(Vector3(-8.0, 0.0, 0.0))
+	wolf.snap_to(Vector3(6.0, 0.0, 0.0))
+	await get_tree().physics_frame
+	_main._request_shift(int(Soul.Kind.MAGE))
+	_progression.refill_pools()
+	var fireball := _progression.skill_ability(Soul.Kind.MAGE, 0)
+	if not await _wait_until(func() -> bool: return _main.ability_runner.block_reason(fireball).is_empty(), 8.0):
+		return "Fireball is not ready: %s" % _main.ability_runner.block_reason(fireball)
+	_main._on_ability_button_pressed(fireball.id)
+	var mana := _progression.get_pool(Soul.Kind.MAGE)
+	var before := wolf.health
+	if not _main._approach_for_ability(fireball, wolf, null):
+		return "a Fireball 14 m away did not start a walk into range"
+	if not await _wait_until(func() -> bool: return wolf.health < before, 8.0):
+		return "the Fireball never landed (%.2f m from the wolf)" % GroundMath.ground_distance(_player.global_position, wolf.global_position)
+	var distance := GroundMath.ground_distance(_player.global_position, wolf.global_position)
+	if distance > fireball.range_m + 0.1:
+		return "cast from %.2f m, beyond the %.1f m range" % [distance, fireball.range_m]
+	if _progression.get_pool(Soul.Kind.MAGE) > mana - fireball.resource_cost + _progression.pool_regen(Soul.Kind.MAGE):
+		return "the Fireball cost no mana"
+	print("[gameplay] Fireball walked in and cast from %.2f m (range %.1f m)" % [distance, fireball.range_m])
 	return ""
 
 
