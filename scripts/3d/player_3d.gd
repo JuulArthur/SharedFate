@@ -1067,7 +1067,8 @@ func add_experience(amount: int) -> void:
 
 func _on_level_up() -> void:
 	CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_HIGH_M, 0.0), "LEVEL UP!", CombatFx.COLOR_COUNTER, 26)
-	CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_TOP_M, 0.0), "+1 skill point (K)", CombatFx.COLOR_XP, 16)
+	CombatFx.popup_text(global_position + Vector3(0.0, POPUP_HEIGHT_TOP_M, 0.0),
+		"+%d attribute points (K)" % Progression3D.ATTRIBUTE_POINTS_PER_LEVEL, CombatFx.COLOR_XP, 16)
 	_flash_body(Color(2.4, 2.2, 1.4, 1.0), 0.35)
 	CombatFx.shake(4.0, 0.2)
 	if progression != null:
@@ -1874,6 +1875,56 @@ func _update_sneak_visual() -> void:
 			_sneak_ring.hide_ring()
 	if vision_light != null:
 		vision_light.light_energy = _base_light_energy * (SNEAK_LIGHT_ENERGY_MULT if (_sneaking or hidden) else 1.0)
+
+
+# --- Between levels (docs/level-flow.md) ------------------------------------------------
+
+## Everything the body carries to the next level, for RunState3D: level and XP,
+## health, the soul in control, the inventory with what is worn, the buffs and
+## the whole Progression3D (attributes, pools, cards, skills).
+func get_run_state() -> Dictionary:
+	var state := {
+		"level": player_level,
+		"xp": experience_points,
+		"health": health,
+		"soul": int(active_soul.kind) if active_soul != null else int(Soul.Kind.KNIGHT),
+		"buffs": _buffs.duplicate(true),
+	}
+	if inventory != null:
+		state["items"] = inventory.items.duplicate()
+		state["equipment"] = inventory.equipment.duplicate()
+	if progression != null:
+		state["progression"] = progression.to_state()
+	return state
+
+
+## Puts back what `get_run_state` returned, on a body that has just been
+## placed in a new level (outside a fight).
+func apply_run_state(state: Dictionary) -> void:
+	if state.is_empty():
+		return
+	player_level = maxi(1, int(state.get("level", player_level)))
+	experience_points = float(state.get("xp", experience_points))
+	if progression != null:
+		progression.from_state(state.get("progression", {}))
+		progression.set_level(player_level)
+	_apply_progression_stats()
+	if inventory != null and state.has("items"):
+		for item in inventory.items.duplicate():
+			inventory.remove_item(item)
+		for item in state["items"]:
+			inventory.add_item(item as Item)
+		var equipment: Dictionary = state.get("equipment", {})
+		for slot in equipment:
+			inventory.equip(equipment[slot] as Item)
+	health = clampi(int(state.get("health", health)), 1, max_health)
+	_buffs = (state.get("buffs", {}) as Dictionary).duplicate(true)
+	var kind := int(state.get("soul", int(Soul.Kind.KNIGHT)))
+	if active_soul == null or int(active_soul.kind) != kind:
+		shift_to(kind)
+	_update_health_bar()
+	_update_xp_bar()
+	_update_level_label()
 
 
 # --- Teleport and revive (gameplay expansion) -------------------------------------------

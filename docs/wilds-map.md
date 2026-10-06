@@ -10,7 +10,7 @@ Ground coordinates are (x, z) in metres; north is -z, east is +x. The open groun
 
 | Area | Centre | Radius | Contents |
 | --- | --- | --- | --- |
-| Start glade (SW) | (-34, 34) | 11 m | `Spawn_default` (-36, 38); waystone `start` (-42, 38), attuned from the start; chest (-28, 40): potion plus one random item; two lone wolves, (-30, 27) wandering 3 m and (-39.5, 26); a line of four visible spike traps at z = 31, x = -36.5 to -32 |
+| Start glade (SW) | (-34, 34) | 11 m | `Spawn_default` (-36, 38); waystone `start` (-42, 38), attuned from the start; chest (-28, 40): potion plus one random item; two lone wolves, (-30, 27) wandering 3 m and (-39.5, 26); a line of four visible spike traps at z = 31, x = -36.5 to -32; the exit to the Hollow Road (-31, 43) and its arrival point `Entry_from_road` (-33.5, 38.5), see `docs/level-flow.md` |
 | Wolf den (W) | (-32, -10) | 11 m | dire wolf (-32, -12), wolves (-35, -10.5), (-29, -10) wandering 2 m, (-33, -15); five bush zones around the edge and tall grass in the south mouth; blue light |
 | Bandit camp (centre) | (6, 12) | 12 m | campfire at the centre (flickering light); bandits (4.5, 9.5) wandering 1.5 m, (9, 11.5), (6, 15); cultist (2.5, 12.5); explosive barrels (3.2, 8.2) + (2.3, 9.0) (a chaining pair), (10.4, 12.8), (7.4, 16.2); two tents, four crates; chest (13, 17.5): gear plus two; waystone `camp` (-1.5, 17.5); two tall-grass zones |
 | Old ruins (N) | (-2, -30) | 12 m | brutes (-2, -30), (1.5, -28.5); cultists (-3.5, -33), (1, -33); four broken walls and six pillars (line-of-sight blockers); hidden traps at the south entrance (1, -19), (-1.5, -20.5), the west entrance (-12.5, -27.2) and in front of the chest (5.2, -35.2); chest (6, -36.5): gear and a potion; teal lights |
